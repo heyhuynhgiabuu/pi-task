@@ -19,16 +19,14 @@ Delegating task/subagent extension for [Pi](https://pi.dev). It adds a `task` to
 ## Install
 
 ```bash
-npm install -g @heyhuynhgiabuu/pi-task
+pi install npm:@heyhuynhgiabuu/pi-task
 ```
 
-Then add the extension to your Pi extension config using the package name:
+Latest release: https://github.com/heyhuynhgiabuu/pi-task/releases/latest
 
-```json
-{
-  "extensions": ["@heyhuynhgiabuu/pi-task"]
-}
-```
+Or load locally:
+
+`pi -e ./src/index.ts`
 
 Restart Pi after installing or changing extension config.
 

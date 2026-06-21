@@ -4,6 +4,28 @@ All notable changes to `@heyhuynhgiabuu/pi-task` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.3] — 2026-06-21
+
+### Fixed
+
+- Replaced tmux task startup via `send-keys` with direct
+  `split-window <command>` execution so long, quoted `pi ...` launch
+  commands are not truncated or interrupted by terminal input buffering.
+- Hardened tmux steering/follow-up text injection by using tmux buffers
+  (`load-buffer` + `paste-buffer`) instead of typing long text via
+  `send-keys`.
+
+### Verified
+
+- `npm test` passes
+- `npm run typecheck` passes
+- `npm run build` passes
+- `npm run smoke` passes
+- Long task-tool tmux launch stress test passed with quotes, backticks,
+  shell expansions, redirects, newlines, unicode, and long prompt text.
+
+[0.1.3]: https://github.com/heyhuynhgiabuu/pi-task/releases/tag/v0.1.3
+
 ## [0.1.2] — 2025
 
 ### Fixed

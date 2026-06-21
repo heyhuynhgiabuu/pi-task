@@ -188,11 +188,11 @@ export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
-export function buildTmuxSendKeysArgs(
-  paneId: string,
+export function buildTmuxSplitWindowArgs(
+  cwd: string,
   command: string,
 ): string[] {
-  return ["send-keys", "-t", paneId, command, "Enter"];
+  return ["split-window", "-h", "-P", "-F", "#{pane_id}", "-c", cwd, command];
 }
 
 export interface BackgroundReceiptInput {

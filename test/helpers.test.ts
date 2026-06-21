@@ -14,7 +14,7 @@ import {
   formatMs,
   parseIdTimestamp,
   shellQuote,
-  buildTmuxSendKeysArgs,
+  buildTmuxSplitWindowArgs,
   formatBackgroundReceipt,
   TASK_BACKGROUND_DEFAULT,
   TASK_RESULT_XML_INSTRUCTIONS,
@@ -866,11 +866,20 @@ import {
 // ─── Task tool hardening contracts ───────────────────────────────────────────
 
 {
-  const t = "buildTmuxSendKeysArgs keeps task command as one raw tmux argument";
+  const t = "buildTmuxSplitWindowArgs starts task command directly, without send-keys";
   const command = "cd '/tmp/safe path' && echo $(must-not-run) && echo `nope`";
   assert.deepEqual(
-    buildTmuxSendKeysArgs("session:1.2", command),
-    ["send-keys", "-t", "session:1.2", command, "Enter"],
+    buildTmuxSplitWindowArgs("/tmp/safe path", command),
+    [
+      "split-window",
+      "-h",
+      "-P",
+      "-F",
+      "#{pane_id}",
+      "-c",
+      "/tmp/safe path",
+      command,
+    ],
     t,
   );
 }

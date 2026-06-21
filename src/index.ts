@@ -33,7 +33,7 @@ import {
   TASK_BACKGROUND_DEFAULT,
   TASK_RESULT_XML_INSTRUCTIONS,
   TASK_TOOL_DESCRIPTION,
-  buildTmuxSendKeysArgs,
+  buildTmuxSplitWindowArgs,
   formatBackgroundReceipt,
   buildPiArgs,
   parseResultXml,
@@ -167,18 +167,7 @@ function splitWindowPane(
   command: string,
 ): { paneId: string; originalPane: string | null } {
   const originalPane = getCurrentPaneId();
-  const paneId = tmuxCmd([
-    "split-window",
-    "-h",
-    "-P",
-    "-F",
-    "#{pane_id}",
-    "-c",
-    cwd,
-  ]);
-  execFileSync("tmux", buildTmuxSendKeysArgs(paneId, command), {
-    stdio: "ignore",
-  });
+  const paneId = tmuxCmd(buildTmuxSplitWindowArgs(cwd, command));
   return { paneId, originalPane };
 }
 

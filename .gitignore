@@ -5,3 +5,5 @@ dist/
 .env
 .pi/
 artifacts/
+# Local Pi runtime state
+.atl/

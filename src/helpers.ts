@@ -11,7 +11,6 @@ import { parseToolList } from "./agent-tools.js";
 import { parseMergedDisallowedTools } from "./policy.js";
 import { buildPiArgv } from "./subagent/buildArgv.js";
 
-
 export function parseMarkdownFrontmatter(content: string): {
   frontmatter: Record<string, string>;
   body: string;
@@ -86,8 +85,6 @@ export const TASK_RESULT_XML_INSTRUCTIONS = `<status>success|failure|blocked|par
 <files>Comma-separated absolute paths of files read/created (optional)</files>
 
 Prefer writing this block to RESULT.md when done. If you cannot write the file, your final assistant message MUST include the same XML block.`;
-
-export const OUTPUT_FORMAT_GUIDE = TASK_RESULT_XML_INSTRUCTIONS;
 
 export const TASK_TOOL_DESCRIPTION = `Launch a new agent to handle complex, multistep tasks autonomously.
 
@@ -186,13 +183,6 @@ export function parseIdTimestamp(id: string): number {
 
 export function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'"'"'`)}'`;
-}
-
-export function buildTmuxSendKeysArgs(
-  paneId: string,
-  command: string,
-): string[] {
-  return ["send-keys", "-t", paneId, command, "Enter"];
 }
 
 export interface BackgroundReceiptInput {

@@ -1,5 +1,5 @@
 /**
- * Tmux helpers for subagent panes (shared by task extension).
+ * Tmux helpers for subagent panes (shared by task extension + completion poll).
  */
 
 import { execFileSync } from "node:child_process";
@@ -7,13 +7,13 @@ import { execFileSync } from "node:child_process";
 export function tmuxCmd(args: string[]): string {
   return execFileSync("tmux", args, {
     encoding: "utf-8",
-    stdio: ["pipe", "pipe", "pipe"],
+    stdio: ["ignore", "pipe", "pipe"],
   }).trim();
 }
 
 export function hasTmux(): boolean {
   try {
-    execFileSync("tmux", ["-V"], { stdio: "pipe" });
+    execFileSync("tmux", ["-V"], { stdio: "ignore" });
     return true;
   } catch {
     return false;
@@ -22,8 +22,9 @@ export function hasTmux(): boolean {
 
 export function paneExists(paneId: string): boolean {
   try {
-    const out = tmuxCmd(["list-panes", "-a", "-F", "#{pane_id}"]);
-    return out.split("\n").includes(paneId);
+    return tmuxCmd(["list-panes", "-a", "-F", "#{pane_id}"])
+      .split("\n")
+      .includes(paneId);
   } catch {
     return false;
   }
@@ -42,6 +43,10 @@ export function splitWindowPane(
   command: string,
 ): { paneId: string; originalPane: string | null } {
   const originalPane = getCurrentPaneId();
+  // Pass the command directly to split-window. tmux waits for the new shell
+  // to be ready before executing it, avoiding the send-keys race where the
+  // shell processes an incomplete line because Enter arrives before all
+  // characters have been typed.
   const paneId = tmuxCmd([
     "split-window",
     "-h",
@@ -55,14 +60,22 @@ export function splitWindowPane(
   return { paneId, originalPane };
 }
 
+/**
+ * Kill the subagent pane and restore focus to the original pane.
+ *
+ * Guards the kill with paneExists so a stale/recycled pane id cannot target
+ * the wrong pane, and tolerates an undefined paneId (e.g. SDK path).
+ */
 export function killAgentPane(
-  paneId: string,
+  paneId: string | undefined,
   originalPane: string | null,
 ): void {
-  try {
-    tmuxCmd(["kill-pane", "-t", paneId]);
-  } catch {
-    /* already dead */
+  if (paneId) {
+    try {
+      if (paneExists(paneId)) tmuxCmd(["kill-pane", "-t", paneId]);
+    } catch {
+      /* ignore */
+    }
   }
   if (originalPane) {
     try {
@@ -71,11 +84,4 @@ export function killAgentPane(
       /* ignore */
     }
   }
-}
-
-/** Inject keys into a running subagent pane (steer / follow-up). */
-export function tmuxSteerPane(paneId: string, message: string): void {
-  const escaped = message.replace(/'/g, `'\"'\"'`);
-  tmuxCmd(["send-keys", "-t", paneId, "-l", escaped]);
-  tmuxCmd(["send-keys", "-t", paneId, "Enter"]);
 }

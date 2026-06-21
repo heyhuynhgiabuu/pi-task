@@ -18,7 +18,6 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 
-import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,7 +32,6 @@ import {
   TASK_BACKGROUND_DEFAULT,
   TASK_RESULT_XML_INSTRUCTIONS,
   TASK_TOOL_DESCRIPTION,
-  buildTmuxSendKeysArgs,
   formatBackgroundReceipt,
   buildPiArgs,
   parseResultXml,
@@ -46,7 +44,14 @@ import {
 } from "./helpers.js";
 import { runSdkSubagent } from "./subagent/runSdk.js";
 import {
+  hasTmux,
+  killAgentPane,
+  paneExists,
+  splitWindowPane,
+} from "./subagent/tmux.js";
+import {
   checkTaskCompletion,
+  resolveSessionDir,
   waitForTaskCompletion as waitForSessionTaskCompletion,
 } from "./subagent/waitCompletion.js";
 import { buildAgentToolSelection } from "./agent-tools.js";
@@ -95,7 +100,7 @@ interface TaskDetails {
   task_id: string;
   agent_type: string;
   description: string;
-  phase: "done" | "timeout" | "aborted" | "failed";
+  phase: "done" | "timeout" | "cancelled" | "failed";
   // Completed phase
   status?: string;
   summary?: string;
@@ -115,7 +120,8 @@ interface TaskDetails {
 function readRegistry(piDir: string): RegistryEntry[] {
   const path = join(piDir, "task-registry.json");
   try {
-    return JSON.parse(readFileSync(path, "utf-8"));
+    const parsed = JSON.parse(readFileSync(path, "utf-8"));
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
   }
@@ -124,82 +130,6 @@ function readRegistry(piDir: string): RegistryEntry[] {
 function writeRegistry(piDir: string, entries: RegistryEntry[]): void {
   const path = join(piDir, "task-registry.json");
   writeFileSync(path, JSON.stringify(entries, null, 2), "utf-8");
-}
-
-// ─── Tmux Helpers ────────────────────────────────────────────────────────────
-
-function tmuxCmd(args: string[]): string {
-  return execFileSync("tmux", args, {
-    encoding: "utf-8",
-    stdio: ["ignore", "pipe", "pipe"],
-  }).trim();
-}
-
-function hasTmux(): boolean {
-  try {
-    execFileSync("tmux", ["-V"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function paneExists(paneId: string): boolean {
-  try {
-    return tmuxCmd(["list-panes", "-a", "-F", "#{pane_id}"])
-      .split("\n")
-      .includes(paneId);
-  } catch {
-    return false;
-  }
-}
-
-function getCurrentPaneId(): string | null {
-  try {
-    return tmuxCmd(["display-message", "-p", "#{pane_id}"]);
-  } catch {
-    return null;
-  }
-}
-
-function splitWindowPane(
-  cwd: string,
-  command: string,
-): { paneId: string; originalPane: string | null } {
-  const originalPane = getCurrentPaneId();
-  const paneId = tmuxCmd([
-    "split-window",
-    "-h",
-    "-P",
-    "-F",
-    "#{pane_id}",
-    "-c",
-    cwd,
-  ]);
-  execFileSync("tmux", buildTmuxSendKeysArgs(paneId, command), {
-    stdio: "ignore",
-  });
-  return { paneId, originalPane };
-}
-
-function killAgentPane(
-  paneId: string | undefined,
-  originalPane: string | null,
-): void {
-  if (paneId) {
-    try {
-      if (paneExists(paneId)) tmuxCmd(["kill-pane", "-t", paneId]);
-    } catch {
-      /* ignore */
-    }
-  }
-  if (originalPane) {
-    try {
-      tmuxCmd(["select-pane", "-t", originalPane]);
-    } catch {
-      /* ignore */
-    }
-  }
 }
 
 // ─── Process a completed task (sendMessage + registry cleanup) ──────────────
@@ -364,9 +294,6 @@ export default function (pi: ExtensionAPI) {
   const TREE_LAST = "\u2514\u2500"; // └─
 
   function c(color: string, text: string): string {
-    // widgetTheme is a Theme object with a .fg(color, text) method,
-    // not a callable. Calling it as a function throws "widgetTheme is not
-    // a function" which the outer try/catch in renderWidget swallows.
     return widgetTheme ? widgetTheme.fg(color, text) : text;
   }
 
@@ -517,8 +444,7 @@ export default function (pi: ExtensionAPI) {
 
       const snapshot = await checkTaskCompletion({
         resultPath: join(task.dir, "RESULT.md"),
-        sessionDir: task.dir,
-        sessionName: task.sessionName,
+        sessionDir: resolveSessionDir(task.dir),
         paneId: task.paneId,
       });
 
@@ -789,7 +715,7 @@ export default function (pi: ExtensionAPI) {
         TASK_RESULT_XML_INSTRUCTIONS,
       ].join("\n");
 
-      const sessionDir = join(artifactDir, "sessions");
+      const sessionDir = resolveSessionDir(artifactDir);
       await mkdir(sessionDir, { recursive: true });
 
       // ─── Build and run the sub-agent pi process ──────────────────────────
@@ -977,10 +903,9 @@ export default function (pi: ExtensionAPI) {
         const completion = await waitForSessionTaskCompletion({
           resultPath,
           sessionDir,
-          sessionName,
           paneId,
           signal,
-          timeoutMs: 30 * 60 * 1000,
+          timeoutMs: TASK_TIMEOUT_MS,
         });
         const content = completion.content;
         const phase =
@@ -1132,7 +1057,7 @@ export default function (pi: ExtensionAPI) {
 
       if (
         d.phase === "timeout" ||
-        d.phase === "aborted" ||
+        d.phase === "cancelled" ||
         d.phase === "failed"
       ) {
         const line =

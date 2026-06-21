@@ -14,7 +14,6 @@ import {
   formatMs,
   parseIdTimestamp,
   shellQuote,
-  buildTmuxSendKeysArgs,
   formatBackgroundReceipt,
   TASK_BACKGROUND_DEFAULT,
   TASK_RESULT_XML_INSTRUCTIONS,
@@ -28,6 +27,11 @@ import {
   formatAgentList,
   type AgentConfig,
 } from "../src/helpers.js";
+import {
+  getLastAssistantTextFromSessionDir,
+  getSessionTerminalState,
+} from "../src/session-text.js";
+import { checkTaskCompletion, resolveSessionDir } from "../src/subagent/waitCompletion.js";
 
 // ─── extractTag ──────────────────────────────────────────────────────────────
 
@@ -866,12 +870,26 @@ import {
 // ─── Task tool hardening contracts ───────────────────────────────────────────
 
 {
-  const t = "buildTmuxSendKeysArgs keeps task command as one raw tmux argument";
+  const t =
+    "shellQuote preserves embedded single quotes and backticks verbatim";
+  // The local splitWindowPane passes the whole shell line through split-window,
+  // so the parent must quote agent paths/args with embedded ' and ` such that
+  // the spawned shell sees the original characters as one literal argument.
   const command = "cd '/tmp/safe path' && echo $(must-not-run) && echo `nope`";
-  assert.deepEqual(
-    buildTmuxSendKeysArgs("session:1.2", command),
-    ["send-keys", "-t", "session:1.2", command, "Enter"],
-    t,
+  assert.equal(
+    shellQuote("/tmp/safe path"),
+    "'/tmp/safe path'",
+    `${t} (plain path)`,
+  );
+  assert.equal(
+    shellQuote("it's tricky"),
+    "'it'\"'\"'s tricky'",
+    `${t} (escaped quote)`,
+  );
+  assert.equal(
+    shellQuote(command),
+    "'cd '\"'\"'/tmp/safe path'\"'\"' && echo $(must-not-run) && echo `nope`'",
+    `${t} (full command)`,
   );
 }
 
@@ -915,6 +933,54 @@ import {
 }
 
 {
+  const t =
+    "getSessionTerminalState treats local synthesis (no stopReason) as stopped";
+  // pi appends a final assistant message locally after a tool result, with
+  // no stopReason and no api field. That is the common "subagent is done"
+  // shape and must be treated as "stopped" so the parent can return.
+  const root = mkdtempSync(join(tmpdir(), "pi-task-state-local-"));
+  try {
+    const dir = join(root, "sessions");
+    mkdirSync(dir, { recursive: true });
+    writeJsonl(dir, "s1.jsonl", [
+      {
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Done." }],
+        },
+        // no stopReason, no api
+      },
+    ]);
+    const local = getSessionTerminalState(dir);
+    assert.equal(local.state, "stopped", `${t}: local synthesis is stopped`);
+    assert.equal(
+      local.stopReason,
+      null,
+      `${t}: local synthesis has no stopReason`,
+    );
+
+    // stopReason=length maps to errored so the parent can surface the failure.
+    writeJsonl(dir, "s2.jsonl", [
+      assistantMessage("length", "context too long"),
+    ]);
+    const lengthInfo = getSessionTerminalState(dir);
+    assert.equal(
+      lengthInfo.state,
+      "errored",
+      `${t}: stopReason=length is errored`,
+    );
+    assert.equal(
+      lengthInfo.stopReason,
+      "length",
+      `${t}: stopReason=length surfaces the raw value`,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
   const t = "XML instructions preserve the required task result tags";
   for (const tag of ["status", "summary", "findings", "evidence", "files"]) {
     assert.ok(
@@ -926,6 +992,278 @@ import {
       `${t}: has closing ${tag}`,
     );
   }
+}
+
+// ─── Session terminal state + completion detection contracts ───────────────
+
+function writeJsonl(dir: string, name: string, lines: object[]): void {
+  mkdirSync(dir, { recursive: true });
+  const path = join(dir, name);
+  const body = lines.map((l) => JSON.stringify(l)).join("\n") + "\n";
+  writeFileSync(path, body, "utf-8");
+}
+
+function assistantMessage(stopReason: string, text: string): object {
+  return {
+    type: "message",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text }],
+      stopReason,
+    },
+  };
+}
+
+{
+  const root = mkdtempSync(join(tmpdir(), "pi-task-state-"));
+  try {
+    const dir = join(root, "sessions");
+
+    // No directory yet.
+    let info = getSessionTerminalState(dir);
+    assert.equal(info.state, "unknown", "missing dir is unknown");
+    assert.equal(info.stopReason, null, "missing dir has no stopReason");
+
+    // Empty directory.
+    mkdirSync(dir, { recursive: true });
+    info = getSessionTerminalState(dir);
+    assert.equal(info.state, "unknown", "empty dir is unknown");
+    assert.equal(info.stopReason, null, "empty dir has no stopReason");
+
+    // No assistant message yet (only setup entries).
+    writeJsonl(dir, "2026-06-21T00-00-00.jsonl", [
+      { type: "session", id: "x" },
+      { type: "session_info", id: "y" },
+    ]);
+    info = getSessionTerminalState(dir);
+    assert.equal(info.state, "unknown", "only setup entries is unknown");
+    assert.equal(info.stopReason, null, "setup-only has no stopReason");
+
+    // Assistant mid-turn: toolUse.
+    writeJsonl(dir, "2026-06-21T00-00-01.jsonl", [
+      assistantMessage("toolUse", "thinking..."),
+    ]);
+    info = getSessionTerminalState(dir);
+    assert.equal(info.state, "running", "toolUse means still running");
+    assert.equal(
+      info.stopReason,
+      "toolUse",
+      "toolUse surfaces the raw stopReason",
+    );
+
+    // Assistant finished cleanly.
+    writeJsonl(dir, "2026-06-21T00-00-02.jsonl", [
+      assistantMessage("stop", "Done. <episode>...</episode>"),
+    ]);
+    info = getSessionTerminalState(dir);
+    assert.equal(info.state, "stopped", "stop means finished");
+    assert.equal(info.stopReason, "stop", "stop surfaces the raw stopReason");
+
+    // Assistant hit a non-tool error.
+    writeJsonl(dir, "2026-06-21T00-00-03.jsonl", [
+      assistantMessage("error", "boom"),
+    ]);
+    info = getSessionTerminalState(dir);
+    assert.equal(info.state, "errored", "error means errored");
+    assert.equal(
+      info.stopReason,
+      "error",
+      "error surfaces the raw stopReason",
+    );
+
+    // Trailing lines after the last assistant turn must not affect state.
+    writeJsonl(dir, "2026-06-21T00-00-04.jsonl", [
+      assistantMessage("stop", "final"),
+      { type: "noise", after: true },
+    ]);
+    info = getSessionTerminalState(dir);
+    assert.equal(
+      info.state,
+      "stopped",
+      "non-message lines after stop do not flip state",
+    );
+    assert.equal(
+      info.stopReason,
+      "stop",
+      "trailing noise does not change the surfaced stopReason",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const t =
+    "checkTaskCompletion returns completed when session stopped even if pane is alive";
+  const root = mkdtempSync(join(tmpdir(), "pi-task-completion-"));
+  try {
+    const sessionDir = join(root, "sessions");
+    mkdirSync(sessionDir, { recursive: true });
+    writeJsonl(sessionDir, "s1.jsonl", [
+      assistantMessage("stop", "<episode>ok</episode>"),
+    ]);
+    const resultPath = join(root, "RESULT.md"); // intentionally missing
+    const snapshot = await checkTaskCompletion({
+      resultPath,
+      sessionDir,
+      paneId: "%99", // pretend a live pane
+    });
+    assert.equal(snapshot.status, "completed", `${t}: status`);
+    assert.equal(
+      snapshot.source,
+      "session-jsonl",
+      `${t}: source is session-jsonl`,
+    );
+    assert.ok(
+      snapshot.content.includes("<episode>ok</episode>"),
+      `${t}: content is the assistant text`,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const t =
+    "checkTaskCompletion returns failed when session errored without RESULT.md";
+  const root = mkdtempSync(join(tmpdir(), "pi-task-completion-err-"));
+  try {
+    const sessionDir = join(root, "sessions");
+    mkdirSync(sessionDir, { recursive: true });
+    writeJsonl(sessionDir, "s1.jsonl", [
+      assistantMessage("error", "rate limit hit"),
+    ]);
+    const snapshot = await checkTaskCompletion({
+      resultPath: join(root, "RESULT.md"),
+      sessionDir,
+      paneId: "%99",
+    });
+    assert.equal(snapshot.status, "failed", `${t}: status`);
+    assert.ok(
+      snapshot.content.includes("rate limit hit"),
+      `${t}: content is the assistant text`,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const t =
+    "checkTaskCompletion diagnostic names the real stopReason when session errored with no text";
+  const root = mkdtempSync(join(tmpdir(), "pi-task-completion-err-diagnostic-"));
+  try {
+    const sessionDir = join(root, "sessions");
+    mkdirSync(sessionDir, { recursive: true });
+    // stopReason "error" with no text content → readSessionText returns
+    // null → fallback diagnostic must name the real stopReason, not the
+    // terminal-state name.
+    writeJsonl(sessionDir, "s1.jsonl", [
+      {
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [],
+          stopReason: "error",
+        },
+      },
+    ]);
+    const snapshot = await checkTaskCompletion({
+      resultPath: join(root, "RESULT.md"),
+      sessionDir,
+      paneId: "%99",
+    });
+    assert.equal(snapshot.status, "failed", `${t}: status`);
+    assert.equal(snapshot.source, "session-jsonl", `${t}: source`);
+    assert.ok(
+      snapshot.content.includes("stopReason: error"),
+      `${t}: diagnostic names the real stopReason`,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const t =
+    "checkTaskCompletion returns running while pane is alive and session is mid toolUse";
+  // Pane aliveness is dependency-injected so this branch is exercisable
+  // on every CI, not just machines with a tmux server on PATH.
+  const root = mkdtempSync(join(tmpdir(), "pi-task-completion-mid-"));
+  try {
+    const sessionDir = join(root, "sessions");
+    mkdirSync(sessionDir, { recursive: true });
+    writeJsonl(sessionDir, "s1.jsonl", [
+      assistantMessage("toolUse", "calling read..."),
+    ]);
+    const snapshot = await checkTaskCompletion({
+      resultPath: join(root, "RESULT.md"),
+      sessionDir,
+      paneId: "%99", // arbitrary: the injected paneExists ignores the id
+      paneExists: () => true,
+    });
+    assert.equal(snapshot.status, "running", `${t}: status`);
+    assert.equal(snapshot.source, "pane", `${t}: source`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const t =
+    "checkTaskCompletion prefers RESULT.md over session jsonl when both exist";
+  const root = mkdtempSync(join(tmpdir(), "pi-task-completion-both-"));
+  try {
+    const sessionDir = join(root, "sessions");
+    mkdirSync(sessionDir, { recursive: true });
+    writeJsonl(sessionDir, "s1.jsonl", [
+      assistantMessage("stop", "from session"),
+    ]);
+    const resultPath = join(root, "RESULT.md");
+    writeFileSync(resultPath, "from RESULT.md\n", "utf-8");
+    const snapshot = await checkTaskCompletion({
+      resultPath,
+      sessionDir,
+      paneId: "%99",
+    });
+    assert.equal(snapshot.status, "completed", `${t}: status`);
+    assert.equal(snapshot.source, "result-file", `${t}: result-file wins`);
+    assert.equal(
+      snapshot.content,
+      "from RESULT.md",
+      `${t}: content is RESULT.md`,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const t =
+    "getLastAssistantTextFromSessionDir reads the same dir the helper fixes pointed at";
+  // Regression: the readSessionText path used to be <sessionDir>/sessions/<name>;
+  // ensure the helper itself still reads <sessionDir> directly.
+  const root = mkdtempSync(join(tmpdir(), "pi-task-read-"));
+  try {
+    const sessionDir = join(root, "sessions");
+    mkdirSync(sessionDir, { recursive: true });
+    writeJsonl(sessionDir, "abc.jsonl", [
+      assistantMessage("stop", "hello from session"),
+    ]);
+    const text = getLastAssistantTextFromSessionDir(sessionDir);
+    assert.equal(text, "hello from session", t);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const t = "resolveSessionDir joins the sessions segment to the task dir";
+  assert.equal(
+    resolveSessionDir("/tmp/.pi/tasks/task-123"),
+    join("/tmp/.pi/tasks/task-123", "sessions"),
+    t,
+  );
 }
 
 console.log("ALL TASK HELPER TESTS PASSED");

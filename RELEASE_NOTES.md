@@ -2,6 +2,36 @@
 
 Human-readable release log for `@heyhuynhgiabuu/pi-task`.
 
+## 0.1.2 — 2025
+
+### Fixed
+
+- **Missing `pi.extensions` field in `package.json`.** Without it, the
+  package was installed into `.pi/npm/node_modules/` by `pi install`
+  but pi's package loader didn't recognize it as an extension, so the
+  `task` tool was never registered. The previous fix (moving deps to
+  `dependencies`) made the package loadable, but the package also
+  needed to declare itself as a pi extension.
+
+  Added:
+
+  ```json
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  }
+  ```
+
+### What you need to do
+
+After this version is installed, the `task` tool becomes available to
+the LLM in pi. Verify by:
+
+1. Start pi
+2. The status bar / extension list shows `@heyhuynhgiabuu/pi-task`
+3. The LLM can call the `task` tool
+
 ## 0.1.1 — 2025
 
 ### Fixed
@@ -14,36 +44,6 @@ Human-readable release log for `@heyhuynhgiabuu/pi-task`.
   default used by `pi install`), peer deps are recorded but not
   installed into the package's own `node_modules`. They are now
   declared in `dependencies` and pinned to `^0.79.0`.
-
-### What you need to do
-
-Nothing. The next `pi install` (or upgrade) picks up 0.1.1
-automatically. If you pinned a specific version, run:
-
-```bash
-pi install @heyhuynhgiabuu/pi-task@0.1.1
-```
-
-To verify it's working, start pi and look for the
-`@heyhuynhgiabuu/pi-task` line in the extension list. There should be
-no `Cannot find package` error, and the new `task_*` tools should be
-available to the LLM.
-
-### Compatibility
-
-- pi SDK: `>= 0.79.0` (uses the new `@earendil-works/pi-coding-agent`
-  scope)
-- pi TUI: `>= 0.79.0` (uses `@earendil-works/pi-tui`)
-- Node: `>= 20`
-
-### Verified
-
-- `npm run build` succeeds
-- `npm test` 1/1 pass
-- `tsc --noEmit` clean
-- `dist/index.js` references `@earendil-works/pi-tui`
-
----
 
 ## 0.1.0
 

@@ -4,6 +4,35 @@ All notable changes to `@heyhuynhgiabuu/pi-task` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.2] — 2025
+
+### Fixed
+
+- **Missing `pi.extensions` field in `package.json`.** Without it,
+  the package was installed by `pi install` but pi's package loader
+  didn't recognize it as an extension, so the `task` tool was never
+  registered.
+
+  Added:
+
+  ```json
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  }
+  ```
+
+### Verified
+
+- `npm run build` succeeds
+- `npm test` 1/1 pass
+- `tsc --noEmit` clean
+- `npm view @heyhuynhgiabuu/pi-task@0.1.2 pi` returns
+  `{ extensions: [ './dist/index.js' ] }`
+
+[0.1.2]: https://github.com/buddingnewinsights/pi-task/releases/tag/v0.1.2
+
 ## [0.1.1] — 2025
 
 ### Fixed

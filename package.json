@@ -1,10 +1,15 @@
 {
   "name": "@heyhuynhgiabuu/pi-task",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Delegating task/subagent extension for Pi: foreground/background subagents, widgets, tmux observability, SDK fallback.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",

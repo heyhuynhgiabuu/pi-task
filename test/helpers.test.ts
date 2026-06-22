@@ -877,7 +877,8 @@ import {
 }
 
 {
-  const t = "buildTmuxSplitWindowArgs starts task command directly, without send-keys";
+  const t =
+    "buildTmuxSplitWindowArgs starts task command directly, without send-keys";
   const command = "cd '/tmp/safe path' && echo $(must-not-run) && echo `nope`";
   assert.deepEqual(
     buildTmuxSplitWindowArgs("/tmp/safe path", command, "-v"),
@@ -969,3 +970,41 @@ import {
 }
 
 console.log("ALL TASK HELPER TESTS PASSED");
+
+    {
+      const { taskArtifactName, taskIdFromArtifactName } =
+        await import("../src/conversation.js");
+      assert.equal(taskArtifactName("abc123"), "task-abc123");
+      assert.equal(taskArtifactName("task-abc123"), "task-abc123");
+      assert.equal(taskIdFromArtifactName("task-abc123"), "abc123");
+    }
+
+    {
+      const { normalizeConversationId } = await import("../src/conversation.js");
+      assert.equal(normalizeConversationId(" research-ai "), "research-ai");
+      assert.equal(normalizeConversationId(undefined), undefined);
+      assert.throws(
+        () => normalizeConversationId("research/ai"),
+        /conversation_id/,
+      );
+    }
+
+    {
+      const { buildSessionCard } = await import("../src/conversation.js");
+      const card = buildSessionCard({
+
+    conversation_id: "research-ai",
+    task_id: "abc123",
+    artifact: "task-abc123",
+    agent_type: "scout",
+    session_dir: ".pi/artifacts/task-abc123/sessions",
+    session_name: "task-abc123",
+    created_at: "2026-06-22T00:00:00.000Z",
+    last_used_at: "2026-06-22T01:00:00.000Z",
+    last_prompt: "Continue the research.",
+  });
+
+  assert.match(card, /# research-ai/);
+  assert.match(card, /Agent: scout/);
+  assert.match(card, /"conversation_id": "research-ai"/);
+}

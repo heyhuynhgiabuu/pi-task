@@ -45,7 +45,7 @@ Foreground task:
 
 Background task:
 
-```json
+```
 {
   "agent_type": "scout",
   "description": "Research SDK docs",
@@ -53,6 +53,33 @@ Background task:
   "prompt": "Research the latest Pi SDK extension APIs. Cite official docs."
 }
 ```
+
+Durable specialist conversation:
+
+```
+{
+  "agent_type": "scout",
+  "conversation_id": "research-ai",
+  "description": "Ask research assistant",
+  "background": false,
+  "prompt": "Continue our prior research thread. What did we conclude about retrieval evaluation?"
+}
+```
+
+`conversation_id` maps to one existing `task-<id>` artifact under `.pi/artifacts/` and reuses its `sessions/` directory on later calls. This is for scoped specialist memory, e.g. a reusable research assistant. Use `/task-sessions` to list known durable conversations.
+
+Stored files:
+
+```
+.pi/artifacts/task-registry.json
+.pi/artifacts/task-<id>/CONTEXT.md
+.pi/artifacts/task-<id>/RESULT.md
+.pi/artifacts/task-<id>/SESSION.md
+.pi/artifacts/task-<id>/metadata.json
+.pi/artifacts/task-<id>/sessions/
+```
+
+Note: true conversation resume requires the tmux/CLI backend so Pi can reopen the saved subagent session. SDK fallback can run one-shot tasks, but it cannot resume a prior Pi session.
 
 ## Agent precedence
 

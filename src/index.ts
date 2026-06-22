@@ -23,6 +23,18 @@ import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "@sinclair/typebox";
+
+import {
+  getArtifactsDir,
+  normalizeConversationId,
+  readConversationMetadata,
+  readConversationRegistry,
+  renderConversationSessions,
+  taskArtifactName,
+  taskIdFromArtifactName,
+  writeConversationArtifacts,
+  writeConversationRegistry,
+} from "./conversation.js";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -75,6 +87,7 @@ interface BackgroundTask {
   startedAt: number;
   toolUses: number;
   turns: number;
+  conversationId?: string;
   /** Most recent tool calls (capped), updated every COUNT_POLL_MS. */
   recentCalls: ToolCallRecord[];
 }
@@ -89,13 +102,15 @@ interface RegistryEntry {
   paneId?: string;
   piDir: string;
   dir: string;
+  conversationId?: string;
 }
 
-/** Details attached to tool result for rendering. */
+export /** Details attached to tool result for rendering. */
 interface TaskDetails {
   task_id: string;
   agent_type: string;
   description: string;
+  conversation_id?: string;
   phase: "done" | "timeout" | "aborted" | "failed";
   // Completed phase
   status?: string;
@@ -111,7 +126,7 @@ interface TaskDetails {
   tmux_session?: string;
 }
 
-// ─── Registry helpers (durable JSON) ─────────────────────────────────────────
+// Conversation helpers live in ./conversation.js.
 
 function readRegistry(piDir: string): RegistryEntry[] {
   const path = join(piDir, "task-registry.json");
@@ -303,8 +318,10 @@ export default function (pi: ExtensionAPI) {
       startedAt: entry.startedAt,
       toolUses: 0,
       turns: 0,
+      conversationId: entry.conversationId,
       recentCalls: [],
     };
+
     backgroundTasks.set(entry.id, bgtask);
   }
   if (staleIds.length) {
@@ -637,9 +654,16 @@ export default function (pi: ExtensionAPI) {
       task_id: Type.Optional(
         Type.String({
           description:
-            "Resume a previous task by ID (continues the same subagent session with its prior context instead of creating a fresh one)",
+            "Resume an existing background task by id instead of starting a new task.",
         }),
       ),
+      conversation_id: Type.Optional(
+        Type.String({
+          description:
+            "Durable specialist conversation id. Reuses .pi/artifacts/task-<id>/sessions when called again.",
+        }),
+      ),
+
       background: Type.Optional(
         Type.Boolean({
           description:
@@ -674,14 +698,127 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
-      // ── Resolve task identity: new or resume ───────────────────────────
+      // ── Resolve task identity: new, task resume, or conversation resume ──
+      const conversationId = normalizeConversationId(params.conversation_id);
+      const conversationRegistry = conversationId
+        ? readConversationRegistry(piDir)
+        : {};
+      const registeredArtifact = conversationId
+        ? conversationRegistry[conversationId]
+        : undefined;
+      const registeredTaskId = registeredArtifact
+        ? taskIdFromArtifactName(registeredArtifact)
+        : undefined;
+
+      if (
+        params.task_id &&
+        registeredTaskId &&
+        params.task_id !== registeredTaskId
+      ) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `conversation_id "${conversationId}" maps to ${taskArtifactName(registeredTaskId)}, not ${taskArtifactName(params.task_id)}. Omit task_id or use the mapped task id.`,
+            },
+          ],
+          details: {
+            phase: "failed" as const,
+            error: "conversation_id/task_id mismatch",
+          },
+          isError: true,
+        };
+      }
+
       let id: string;
       let sessionName: string;
       let artifactDir: string;
       let resultPath: string;
       let resume = false;
 
-      if (params.task_id) {
+      if (registeredTaskId) {
+        id = registeredTaskId;
+        sessionName = taskArtifactName(id);
+        artifactDir = join(getArtifactsDir(piDir), sessionName);
+        resultPath = join(artifactDir, "RESULT.md");
+        if (!existsSync(artifactDir)) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `conversation_id "${conversationId}" points to missing artifact directory: ${artifactDir}`,
+              },
+            ],
+            details: {
+              phase: "failed" as const,
+              error: "Conversation artifact dir missing",
+              conversation_id: conversationId,
+            },
+            isError: true,
+          };
+        }
+        const metadata = readConversationMetadata(
+          join(artifactDir, "metadata.json"),
+        );
+        if (metadata?.agent_type && metadata.agent_type !== agent.name) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `conversation_id "${conversationId}" belongs to agent "${metadata.agent_type}", not "${agent.name}". Use the original agent_type or start a different conversation_id.`,
+              },
+            ],
+            details: {
+              phase: "failed" as const,
+              error: "conversation_id agent_type mismatch",
+              conversation_id: conversationId,
+            },
+            isError: true,
+          };
+        }
+        resume = true;
+
+        const entry = readRegistry(piDir).find(
+          (candidate) => candidate.id === id,
+        );
+        if (
+          params.background !== false &&
+          entry?.paneId &&
+          paneExists(entry.paneId)
+        ) {
+          const bgtask: BackgroundTask = {
+            dir: artifactDir,
+            agentType: entry.agentType,
+            sessionName,
+            paneId: entry.paneId,
+            originalPane: null,
+            description: params.description || entry.description,
+            startedAt: entry.startedAt,
+            toolUses: 0,
+            turns: 0,
+            conversationId,
+            recentCalls: [],
+          };
+          backgroundTasks.set(id, bgtask);
+
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Resumed conversation "${conversationId}" via ${taskArtifactName(id)}. The subagent is running in background and will notify on completion.`,
+              },
+            ],
+            details: {
+              task_id: id,
+              agent_type: agent.name,
+              description: params.description,
+              conversation_id: conversationId,
+              tmux_session: sessionName,
+              background: true,
+            },
+          };
+        }
+      } else if (params.task_id) {
         // Look up the task in the persistent registry
         const entries = readRegistry(piDir);
         const entry = entries.find((e) => e.id === params.task_id);
@@ -738,6 +875,7 @@ export default function (pi: ExtensionAPI) {
             startedAt: entry.startedAt,
             toolUses: 0,
             turns: 0,
+            conversationId: entry.conversationId,
             recentCalls: [],
           };
           backgroundTasks.set(id, bgtask);
@@ -753,6 +891,7 @@ export default function (pi: ExtensionAPI) {
               task_id: id,
               agent_type: agent.name,
               description: params.description,
+              conversation_id: entry.conversationId ?? conversationId,
               tmux_session: sessionName,
               background: true,
             },
@@ -760,10 +899,42 @@ export default function (pi: ExtensionAPI) {
         }
       } else {
         id = `${Date.now().toString(36)}-${randomUUID().slice(0, 4)}`;
-        sessionName = `task-${id}`;
-        artifactDir = join(piDir, "artifacts", sessionName);
+        sessionName = taskArtifactName(id);
+        artifactDir = join(getArtifactsDir(piDir), sessionName);
         await mkdir(artifactDir, { recursive: true });
         resultPath = join(artifactDir, "RESULT.md");
+      }
+
+      if (conversationId && !hasTmux()) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "Durable conversations require the tmux/CLI backend so Pi can save and reopen the subagent session. Install/start tmux or omit conversation_id for a one-shot SDK task.",
+            },
+          ],
+          details: {
+            phase: "failed" as const,
+            error: "tmux required for durable conversation",
+            conversation_id: conversationId,
+          },
+          isError: true,
+        };
+      }
+
+      if (conversationId) {
+        await mkdir(artifactDir, { recursive: true });
+        conversationRegistry[conversationId] = taskArtifactName(id);
+        writeConversationRegistry(piDir, conversationRegistry);
+        writeConversationArtifacts({
+          taskDir: artifactDir,
+          taskId: id,
+          conversationId,
+          agentType: agent.name,
+          sessionDir: join(artifactDir, "sessions"),
+          sessionName,
+          prompt: params.prompt,
+        });
       }
 
       const descText = params.description || "";
@@ -844,8 +1015,10 @@ export default function (pi: ExtensionAPI) {
             startedAt: Date.now(),
             toolUses: 0,
             turns: 0,
+            conversationId,
             recentCalls: [],
           };
+
       if (foregroundTask) {
         foregroundTasks.set(id, foregroundTask);
         ensureTaskWidget(ctx);
@@ -863,8 +1036,10 @@ export default function (pi: ExtensionAPI) {
             startedAt: Date.now(),
             toolUses: 0,
             turns: 0,
+            conversationId,
             recentCalls: [],
           };
+
           backgroundTasks.set(id, bgtask);
           const entry: RegistryEntry = {
             id,
@@ -874,7 +1049,9 @@ export default function (pi: ExtensionAPI) {
             startedAt: bgtask.startedAt,
             piDir,
             dir: artifactDir,
+            conversationId,
           };
+
           const entries = readRegistry(piDir);
           entries.push(entry);
           writeRegistry(piDir, entries);
@@ -917,6 +1094,7 @@ export default function (pi: ExtensionAPI) {
               background: true,
               backend: "sdk" as const,
               result_path: resultPath,
+              conversation_id: conversationId,
             },
           };
         }
@@ -933,6 +1111,7 @@ export default function (pi: ExtensionAPI) {
               backend: "sdk" as const,
               session_path: sessionPath,
               result_path: resultPath,
+              conversation_id: conversationId,
             },
           };
         } catch (error) {
@@ -1038,6 +1217,7 @@ export default function (pi: ExtensionAPI) {
             tool_uses: toolUses,
             turn_count: turns,
             background: false,
+            conversation_id: conversationId,
           },
         };
       }
@@ -1054,8 +1234,10 @@ export default function (pi: ExtensionAPI) {
         startedAt: Date.now(),
         toolUses: 0,
         turns: 0,
+        conversationId,
         recentCalls: [],
       };
+
       backgroundTasks.set(id, bgtask);
 
       // ── P0: Persistent registry ────────────────────────────────────────
@@ -1068,7 +1250,9 @@ export default function (pi: ExtensionAPI) {
         paneId,
         piDir,
         dir: artifactDir,
+        conversationId,
       };
+
       // Write to JSON registry for on-load restore
       const entries = readRegistry(piDir);
       entries.push(entry);
@@ -1198,6 +1382,15 @@ export default function (pi: ExtensionAPI) {
       }
 
       return new Text(line, 0, 0);
+    },
+  });
+
+  pi.registerCommand("task-sessions", {
+    description: "List durable pi-task conversations",
+    handler: async (_args, ctx) => {
+      const cwd = ctx.sessionManager?.getCwd?.() ?? process.cwd();
+      const { piDir } = discoverAgents(cwd);
+      ctx.ui.notify(renderConversationSessions(piDir), "info");
     },
   });
 }

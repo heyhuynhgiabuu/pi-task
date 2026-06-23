@@ -11,6 +11,13 @@ Human-readable release log for `@heyhuynhgiabuu/pi-task`.
 - The subagent's session is auto-saved by pi at
   `~/.pi/agent/sessions/<cwd>/<session-id>.jsonl`. pi-task does not
   maintain its own session storage.
+- Task widget rendering is now split into a dedicated module for easier
+  maintenance.
+- Foreground and background widgets now use consistent colors for
+  duration/tool-call stats.
+- Background completion results now use a padded themed main-pane block
+  and no longer duplicate completed-widget notifications.
+- Final foreground tool-call counts now match the live widget count.
 
 ### Layout
 
@@ -80,7 +87,7 @@ the LLM in pi. Verify by:
   `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` were
   declared as `peerDependencies` and `devDependencies`, but the dist
   has a runtime `import { Text, truncateToWidth } from
-  "@earendil-works/pi-tui"`. With `npm install --omit=dev` (the
+"@earendil-works/pi-tui"`. With `npm install --omit=dev` (the
   default used by `pi install`), peer deps are recorded but not
   installed into the package's own `node_modules`. They are now
   declared in `dependencies` and pinned to `^0.79.0`.

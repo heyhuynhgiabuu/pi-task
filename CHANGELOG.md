@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   No per-task subdirs, no `<task-id>` paths. The pikit canonical
   files (TODO.md, PLAN.md, PROGRESS.md, DECISIONS.md) are flat at the
   same level; pi-task files now sit alongside them.
+- Refined the task TUI widget and background completion rendering:
+  foreground/background task stats now use consistent colors, background
+  completion summaries use a padded themed result block, completed
+  background widgets no longer duplicate the main-pane completion, and
+  final tool-call counts now match the live widget count.
 
 ### Layout
 
@@ -116,7 +121,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `npm view @heyhuynhgiabuu/pi-task@0.1.2 pi` returns
   `{ extensions: [ './dist/index.js' ] }`
 
-    [0.1.2]: https://github.com/heyhuynhgiabuu/pi-task/releases/tag/v0.1.2
+  [0.1.2]: https://github.com/heyhuynhgiabuu/pi-task/releases/tag/v0.1.2
 
 ## [0.1.1] — 2025
 

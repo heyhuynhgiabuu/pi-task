@@ -378,49 +378,78 @@ export function buildPiArgs(
   });
 }
 
-// ─── JSONL Session Helpers ───────────────────────────────────────────────────
+    // ─── JSONL Session Helpers ───────────────────────────────────────────────────
 
-/** Count tool uses and turns from pi JSONL session files. */
-export function countToolUses(sessionDir: string): {
-  toolUses: number;
-  turns: number;
-} {
-  let toolUses = 0;
-  let turns = 0;
+    function matchesJsonlSessionName(content: string, sessionName?: string): boolean {
+      if (!sessionName) return true;
 
-  try {
-    if (!existsSync(sessionDir)) return { toolUses, turns };
-
-    const files = readdirSync(sessionDir).filter((f) => f.endsWith(".jsonl"));
-    for (const file of files) {
-      const content = readFileSync(join(sessionDir, file), "utf-8");
       for (const rawLine of content.split("\n")) {
         const line = rawLine.trim();
         if (!line) continue;
 
         try {
-          const entry = JSON.parse(line);
-          if (
-            entry.type === "message" &&
-            entry.message?.role === "assistant" &&
-            Array.isArray(entry.message.content)
-          ) {
-            turns++;
-            for (const block of entry.message.content) {
-              if (block.type === "toolCall") toolUses++;
-            }
+          const entry = JSON.parse(line) as {
+            type?: string;
+            name?: string;
+            session_info?: { name?: string };
+          };
+          if (entry.type === "session_info") {
+            return (entry.name ?? entry.session_info?.name) === sessionName;
           }
         } catch {
           // Skip malformed lines
         }
       }
-    }
-  } catch {
-    // Session dir might not exist or be inaccessible
-  }
 
-  return { toolUses, turns };
-}
+      return false;
+    }
+    
+    /** Count tool uses and turns from pi JSONL session files. */
+    export function countToolUses(
+      sessionDir: string,
+      sessionName?: string,
+    ): {
+      toolUses: number;
+      turns: number;
+    } {
+      let toolUses = 0;
+      let turns = 0;
+    
+      try {
+        if (!existsSync(sessionDir)) return { toolUses, turns };
+    
+        const files = readdirSync(sessionDir).filter((f) => f.endsWith(".jsonl"));
+        for (const file of files) {
+          const content = readFileSync(join(sessionDir, file), "utf-8");
+          if (!matchesJsonlSessionName(content, sessionName)) continue;
+
+          for (const rawLine of content.split("\n")) {
+            const line = rawLine.trim();
+            if (!line) continue;
+    
+            try {
+              const entry = JSON.parse(line);
+              if (
+                entry.type === "message" &&
+                entry.message?.role === "assistant" &&
+                Array.isArray(entry.message.content)
+              ) {
+                turns++;
+                for (const block of entry.message.content) {
+                  if (block.type === "toolCall") toolUses++;
+                }
+              }
+            } catch {
+              // Skip malformed lines
+            }
+          }
+        }
+      } catch {
+        // Session dir might not exist or be inaccessible
+      }
+    
+      return { toolUses, turns };
+    }
 
 // ─── JSONL Session Helpers — streaming ───────────────────────────────────────
 
@@ -482,14 +511,15 @@ export function summarizeArgs(toolName: string, args: unknown): string {
  * Returns total counts plus the last `limit` records in chronological order.
  * Safe against malformed lines and missing fields.
  */
-export function readRecentToolCalls(
-  sessionDir: string,
-  limit = 12,
-): {
-  toolUses: number;
-  turns: number;
-  recent: ToolCallRecord[];
-} {
+    export function readRecentToolCalls(
+      sessionDir: string,
+      limit = 12,
+      sessionName?: string,
+    ): {
+      toolUses: number;
+      turns: number;
+      recent: ToolCallRecord[];
+    } {
   let toolUses = 0;
   let turns = 0;
   const calls: Array<{
@@ -503,10 +533,12 @@ export function readRecentToolCalls(
   try {
     if (!existsSync(sessionDir)) return { toolUses, turns, recent: [] };
 
-    const files = readdirSync(sessionDir).filter((f) => f.endsWith(".jsonl"));
-    for (const file of files) {
-      const content = readFileSync(join(sessionDir, file), "utf-8");
-      for (const rawLine of content.split("\n")) {
+        const files = readdirSync(sessionDir).filter((f) => f.endsWith(".jsonl"));
+        for (const file of files) {
+          const content = readFileSync(join(sessionDir, file), "utf-8");
+          if (!matchesJsonlSessionName(content, sessionName)) continue;
+
+          for (const rawLine of content.split("\n")) {
         const line = rawLine.trim();
         if (!line) continue;
 

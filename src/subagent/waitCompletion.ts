@@ -36,12 +36,12 @@ async function readResultFile(resultPath: string): Promise<string | null> {
 
     function readSessionText(
       sessionDir: string,
-      _sessionName: string,
+      sessionName: string,
     ): string | null {
       // Session files are written by pi directly into `sessionDir`
-      // (flat). `sessionName` is preserved for future per-session
-      // filtering; for now, just scan the whole dir.
-      const text = getLastAssistantTextFromSessionDir(sessionDir).trim();
+      // (flat). Filter by session_info.name so a new task never
+      // completes from an older task's JSONL.
+      const text = getLastAssistantTextFromSessionDir(sessionDir, sessionName).trim();
       return text.length > 0 ? text : null;
     }
     

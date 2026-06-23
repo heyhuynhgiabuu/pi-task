@@ -15,36 +15,64 @@ function extractText(content: unknown): string {
     .trim();
 }
 
-/**
- * Last non-empty assistant message across all .jsonl files in sessionDir.
- */
-export function getLastAssistantTextFromSessionDir(sessionDir: string): string {
-  if (!existsSync(sessionDir)) return "";
+    function matchesSessionName(content: string, sessionName?: string): boolean {
+      if (!sessionName) return true;
 
-  const files = readdirSync(sessionDir)
-    .filter((f) => f.endsWith(".jsonl"))
-    .sort();
-
-  let last = "";
-  for (const file of files) {
-    const content = readFileSync(join(sessionDir, file), "utf-8");
-    for (const rawLine of content.split("\n")) {
-      const line = rawLine.trim();
-      if (!line) continue;
-      try {
-        const entry = JSON.parse(line) as {
-          type?: string;
-          message?: { role?: string; content?: unknown };
-        };
-        if (entry.type !== "message") continue;
-        const msg = entry.message;
-        if (!msg || msg.role !== "assistant") continue;
-        const text = extractText(msg.content);
-        if (text) last = text;
-      } catch {
-        /* skip malformed JSONL rows */
+      for (const rawLine of content.split("\n")) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        try {
+          const entry = JSON.parse(line) as {
+            type?: string;
+            name?: string;
+            session_info?: { name?: string };
+          };
+          if (entry.type === "session_info") {
+            return (entry.name ?? entry.session_info?.name) === sessionName;
+          }
+        } catch {
+          /* skip malformed JSONL rows */
+        }
       }
+
+      return false;
     }
-  }
-  return last;
-}
+
+    /**
+     * Last non-empty assistant message from matching .jsonl files in sessionDir.
+     */
+    export function getLastAssistantTextFromSessionDir(
+      sessionDir: string,
+      sessionName?: string,
+    ): string {
+      if (!existsSync(sessionDir)) return "";
+    
+      const files = readdirSync(sessionDir)
+        .filter((f) => f.endsWith(".jsonl"))
+        .sort();
+    
+      let last = "";
+      for (const file of files) {
+        const content = readFileSync(join(sessionDir, file), "utf-8");
+        if (!matchesSessionName(content, sessionName)) continue;
+
+        for (const rawLine of content.split("\n")) {
+          const line = rawLine.trim();
+          if (!line) continue;
+          try {
+            const entry = JSON.parse(line) as {
+              type?: string;
+              message?: { role?: string; content?: unknown };
+            };
+            if (entry.type !== "message") continue;
+            const msg = entry.message;
+            if (!msg || msg.role !== "assistant") continue;
+            const text = extractText(msg.content);
+            if (text) last = text;
+          } catch {
+            /* skip malformed JSONL rows */
+          }
+        }
+      }
+      return last;
+    }

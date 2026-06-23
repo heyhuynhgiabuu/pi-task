@@ -346,7 +346,11 @@ export default function (pi: ExtensionAPI) {
     ]) {
       const sessionDir = join(task.dir, "sessions");
       // Single walk: counts + recent tool-call history with status
-      const { toolUses, turns, recent } = readRecentToolCalls(sessionDir, 12);
+      const { toolUses, turns, recent } = readRecentToolCalls(
+        sessionDir,
+        12,
+        task.sessionName,
+      );
       task.toolUses = toolUses;
       task.turns = turns;
       task.recentCalls = recent;
@@ -1187,7 +1191,7 @@ export default function (pi: ExtensionAPI) {
 
             const parsed = parseResultXml(content);
         const durationMs = Date.now() - startedAt;
-        const { toolUses, turns } = countToolUses(sessionDir);
+        const { toolUses, turns } = countToolUses(sessionDir, sessionName);
 
         return {
           content: [

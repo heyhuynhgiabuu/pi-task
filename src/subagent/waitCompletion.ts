@@ -25,8 +25,9 @@ export interface TaskCompletionOptions {
   paneId?: string;
   signal?: AbortSignal;
   timeoutMs?: number;
-  pollMs?: number;
-}
+      pollMs?: number;
+      sinceMs?: number;
+    }
 
 async function readResultFile(resultPath: string): Promise<string | null> {
   if (!existsSync(resultPath)) return null;
@@ -34,14 +35,19 @@ async function readResultFile(resultPath: string): Promise<string | null> {
   return text.length > 0 ? text : null;
 }
 
-    function readSessionText(
-      sessionDir: string,
-      sessionName: string,
-    ): string | null {
+        function readSessionText(
+          sessionDir: string,
+          sessionName: string,
+          sinceMs?: number,
+        ): string | null {
       // Session files are written by pi directly into `sessionDir`
       // (flat). Filter by session_info.name so a new task never
       // completes from an older task's JSONL.
-      const text = getLastAssistantTextFromSessionDir(sessionDir, sessionName).trim();
+          const text = getLastAssistantTextFromSessionDir(
+            sessionDir,
+            sessionName,
+            sinceMs,
+          ).trim();
       return text.length > 0 ? text : null;
     }
     
@@ -70,6 +76,7 @@ async function readResultFile(resultPath: string): Promise<string | null> {
           const sessionResult = readSessionText(
             options.sessionDir,
             options.sessionName,
+            options.sinceMs,
           );
           if (sessionResult) {
             return { status: "completed", content: sessionResult, source: "session-jsonl" };

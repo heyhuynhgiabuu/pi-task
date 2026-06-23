@@ -44,6 +44,7 @@ function extractText(content: unknown): string {
     export function getLastAssistantTextFromSessionDir(
       sessionDir: string,
       sessionName?: string,
+      sinceMs?: number,
     ): string {
       if (!existsSync(sessionDir)) return "";
     
@@ -62,9 +63,14 @@ function extractText(content: unknown): string {
           try {
             const entry = JSON.parse(line) as {
               type?: string;
+              timestamp?: string;
               message?: { role?: string; content?: unknown };
             };
             if (entry.type !== "message") continue;
+            if (sinceMs !== undefined && entry.timestamp) {
+              const timestampMs = Date.parse(entry.timestamp);
+              if (Number.isFinite(timestampMs) && timestampMs < sinceMs) continue;
+            }
             const msg = entry.message;
             if (!msg || msg.role !== "assistant") continue;
             const text = extractText(msg.content);

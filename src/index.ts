@@ -667,12 +667,13 @@ export default function (pi: ExtensionAPI) {
         continue;
       }
 
-      const snapshot = await checkTaskCompletion({
-        resultPath: join(task.dir, "RESULT.md"),
-        sessionDir: task.dir,
-        sessionName: task.sessionName,
-        paneId: task.paneId,
-      });
+        const snapshot = await checkTaskCompletion({
+          resultPath: join(task.dir, "RESULT.md"),
+          sessionDir: task.dir,
+          sessionName: task.sessionName,
+          paneId: task.paneId,
+          sinceMs: task.startedAt,
+        });
 
       if (snapshot.status === "running") {
         backgroundTasks.set(id, task);
@@ -1286,9 +1287,9 @@ export default function (pi: ExtensionAPI) {
       }
 
           // ── FOREGROUND MODE: block until result, return directly ────────────
-          if (!isBackground) {
-            const startedAt = Date.now();
-            upsertTaskSessionHistory(piDir, {
+              if (!isBackground) {
+                const startedAt = foregroundTask?.startedAt ?? Date.now();
+                upsertTaskSessionHistory(piDir, {
               id,
               agentType: agent.name,
               description: descText,
@@ -1308,7 +1309,9 @@ export default function (pi: ExtensionAPI) {
           sessionName,
           paneId,
           signal,
-          timeoutMs: 30 * 60 * 1000,
+          timeoutMs: TASK_TIMEOUT_MS,
+          pollMs: 1000,
+          sinceMs: startedAt,
         });
             const content = completion.content;
             const phase =

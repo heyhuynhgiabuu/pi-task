@@ -45,37 +45,35 @@ function readSessionText(
 export async function checkTaskCompletion(
   options: TaskCompletionOptions,
 ): Promise<TaskCompletionSnapshot> {
-  const result = await readResultFile(options.resultPath);
-  if (result) {
-    return { status: "completed", content: result, source: "result-file" };
-  }
+      const result = await readResultFile(options.resultPath);
+      if (result) {
+        return { status: "completed", content: result, source: "result-file" };
+      }
 
-  if (options.paneId && paneExists(options.paneId)) {
-    return { status: "running", content: "", source: "pane" };
-  }
+      // Check session text FIRST. If the subagent's session file has
+      // its final assistant message, the subagent is done — kill the
+      // pane and return, regardless of whether the pane shell is
+      // still open (e.g. remain-on-exit on, or the command exited but
+      // tmux kept the shell alive).
+      const sessionResult = readSessionText(
+        options.sessionDir,
+        options.sessionName,
+      );
+      if (sessionResult) {
+        return { status: "completed", content: sessionResult, source: "session-jsonl" };
+      }
 
-  const sessionText = readSessionText(options.sessionDir, options.sessionName);
-  if (sessionText) {
-    return {
-      status: "completed",
-      content: sessionText,
-      source: "session-jsonl",
-    };
-  }
+      // No session text yet. If the pane is gone and we never got
+      // session text, the subagent failed.
+      if (options.paneId && !paneExists(options.paneId)) {
+        return { status: "failed", content: "Subagent pane exited without producing a result." };
+      }
 
-  if (options.paneId) {
-    return {
-      status: "failed",
-      content:
-        "Task pane exited before producing a result or assistant response.",
-      source: "pane",
-    };
-  }
+      // Pane still exists and no session text yet — keep polling.
+      return { status: "running", content: "", source: "pane" };
+    }
 
-  return { status: "running", content: "", source: "pane" };
-}
-
-export async function waitForTaskCompletion(
+    export async function waitForTaskCompletion(
   options: TaskCompletionOptions,
 ): Promise<TaskCompletionSnapshot> {
   const timeoutMs = options.timeoutMs ?? 30 * 60 * 1000;

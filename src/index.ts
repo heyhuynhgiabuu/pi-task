@@ -101,6 +101,7 @@ interface BackgroundTask {
       piDir: string;
       dir: string;
       conversationId?: string;
+      sessionRef?: string;
     }
 
     /** Durable task→session mapping used for resume after task completion. */
@@ -225,6 +226,7 @@ function readRegistry(piDir: string): RegistryEntry[] {
                     agentType,
                     description: `Resumed session ${sessionName}`,
                     sessionName,
+                    sessionRef: join(sessionDir, file),
                     startedAt,
                     piDir,
                     dir: artifactsDir,
@@ -853,6 +855,7 @@ export default function (pi: ExtensionAPI) {
           let sessionName: string;
           let resultPath: string;
           let resume = false;
+          let resumeSessionRef: string | undefined;
 
           const artifactsDir = join(piDir, "artifacts");
 
@@ -983,6 +986,7 @@ export default function (pi: ExtensionAPI) {
                 sessionName = entry.sessionName;
                 resultPath = join(artifactsDir, `RESULT-${id}.md`);
                 resume = true;
+                resumeSessionRef = entry.sessionRef;
     
             // If background and pane still alive, reattach to tracker
             if (
@@ -1092,8 +1096,9 @@ export default function (pi: ExtensionAPI) {
         sessionDir,
         promptContent,
         resume,
-        parentToolNames,
-      );
+            parentToolNames,
+            resumeSessionRef,
+          );
       const envPrefix = `PI_TASK_TOOL_DISABLED=1`;
       const toolSelection = buildAgentToolSelection({
         tools: agent.tools,

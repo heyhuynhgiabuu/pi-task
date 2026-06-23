@@ -357,26 +357,28 @@ export function formatAgentList(agents: AgentConfig[]): string {
  * Build pi CLI arguments for spawning or resuming a sub-agent session.
  *
  * - Fresh spawn: omit `resume` or pass falsy — `--session` is not included.
- * - Resume: pass `resume=true` — `--session <name>` is included so pi
- *   continues the existing session file in --session-dir.
- */
-export function buildPiArgs(
-  agent: AgentConfig,
-  sessionName: string,
-  sessionDir: string,
-  promptContent: string,
-  resume?: boolean,
-  parentToolNames?: string[],
-): string[] {
-  return buildPiArgv({
-    agent,
-    sessionName,
-    sessionDir,
-    promptContent,
-    resume,
-    parentToolNames,
-  });
-}
+     * - Resume: pass `resume=true` and optionally `resumeSessionRef` —
+     *   `--session <ref>` is included so pi continues an existing session.
+     */
+    export function buildPiArgs(
+      agent: AgentConfig,
+      sessionName: string,
+      sessionDir: string,
+      promptContent: string,
+      resume?: boolean,
+      parentToolNames?: string[],
+      resumeSessionRef?: string,
+    ): string[] {
+      return buildPiArgv({
+        agent,
+        sessionName,
+        sessionDir,
+        promptContent,
+        resume,
+        resumeSessionRef,
+        parentToolNames,
+      });
+    }
 
     // ─── JSONL Session Helpers ───────────────────────────────────────────────────
 

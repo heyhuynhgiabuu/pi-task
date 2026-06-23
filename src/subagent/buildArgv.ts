@@ -10,8 +10,9 @@ export interface BuildPiArgvOptions {
   sessionName: string;
   sessionDir: string;
   promptContent: string;
-  resume?: boolean;
-  parentToolNames?: string[];
+      resume?: boolean;
+      resumeSessionRef?: string;
+      parentToolNames?: string[];
 }
 
 export function buildPiArgv(opts: BuildPiArgvOptions): string[] {
@@ -29,7 +30,7 @@ export function buildPiArgv(opts: BuildPiArgvOptions): string[] {
   args.push("--tools", allowedTools.join(","));
   args.push("--name", sessionName);
   args.push("--session-dir", sessionDir);
-  if (resume) args.push("--session", sessionName);
+      if (resume) args.push("--session", opts.resumeSessionRef ?? sessionName);
   args.push("--append-system-prompt", agent.body);
   args.push(promptContent);
   return args;

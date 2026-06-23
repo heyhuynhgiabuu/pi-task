@@ -56,6 +56,7 @@ import {
 } from "./helpers.js";
 import { runSdkSubagent } from "./subagent/runSdk.js";
 import {
+  type TaskCompletionSnapshot,
   checkTaskCompletion,
   waitForTaskCompletion as waitForSessionTaskCompletion,
 } from "./subagent/waitCompletion.js";
@@ -75,6 +76,7 @@ const BUNDLED_AGENT_DIR = join(
 const BACKGROUND_CHECK_MS = 10_000; // poll every 10 sec
 const COUNT_POLL_MS = 3_000; // update toolcall counts every 3 sec
 const TASK_TIMEOUT_MS = 30 * 60 * 1_000; // 30 minutes
+const MAX_POLL_ERRORS = 3; // consecutive poll failures before giving up on a task
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -91,6 +93,8 @@ interface BackgroundTask {
   conversationId?: string;
   /** Most recent tool calls (capped), updated every COUNT_POLL_MS. */
   recentCalls: ToolCallRecord[];
+  /** Consecutive completion-poll failures; reset to 0 on a successful poll. */
+  pollErrors?: number;
 }
 
 /** Serializable subset for active task registry persistence. */
@@ -555,51 +559,90 @@ export default function (pi: ExtensionAPI) {
 
   // ── Polling loop (background task completion, pane death, timeout) ──────
 
+  // setInterval does not wait for an async callback to settle, so a slow pass
+  // (many tasks / slow fs) could overlap the next one and double-complete a
+  // task. This guard makes ticks that fire mid-pass no-ops.
+  let checkInFlight = false;
+
   const checkInterval = setInterval(async () => {
+    if (checkInFlight) return;
     if (backgroundTasks.size === 0) {
       clearTaskWidgetIfIdle();
       return;
     }
+    checkInFlight = true;
 
-    const now = Date.now();
-    const ids = Array.from(backgroundTasks.keys());
+    try {
+      const now = Date.now();
+      const ids = Array.from(backgroundTasks.keys());
 
-    for (const id of ids) {
-      const task = backgroundTasks.get(id);
-      if (!task) continue;
+      for (const id of ids) {
+        const task = backgroundTasks.get(id);
+        if (!task) continue;
 
-      // ── Check timeout ────────────────────────────────────────────
-      if (now - task.startedAt > TASK_TIMEOUT_MS) {
-        killAgentPane(task.paneId, task.originalPane);
+        // ── Check timeout ────────────────────────────────────────────
+        if (now - task.startedAt > TASK_TIMEOUT_MS) {
+          killAgentPane(task.paneId, task.originalPane);
+          backgroundTasks.delete(id);
+          clearTaskWidgetIfIdle();
+          completeTask(
+            pi,
+            id,
+            task,
+            "Task timed out after 30 minutes",
+            "timeout",
+            piDir,
+          );
+          continue;
+        }
+
+        // A transient fs error here (RESULT.md mid-write, EACCES, dir briefly
+        // missing) must NOT drop the task. Keep it tracked and retry on the
+        // next tick; only give up after repeated failures (the timeout above
+        // is the ultimate backstop).
+        let snapshot: TaskCompletionSnapshot;
+        try {
+          snapshot = await checkTaskCompletion({
+            resultPath: join(task.dir, "RESULT.md"),
+            sessionDir: join(task.dir, "sessions"),
+            sessionName: task.sessionName,
+            paneId: task.paneId,
+            sinceMs: task.startedAt,
+          });
+        } catch (err) {
+          task.pollErrors = (task.pollErrors ?? 0) + 1;
+          if (task.pollErrors >= MAX_POLL_ERRORS) {
+            killAgentPane(task.paneId, task.originalPane);
+            backgroundTasks.delete(id);
+            clearTaskWidgetIfIdle();
+            const message = err instanceof Error ? err.message : String(err);
+            completeTask(
+              pi,
+              id,
+              task,
+              `Task ${id} polling failed ${task.pollErrors}x; last error: ${message}`,
+              "failed",
+              piDir,
+            );
+          }
+          // Otherwise leave the task tracked and retry next tick.
+          continue;
+        }
+
+        // Successful poll clears the error streak.
+        task.pollErrors = 0;
+
+        if (snapshot.status === "running") {
+          continue;
+        }
+
+        const phase = snapshot.status === "completed" ? "done" : "failed";
         backgroundTasks.delete(id);
         clearTaskWidgetIfIdle();
-        completeTask(
-          pi,
-          id,
-          task,
-          "Task timed out after 30 minutes",
-          "timeout",
-          piDir,
-        );
-        continue;
+        completeTask(pi, id, task, snapshot.content, phase, piDir);
       }
-
-      const snapshot = await checkTaskCompletion({
-        resultPath: join(task.dir, "RESULT.md"),
-        sessionDir: join(task.dir, "sessions"),
-        sessionName: task.sessionName,
-        paneId: task.paneId,
-        sinceMs: task.startedAt,
-      });
-
-      if (snapshot.status === "running") {
-        continue;
-      }
-
-      const phase = snapshot.status === "completed" ? "done" : "failed";
-      backgroundTasks.delete(id);
-      clearTaskWidgetIfIdle();
-      completeTask(pi, id, task, snapshot.content, phase, piDir);
+    } finally {
+      checkInFlight = false;
     }
   }, BACKGROUND_CHECK_MS);
 

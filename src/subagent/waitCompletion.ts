@@ -45,45 +45,45 @@ async function readResultFile(resultPath: string): Promise<string | null> {
       return text.length > 0 ? text : null;
     }
     
-    export async function checkTaskCompletion(
-      options: TaskCompletionOptions,
-    ): Promise<TaskCompletionSnapshot> {
-          // When the pane has exited, give pi a brief moment to flush the
-          // session file. Without this, the read can catch a partial
-          // file (e.g. the last `agent_end` / `message_end` events not
-          // yet written) and report "failed" even though the subagent
-          // completed successfully.
+        export async function checkTaskCompletion(
+          options: TaskCompletionOptions,
+        ): Promise<TaskCompletionSnapshot> {
+              // When the pane has exited, give pi a brief moment to flush the
+              // session file. Without this, the read can catch a partial
+              // file (e.g. the last `agent_end` / `message_end` events not
+              // yet written) and report "failed" even though the subagent
+              // completed successfully.
+              if (options.paneId && !paneExists(options.paneId)) {
+                await sleep(500);
+              }
+
+              const result = await readResultFile(options.resultPath);
+              if (result) {
+                return { status: "completed", content: result, source: "result-file" };
+              }
+
+              // Check session text FIRST. If the subagent's session file has
+              // its final assistant message, the subagent is done — kill the
+              // pane and return, regardless of whether the pane shell is
+              // still open (e.g. remain-on-exit on, or the command exited but
+              // tmux kept the shell alive).
+          const sessionResult = readSessionText(
+            options.sessionDir,
+            options.sessionName,
+          );
+          if (sessionResult) {
+            return { status: "completed", content: sessionResult, source: "session-jsonl" };
+          }
+
+          // No session text yet. If the pane is gone and we never got
+          // session text, the subagent failed.
           if (options.paneId && !paneExists(options.paneId)) {
-            await sleep(500);
+            return { status: "failed", content: "Subagent pane exited without producing a result." };
           }
 
-          const result = await readResultFile(options.resultPath);
-          if (result) {
-            return { status: "completed", content: result, source: "result-file" };
-          }
-
-          // Check session text FIRST. If the subagent's session file has
-          // its final assistant message, the subagent is done — kill the
-          // pane and return, regardless of whether the pane shell is
-          // still open (e.g. remain-on-exit on, or the command exited but
-          // tmux kept the shell alive).
-      const sessionResult = readSessionText(
-        options.sessionDir,
-        options.sessionName,
-      );
-      if (sessionResult) {
-        return { status: "completed", content: sessionResult, source: "session-jsonl" };
-      }
-
-      // No session text yet. If the pane is gone and we never got
-      // session text, the subagent failed.
-      if (options.paneId && !paneExists(options.paneId)) {
-        return { status: "failed", content: "Subagent pane exited without producing a result." };
-      }
-
-      // Pane still exists and no session text yet — keep polling.
-      return { status: "running", content: "", source: "pane" };
-    }
+          // Pane still exists and no session text yet — keep polling.
+          return { status: "running", content: "", source: "pane" };
+        }
 
     export async function waitForTaskCompletion(
   options: TaskCompletionOptions,

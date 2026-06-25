@@ -1,5 +1,6 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+    import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+    import { join } from "node:path";
+    import type { RegistryEntry, TaskSessionHistoryEntry } from "./types.js";
 
 /**
  * Conversational subagent helpers.
@@ -42,6 +43,121 @@ export function getTasksFilePath(piDir: string): string {
 
 export function getTaskSessionsRegistryPath(piDir: string): string {
   return join(piDir, "artifacts", TASK_SESSIONS_REGISTRY_FILE);
+}
+
+export function readRegistry(piDir: string): RegistryEntry[] {
+  const path = join(piDir, "task-registry.json");
+  try {
+    return JSON.parse(readFileSync(path, "utf-8"));
+  } catch {
+    return [];
+  }
+}
+
+export function writeRegistry(piDir: string, entries: RegistryEntry[]): void {
+  const path = join(piDir, "task-registry.json");
+  writeFileSync(path, JSON.stringify(entries, null, 2), "utf-8");
+}
+
+export function readTaskSessionHistory(piDir: string): TaskSessionHistoryEntry[] {
+  const path = join(piDir, "task-session-history.json");
+  try {
+    return JSON.parse(readFileSync(path, "utf-8"));
+  } catch {
+    return [];
+  }
+}
+
+export function writeTaskSessionHistory(
+  piDir: string,
+  entries: TaskSessionHistoryEntry[],
+): void {
+  const path = join(piDir, "task-session-history.json");
+  writeFileSync(path, JSON.stringify(entries, null, 2), "utf-8");
+}
+
+export function upsertTaskSessionHistory(
+  piDir: string,
+  entry: TaskSessionHistoryEntry,
+): void {
+  const entries = readTaskSessionHistory(piDir);
+  const index = entries.findIndex((existing) => existing.id === entry.id);
+  if (index >= 0) {
+    entries[index] = { ...entries[index], ...entry };
+  } else {
+    entries.push(entry);
+  }
+  writeTaskSessionHistory(piDir, entries);
+}
+
+export function findTaskSessionHistory(
+  piDir: string,
+  idOrSessionName: string,
+): TaskSessionHistoryEntry | undefined {
+  return readTaskSessionHistory(piDir).find(
+    (entry) =>
+      entry.id === idOrSessionName || entry.sessionName === idOrSessionName,
+  );
+}
+
+export function findJsonlSessionByName(
+  piDir: string,
+  sessionName: string,
+  agentType: string,
+): TaskSessionHistoryEntry | undefined {
+  const artifactsDir = join(piDir, "artifacts");
+  const sessionDir = join(artifactsDir, "sessions");
+  try {
+    if (!existsSync(sessionDir)) return undefined;
+    const files = readdirSync(sessionDir)
+      .filter((file) => file.endsWith(".jsonl"))
+      .sort()
+      .reverse();
+    for (const file of files) {
+      const content = readFileSync(join(sessionDir, file), "utf-8");
+      let startedAt = Date.now();
+      for (const rawLine of content.split("\n")) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        try {
+          const entry = JSON.parse(line) as {
+            type?: string;
+            timestamp?: string;
+            name?: string;
+            session_info?: { name?: string };
+          };
+          if (entry.type === "session" && entry.timestamp) {
+            const parsed = Date.parse(entry.timestamp);
+            if (Number.isFinite(parsed)) startedAt = parsed;
+          }
+          if (entry.type === "session_info") {
+            const name = entry.name ?? entry.session_info?.name;
+            if (name === sessionName) {
+              return {
+                id: sessionName,
+                agentType,
+                description: `Resumed session ${sessionName}`,
+                sessionName,
+                sessionRef: join(sessionDir, file),
+                startedAt,
+                piDir,
+                dir: artifactsDir,
+                conversationId: sessionName,
+                status: "done",
+                background: false,
+              };
+            }
+            break;
+          }
+        } catch {
+          // Skip malformed lines.
+        }
+      }
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
 }
 
 export function normalizeConversationId(value: unknown): string | undefined {

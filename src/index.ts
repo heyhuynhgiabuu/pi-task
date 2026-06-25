@@ -15,61 +15,76 @@
  * P1: Foreground mode (background:false), pane death detection, timeout.
  */
 
-import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type {
-  ExtensionAPI,
-  ExtensionContext,
-} from "@earendil-works/pi-coding-agent";
-import { Type } from "@sinclair/typebox";
-import { Text, truncateToWidth } from "@earendil-works/pi-tui";
-import { keyHint } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
 import { buildAgentToolSelection } from "./agent-tools.js";
 import {
+  BACKGROUND_CHECK_MS,
+  COUNT_POLL_MS,
+  MAX_POLL_ERRORS,
+  TASK_TIMEOUT_MS,
+} from "./constants.js";
+import {
+  findJsonlSessionByName,
   normalizeConversationId,
   parseMetadataFromBody,
   readTaskBlock,
+  findTaskSessionHistory,
+  readRegistry,
   readTaskSessionsRegistry,
   renderConversationSessions,
+  upsertTaskSessionHistory,
   writeConversationArtifacts,
+  writeRegistry,
   writeTaskSessionsRegistry,
 } from "./conversation.js";
 import {
-  type ToolCallRecord,
   TASK_BACKGROUND_DEFAULT,
-  TASK_PROMPT_INSTRUCTIONS,
   TASK_TOOL_DESCRIPTION,
-  buildTmuxSplitWindowArgs,
-  chooseTmuxSplitDirection,
-  formatBackgroundReceipt,
   buildPiArgs,
-  parseResultXml,
-  formatMs,
-  shellQuote,
+  countToolUses,
   discoverAgents,
   formatAgentList,
-  countToolUses,
-  readRecentToolCalls,
+  formatBackgroundReceipt,
+  parseResultXml,
+  shellQuote,
 } from "./helpers.js";
+import {
+  completeTask,
+  createTaskWidgetController,
+  restoreActiveBackgroundTasks,
+  startBackgroundPolling,
+  startToolStatsPolling,
+} from "./lifecycle/index.js";
 import { runSdkSubagent } from "./subagent/runSdk.js";
 import {
-  type TaskCompletionSnapshot,
   checkTaskCompletion,
   waitForTaskCompletion as waitForSessionTaskCompletion,
 } from "./subagent/waitCompletion.js";
 import {
+  hasTmux,
+  killAgentPane,
+  paneExists,
   setPaneRemainOnExit,
+  splitWindowPane,
   wrapWithPaneExitWatcher,
 } from "./subagent/tmux.js";
 import {
-  renderTaskWidget,
-  TASK_WIDGET_RENDER_MS,
-  type ThemeLike,
-} from "./task-widget.js";
+  buildTaskPrompt,
+  createTaskCompleteRenderer,
+  renderCall,
+  renderResult,
+  taskParametersSchema,
+} from "./tool/index.js";
+import type {
+  BackgroundTask,
+  RegistryEntry,
+} from "./types.js";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -78,345 +93,7 @@ const BUNDLED_AGENT_DIR = join(
   "..",
   "agents",
 );
-const BACKGROUND_CHECK_MS = 10_000; // poll every 10 sec
-const COUNT_POLL_MS = 3_000; // update toolcall counts every 3 sec
-const TASK_TIMEOUT_MS = 30 * 60 * 1_000; // 30 minutes
-const MAX_POLL_ERRORS = 3; // consecutive poll failures before giving up on a task
-
-// ─── Types ────────────────────────────────────────────────────────────────────
-
-interface BackgroundTask {
-  dir: string;
-  agentType: string;
-  sessionName: string;
-  paneId?: string;
-  originalPane: string | null;
-  description: string;
-  startedAt: number;
-  toolUses: number;
-  turns: number;
-  conversationId?: string;
-  /** Most recent tool calls (capped), updated every COUNT_POLL_MS. */
-  recentCalls: ToolCallRecord[];
-  /** Consecutive completion-poll failures; reset to 0 on a successful poll. */
-  pollErrors?: number;
-}
-
-/** Serializable subset for active task registry persistence. */
-interface RegistryEntry {
-  id: string;
-  agentType: string;
-  description: string;
-  sessionName: string;
-  startedAt: number;
-  paneId?: string;
-  piDir: string;
-  dir: string;
-  conversationId?: string;
-  sessionRef?: string;
-}
-
-/** Durable task→session mapping used for resume after task completion. */
-interface TaskSessionHistoryEntry extends RegistryEntry {
-  status: "running" | "done" | "cancelled" | "aborted" | "failed" | "timeout";
-  completedAt?: number;
-  background: boolean;
-}
-
-export /** Details attached to tool result for rendering. */
-interface TaskDetails {
-  task_id: string;
-  agent_type: string;
-  description: string;
-  conversation_id?: string;
-  phase: "done" | "timeout" | "aborted" | "failed";
-  // Completed phase
-  status?: string;
-  summary?: string;
-  findings?: string;
-  evidence?: string;
-  confidence?: string;
-  duration_ms?: number;
-  turn_count?: number;
-  tool_uses?: number;
-  // Background
-  background?: boolean;
-  tmux_session?: string;
-}
-
 // Conversation helpers live in ./conversation.js.
-
-function readRegistry(piDir: string): RegistryEntry[] {
-  const path = join(piDir, "task-registry.json");
-  try {
-    return JSON.parse(readFileSync(path, "utf-8"));
-  } catch {
-    return [];
-  }
-}
-
-function writeRegistry(piDir: string, entries: RegistryEntry[]): void {
-  const path = join(piDir, "task-registry.json");
-  writeFileSync(path, JSON.stringify(entries, null, 2), "utf-8");
-}
-
-function readTaskSessionHistory(piDir: string): TaskSessionHistoryEntry[] {
-  const path = join(piDir, "task-session-history.json");
-  try {
-    return JSON.parse(readFileSync(path, "utf-8"));
-  } catch {
-    return [];
-  }
-}
-
-function writeTaskSessionHistory(
-  piDir: string,
-  entries: TaskSessionHistoryEntry[],
-): void {
-  const path = join(piDir, "task-session-history.json");
-  writeFileSync(path, JSON.stringify(entries, null, 2), "utf-8");
-}
-
-function upsertTaskSessionHistory(
-  piDir: string,
-  entry: TaskSessionHistoryEntry,
-): void {
-  const entries = readTaskSessionHistory(piDir);
-  const index = entries.findIndex((existing) => existing.id === entry.id);
-  if (index >= 0) {
-    entries[index] = { ...entries[index], ...entry };
-  } else {
-    entries.push(entry);
-  }
-  writeTaskSessionHistory(piDir, entries);
-}
-
-function findTaskSessionHistory(
-  piDir: string,
-  idOrSessionName: string,
-): TaskSessionHistoryEntry | undefined {
-  return readTaskSessionHistory(piDir).find(
-    (entry) =>
-      entry.id === idOrSessionName || entry.sessionName === idOrSessionName,
-  );
-}
-
-function findJsonlSessionByName(
-  piDir: string,
-  sessionName: string,
-  agentType: string,
-): TaskSessionHistoryEntry | undefined {
-  const artifactsDir = join(piDir, "artifacts");
-  const sessionDir = join(artifactsDir, "sessions");
-  try {
-    if (!existsSync(sessionDir)) return undefined;
-    const files = readdirSync(sessionDir)
-      .filter((file) => file.endsWith(".jsonl"))
-      .sort()
-      .reverse();
-    for (const file of files) {
-      const content = readFileSync(join(sessionDir, file), "utf-8");
-      let startedAt = Date.now();
-      for (const rawLine of content.split("\n")) {
-        const line = rawLine.trim();
-        if (!line) continue;
-        try {
-          const entry = JSON.parse(line) as {
-            type?: string;
-            timestamp?: string;
-            name?: string;
-            session_info?: { name?: string };
-          };
-          if (entry.type === "session" && entry.timestamp) {
-            const parsed = Date.parse(entry.timestamp);
-            if (Number.isFinite(parsed)) startedAt = parsed;
-          }
-          if (entry.type === "session_info") {
-            const name = entry.name ?? entry.session_info?.name;
-            if (name === sessionName) {
-              return {
-                id: sessionName,
-                agentType,
-                description: `Resumed session ${sessionName}`,
-                sessionName,
-                sessionRef: join(sessionDir, file),
-                startedAt,
-                piDir,
-                dir: artifactsDir,
-                status: "done",
-                background: false,
-              };
-            }
-            break;
-          }
-        } catch {
-          // Skip malformed lines
-        }
-      }
-    }
-  } catch {
-    return undefined;
-  }
-  return undefined;
-}
-
-// ─── Tmux Helpers ────────────────────────────────────────────────────────────
-
-function tmuxCmd(args: string[]): string {
-  return execFileSync("tmux", args, {
-    encoding: "utf-8",
-    stdio: ["ignore", "pipe", "pipe"],
-  }).trim();
-}
-
-function hasTmux(): boolean {
-  try {
-    execFileSync("tmux", ["-V"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function paneExists(paneId: string): boolean {
-  try {
-    return tmuxCmd(["list-panes", "-a", "-F", "#{pane_id}"])
-      .split("\n")
-      .includes(paneId);
-  } catch {
-    return false;
-  }
-}
-
-function getCurrentPaneId(): string | null {
-  try {
-    return tmuxCmd(["display-message", "-p", "#{pane_id}"]);
-  } catch {
-    return null;
-  }
-}
-
-function getCurrentPaneSize(
-  targetPane?: string | null,
-): { width: number; height: number } | null {
-  try {
-    const args = ["display-message", "-p", "#{pane_width} #{pane_height}"];
-    if (targetPane) args.splice(1, 0, "-t", targetPane);
-    const raw = tmuxCmd(args);
-    const [widthRaw, heightRaw] = raw.trim().split(/\s+/, 2);
-    const width = Number(widthRaw);
-    const height = Number(heightRaw);
-    if (!Number.isFinite(width) || !Number.isFinite(height)) return null;
-    return { width, height };
-  } catch {
-    return null;
-  }
-}
-
-function splitWindowPane(
-  cwd: string,
-  command: string,
-): { paneId: string; originalPane: string | null } {
-  const originalPane = getCurrentPaneId();
-  const paneSize = getCurrentPaneSize(originalPane);
-  const direction = chooseTmuxSplitDirection(
-    paneSize?.width ?? 0,
-    paneSize?.height ?? 0,
-  );
-  const paneId = tmuxCmd(
-    buildTmuxSplitWindowArgs(cwd, command, direction, originalPane),
-  );
-  return { paneId, originalPane };
-}
-
-function killAgentPane(
-  paneId: string | undefined,
-  originalPane: string | null,
-): void {
-  if (paneId) {
-    try {
-      if (paneExists(paneId)) tmuxCmd(["kill-pane", "-t", paneId]);
-    } catch {
-      /* ignore */
-    }
-  }
-  if (originalPane) {
-    try {
-      tmuxCmd(["select-pane", "-t", originalPane]);
-    } catch {
-      /* ignore */
-    }
-  }
-}
-
-// ─── Process a completed task (sendMessage + registry cleanup) ──────────────
-
-function completeTask(
-  pi: ExtensionAPI,
-  id: string,
-  task: BackgroundTask,
-  content: string,
-  phase: "done" | "timeout" | "failed",
-  piDir: string,
-): void {
-  // Kill the tmux pane if still alive
-  killAgentPane(task.paneId, task.originalPane);
-
-  const parsed = parseResultXml(content);
-  const durationMs = Date.now() - task.startedAt;
-  const completedSessionRef = findJsonlSessionByName(
-    piDir,
-    task.sessionName,
-    task.agentType,
-  )?.sessionRef;
-
-  upsertTaskSessionHistory(piDir, {
-    id,
-    agentType: task.agentType,
-    description: task.description,
-    sessionName: task.sessionName,
-    startedAt: task.startedAt,
-    paneId: task.paneId,
-    piDir,
-    dir: task.dir,
-    conversationId: task.conversationId,
-    sessionRef: completedSessionRef,
-    status: phase,
-    completedAt: Date.now(),
-    background: true,
-  });
-
-  // Send completion notification
-  pi.sendMessage(
-    {
-      customType: "task-complete",
-      content: `Background task ${id} (${task.agentType}) ${phase}.\n\nResult:\n${content}`,
-      display: true,
-      details: {
-        task_id: id,
-        agent_type: task.agentType,
-        description: task.description,
-        phase,
-        status: phase,
-        result: content,
-        summary: parsed.summary,
-        findings: parsed.findings,
-        confidence: parsed.confidence,
-        duration_ms: durationMs,
-        tool_uses: task.toolUses,
-        turn_count: task.turns,
-      },
-    },
-    {
-      triggerTurn: true,
-      deliverAs: "followUp",
-    },
-  );
-
-  // Remove from registry
-  const entries = readRegistry(piDir).filter((e) => e.id !== id);
-  writeRegistry(piDir, entries);
-}
 
 // ─── Extension Entry Point ──────────────────────────────────────────────────
 
@@ -425,291 +102,54 @@ export default function (pi: ExtensionAPI) {
   if (process.env.PI_TASK_TOOL_DISABLED === "1") return;
 
   // ── Background task tracker ────────────────────────────────────────────
-  const backgroundTasks = new Map<string, BackgroundTask>();
-  const foregroundTasks = new Map<string, BackgroundTask>();
-  let widgetCtx: ExtensionContext | null = null;
+      const { piDir } = discoverAgents(process.cwd(), BUNDLED_AGENT_DIR);
+      const backgroundTasks = new Map<string, BackgroundTask>();
+      const foregroundTasks = new Map<string, BackgroundTask>();
+  const taskWidget = createTaskWidgetController(foregroundTasks, backgroundTasks);
+  const { ensureTaskWidget, clearTaskWidgetIfIdle } = taskWidget;
 
   // ── Restore active tasks from registry on load ──────────────────────────
-  const { piDir } = discoverAgents(process.cwd());
-  const registry = readRegistry(piDir);
-  const staleIds: string[] = [];
-  for (const entry of registry) {
-    // Only restore if artifact dir still exists
-    if (!existsSync(entry.dir)) {
-      staleIds.push(entry.id);
-      continue;
-    }
 
-    // Check if tmux pane is still alive
-    const paneAlive = entry.paneId ? paneExists(entry.paneId) : false;
-    if (!paneAlive) {
-      staleIds.push(entry.id);
-      continue;
-    }
+  restoreActiveBackgroundTasks(piDir, backgroundTasks);
 
-    const bgtask: BackgroundTask = {
-      dir: entry.dir,
-      agentType: entry.agentType,
-      sessionName: entry.sessionName,
-      paneId: entry.paneId,
-      originalPane: null,
-      description: entry.description,
-      startedAt: entry.startedAt,
-      toolUses: 0,
-      turns: 0,
-      conversationId: entry.conversationId,
-      recentCalls: [],
-    };
-
-    backgroundTasks.set(entry.id, bgtask);
-  }
-  if (staleIds.length) {
-    writeRegistry(
-      piDir,
-      registry.filter((e) => !staleIds.includes(e.id)),
-    );
-  }
 
   // ── Widget / timer setup ───────────────────────────────────────────────
 
-  let widgetTimer: ReturnType<typeof setInterval> | null = null;
-  function stopWidget() {
-    if (widgetTimer) {
-      clearInterval(widgetTimer);
-      widgetTimer = null;
-    }
-  }
-
-  const countInterval = setInterval(() => {
-    const trackedTasks = [
-      ...foregroundTasks.entries(),
-      ...backgroundTasks.entries(),
-    ] as Array<[string, BackgroundTask]>;
-
-    for (const [id, task] of trackedTasks) {
-      const sessionDir = join(task.dir, "sessions", id);
-      // Single walk: counts + recent tool-call history with status
-      const { toolUses, turns, recent } = readRecentToolCalls(
-        sessionDir,
-        12,
-        task.sessionName,
-      );
-      task.toolUses = toolUses;
-      task.turns = turns;
-      task.recentCalls = recent;
-    }
-  }, COUNT_POLL_MS);
-
-  // Theme reference is captured at setWidget time so renderWidget can use it.
-  let widgetTheme: ThemeLike | null = null;
-
-  function renderWidget(width: number): string[] {
-    // Defensive: never let a render exception kill the TUI. If anything
-    // throws (theme lookup miss, malformed session JSONL, etc.), fall
-    // back to a minimal single-line summary so the TUI stays alive.
-    try {
-      return renderTaskWidget({
-        foregroundTasks: foregroundTasks.entries(),
-        backgroundTasks: backgroundTasks.entries(),
-        foregroundCount: foregroundTasks.size,
-        backgroundCount: backgroundTasks.size,
-        width,
-        theme: widgetTheme,
-      });
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      const active = [
-        ...Array.from(foregroundTasks.entries()),
-        ...Array.from(backgroundTasks.entries()),
-      ];
-      if (active.length === 0) return [];
-      const [, task] = active[0];
-      return [
-        truncateToWidth(
-          `${task.agentType}  \u2022 ${formatMs(Date.now() - task.startedAt)}  (render error: ${msg})`,
-          Math.min(width, 120),
-        ),
-      ];
-    }
-  }
-
-  function ensureTaskWidget(targetCtx: ExtensionContext): void {
-    if (widgetCtx || targetCtx.mode !== "tui") return;
-    widgetCtx = targetCtx;
-    targetCtx.ui.setWidget("task", (tui, theme) => {
-      widgetTheme = theme ?? null;
-      widgetTimer = setInterval(
-        () => tui.requestRender(),
-        TASK_WIDGET_RENDER_MS,
-      );
-      // Don't keep the process alive just for the widget refresh.
-      widgetTimer.unref?.();
-      return {
-        render: (width: number) => renderWidget(width),
-        invalidate: () => {},
-        dispose: () => {
-          widgetTheme = null;
-          stopWidget();
-        },
-      };
-    });
-  }
-
-  function clearTaskWidgetIfIdle(): void {
-    if (foregroundTasks.size > 0 || backgroundTasks.size > 0) return;
-    stopWidget();
-    if (widgetCtx) {
-      widgetCtx.ui.setWidget("task", undefined);
-      widgetCtx = null;
-    }
-  }
+  const countInterval = startToolStatsPolling(
+    foregroundTasks,
+    backgroundTasks,
+    COUNT_POLL_MS,
+  );
 
   // ── Polling loop (background task completion, pane death, timeout) ──────
 
-  // setInterval does not wait for an async callback to settle, so a slow pass
-  // could overlap the next one and double-complete a task. Ticks that fire
-  // mid-pass become no-ops.
-  let checkInFlight = false;
-
-  const checkInterval = setInterval(async () => {
-    if (checkInFlight) return;
-    if (backgroundTasks.size === 0) {
-      clearTaskWidgetIfIdle();
-      return;
-    }
-
-    checkInFlight = true;
-    try {
-      const now = Date.now();
-      const ids = Array.from(backgroundTasks.keys());
-
-      for (const id of ids) {
-        const task = backgroundTasks.get(id);
-        if (!task) continue;
-
-        // ── Check timeout ────────────────────────────────────────────
-        if (now - task.startedAt > TASK_TIMEOUT_MS) {
-          killAgentPane(task.paneId, task.originalPane);
-          backgroundTasks.delete(id);
-          clearTaskWidgetIfIdle();
-          completeTask(
-            pi,
-            id,
-            task,
-            "Task timed out after 30 minutes",
-            "timeout",
-            piDir,
-          );
-          continue;
-        }
-
-        let snapshot: TaskCompletionSnapshot;
-        try {
-          snapshot = await checkTaskCompletion({
-            sessionDir: join(task.dir, "sessions", id),
-            sessionName: task.sessionName,
-            paneId: task.paneId,
-            sinceMs: task.startedAt,
-          });
-        } catch (err) {
-          task.pollErrors = (task.pollErrors ?? 0) + 1;
-          if (task.pollErrors >= MAX_POLL_ERRORS) {
-            killAgentPane(task.paneId, task.originalPane);
-            backgroundTasks.delete(id);
-            clearTaskWidgetIfIdle();
-            const message = err instanceof Error ? err.message : String(err);
-            completeTask(
-              pi,
-              id,
-              task,
-              `Task ${id} polling failed ${task.pollErrors}x; last error: ${message}`,
-              "failed",
-              piDir,
-            );
-          }
-          continue;
-        }
-
-        task.pollErrors = 0;
-
-        if (snapshot.status === "running") {
-          continue;
-        }
-
-        const phase = snapshot.status === "completed" ? "done" : "failed";
-        backgroundTasks.delete(id);
-        clearTaskWidgetIfIdle();
-        completeTask(pi, id, task, snapshot.content, phase, piDir);
-      }
-    } finally {
-      checkInFlight = false;
-    }
-  }, BACKGROUND_CHECK_MS);
+  const checkInterval = startBackgroundPolling(
+    {
+      backgroundTasks,
+      checkTaskCompletion,
+      killAgentPane: (paneId, originalPane) => {
+        if (paneId) killAgentPane(paneId, originalPane);
+      },
+      clearTaskWidgetIfIdle,
+      completeTask,
+      TASK_TIMEOUT_MS,
+      MAX_POLL_ERRORS,
+      piDir,
+      pi,
+    },
+    BACKGROUND_CHECK_MS,
+  );
 
   // ── Cleanup on shutdown ────────────────────────────────────────────────
 
   pi.on("session_shutdown", () => {
     clearInterval(checkInterval);
     clearInterval(countInterval);
-    stopWidget();
-    if (widgetCtx) {
-      widgetCtx.ui.setWidget("task", undefined);
-      widgetCtx = null;
-    }
+    taskWidget.dispose();
   });
 
-  // ── Custom notification renderer ───────────────────────────────────────
-
-      pi.registerMessageRenderer?.(
-        "task-complete",
-        (message, { expanded }, theme) => {
-          const d = message.details as Record<string, unknown> | undefined;
-          if (!d) return undefined;
-    
-          const agentType = (d.agent_type as string) || "";
-          const desc = (d.description as string) || "";
-          const result = ((d.result as string) || "").trim();
-          const durationMs = (d.duration_ms as number) || 0;
-          const toolUses = (d.tool_uses as number) || 0;
-    
-          let line = " " + theme.fg("accent", agentType);
-          if (desc) line += theme.fg("dim", ` - ${desc}`);
-    
-          const useStr = toolUses > 0 ? `${toolUses} toolcalls` : "";
-          const durStr = durationMs >= 1000 ? formatMs(durationMs) : "";
-          const statsParts = [useStr, durStr].filter(Boolean);
-          const statsText = statsParts.join(" • ");
-    
-          if (statsText) {
-            line += "\n " + theme.fg("dim", statsText);
-          }
-    
-          const expandHint = keyHint("app.tools.expand", "to expand");
-          const collapseHint = keyHint("app.tools.expand", "to collapse");
-    
-          if (expanded) {
-            // Expanded: show the FULL result
-            if (result) line += "\n " + theme.fg("muted", result);
-            line += "\n " + theme.fg("dim", `  (${collapseHint})`);
-          } else {
-            // Collapsed: preview only
-            const preview = result.slice(0, 120);
-            if (preview) {
-              line +=
-                "\n " +
-                theme.fg("dim", `  ⎿  ${preview}`) +
-                (result.length > 120 ? theme.fg("dim", "…") : "");
-            }
-            if (result.length > 120) {
-              line +=
-                "\n " +
-                theme.fg("dim", `  (${expandHint})`);
-            }
-          }
-
-          return new Text(line, 0, 0);
-        },
-      );
+      // ── Custom notification renderer ───────────────────────────────────────
+      pi.registerMessageRenderer?.("task-complete", createTaskCompleteRenderer());
 
   // ── Tool Registration ──────────────────────────────────────────────────
 
@@ -727,41 +167,10 @@ export default function (pi: ExtensionAPI) {
       "For background tasks: DO NOT sleep, poll, or check on progress. You'll be notified",
       "After delegated work completes, read changed files, review diff, verify scope, and run relevant checks",
       "Send the user a concise summary of the result since the agent's output is not user-visible",
-    ],
-    parameters: Type.Object({
-      agent_type: Type.String({
-        description: "The type of specialist agent to use for this task",
-      }),
-      prompt: Type.String({
-        description:
-          "The complete task for the agent to perform. Be detailed and self-contained.",
-      }),
-      description: Type.String({
-        description: "A short (3-5 word) summary of the task",
-      }),
-      task_id: Type.Optional(
-        Type.String({
-          description:
-            "Resume an existing background task by id instead of starting a new task.",
-        }),
-      ),
-      conversation_id: Type.Optional(
-        Type.String({
-          description:
-            "Durable specialist conversation id. Reuses .pi/artifacts/task-<id>/sessions when called again.",
-        }),
-      ),
+        ],
+        parameters: taskParametersSchema(),
 
-          background: Type.Optional(
-            Type.Boolean({
-              description:
-                "Run in background (async). You will be notified when it completes. DO NOT sleep, poll, ask the task for status, or duplicate its work while it runs in background.",
-              default: true,
-            }),
-          ),
-        }),
-
-    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+        async execute(_toolCallId, params, signal, _onUpdate, ctx) {
       const { agents, piDir } = discoverAgents(ctx.cwd, BUNDLED_AGENT_DIR);
       const parentToolNames = pi
         .getAllTools()
@@ -1042,20 +451,13 @@ export default function (pi: ExtensionAPI) {
       // default true
 
           // ── Build the prompt (instructions are inlined; no CONTEXT.md file) ─
-          const promptContent = [
-            `# Task: ${descText}`,
-            "",
-            `## Agent`,
-            `${agent.name} (${agent.source})`,
-            "",
-            `## Instructions`,
-            params.prompt,
-            "",
-            `## Working Directory`,
-            ctx.cwd,
-            "",
-            TASK_PROMPT_INSTRUCTIONS,
-          ].join("\n");
+          const promptContent = buildTaskPrompt({
+            description: descText,
+            agentName: agent.name,
+            agentSource: agent.source,
+            prompt: params.prompt,
+            cwd: ctx.cwd,
+          });
 
           const sessionDir = join(artifactsDir, "sessions", id);
           await mkdir(sessionDir, { recursive: true });
@@ -1455,13 +857,7 @@ export default function (pi: ExtensionAPI) {
             // Clean registry
             const remaining = readRegistry(piDir).filter((e) => e.id !== id);
             writeRegistry(piDir, remaining);
-            if (backgroundTasks.size === 0) {
-              stopWidget();
-              if (widgetCtx) {
-                widgetCtx.ui.setWidget("task", undefined);
-                widgetCtx = null;
-              }
-            }
+                clearTaskWidgetIfIdle();
           },
           { once: true },
         );
@@ -1492,109 +888,8 @@ export default function (pi: ExtensionAPI) {
       };
     },
 
-    renderCall(args, theme, _context) {
-      const agentName =
-        ((args as Record<string, unknown>).agent_type as string) || "...";
-      const desc =
-        ((args as Record<string, unknown>).description as string) || "";
-
-      let text = theme.fg("toolTitle", "");
-      text += theme.fg("accent", agentName);
-      if (desc) text += theme.fg("dim", ` - ${desc}`);
-      return new Text(text, 0, 0);
-    },
-
-    renderResult(result, { expanded }, theme, _context) {
-      const d = result.details as TaskDetails | undefined;
-      if (!d) return new Text("", 0, 0);
-
-      if (d.background) {
-        const toolUses = d.tool_uses || 0;
-        const durationMs = d.duration_ms || 0;
-        const confidence = d.confidence || "";
-
-        const useStr = toolUses > 0 ? `${toolUses} toolcalls` : "";
-        const durStr = durationMs >= 1000 ? formatMs(durationMs) : "";
-        const statsParts = [useStr, durStr].filter(Boolean);
-        const statsText = statsParts.join(" \u2022 ");
-        const confStr = confidence ? `[${confidence.toUpperCase()}]` : "";
-        const statsLine = [confStr, statsText].filter(Boolean).join(" ");
-
-        const subtleBg = (text: string) => `\x1b[48;2;30;28;44m${text}\x1b[0m`;
-        return new Text(
-          statsLine ? " " + theme.fg("dim", statsLine.trim()) : "",
-          0,
-          0,
-          subtleBg,
-        );
-      }
-
-      if (
-        d.phase === "timeout" ||
-        d.phase === "aborted" ||
-        d.phase === "failed"
-      ) {
-        const line =
-          theme.fg("error", "x") + " " + theme.fg("dim", `[${d.phase}]`);
-        return new Text(line, 0, 0);
-      }
-
-      const isError =
-        d.status === "failure" ||
-        d.status === "blocked" ||
-        d.status === "unknown" ||
-        d.status === "timeout" ||
-        d.status === "failed";
-
-      const durationMs = d.duration_ms || 0;
-      const toolUses = d.tool_uses || 0;
-
-      const useStr = toolUses > 0 ? `${toolUses} toolcalls` : "";
-      const durStr = durationMs >= 1000 ? formatMs(durationMs) : "";
-      const statsParts = [useStr, durStr].filter(Boolean);
-      const statsStr = statsParts.length
-        ? " " + theme.fg("dim", statsParts.join(" • "))
-        : "";
-
-          const icon = isError ? theme.fg("error", "x") : theme.fg("success", "✓");
-          const statusLabel = d.status && d.status !== "done" ? d.status : "done";
-          let line =
-            icon +
-            " " +
-            theme.fg(isError ? "error" : "success", statusLabel) +
-            statsStr;
-
-          // Pull the full final message from content[0].text. The summary
-          // field is only the first 500 chars and loses most of the result.
-          const firstContent = result.content?.[0];
-          const fullText =
-            firstContent && "text" in firstContent
-              ? (firstContent.text ?? "").trim()
-              : "";
-          const preview = fullText.slice(0, 120);
-          const expandHint = keyHint("app.tools.expand", "to expand");
-          const collapseHint = keyHint("app.tools.expand", "to collapse");
-
-          if (expanded) {
-            // Expanded: show the FULL message line-by-line. No truncation.
-            if (fullText) line += "\n" + theme.fg("muted", fullText);
-            line += "\n" + theme.fg("dim", `  (${collapseHint})`);
-          } else {
-            if (preview) {
-              line += "\n" + theme.fg("dim", `  ⎿  ${preview}`) +
-                (fullText.length > 120 ? theme.fg("dim", "…") : "");
-            } else {
-              line +=
-                "\n" +
-                theme.fg("dim", `  ⎿  ${isError ? d.status || "error" : "Done"}`);
-            }
-            if (fullText.length > 120) {
-              line += "\n" + theme.fg("dim", `  (${expandHint})`);
-            }
-          }
-
-          return new Text(line, 0, 0);
-        },
+        renderCall,
+        renderResult,
   });
 
   pi.registerCommand("task-sessions", {

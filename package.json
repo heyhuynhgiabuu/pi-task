@@ -3,18 +3,15 @@
   "version": "0.2.0",
   "description": "Delegating task/subagent extension for Pi: foreground/background subagents, widgets, tmux observability, SDK fallback.",
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
-  "pi": {
-    "extensions": [
-      "./dist/index.js"
-    ]
-  },
+  "main": "dist/index.js",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     }
+  },
+  "bin": {
+    "pi-task": "dist/index.js"
   },
   "files": [
     "dist",
@@ -22,28 +19,34 @@
     "README.md",
     "LICENSE",
     "CHANGELOG.md",
-    "media"
+    "media",
+    "!media/demo-background-task.mp4"
   ],
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
     "test": "PI_XAI_SIDE_TOOLS=0 tsx --test test/helpers.test.ts",
     "smoke": "PI_XAI_SIDE_TOOLS=0 tsx test/smoke.ts",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "postversion": "git push --follow-tags"
   },
   "keywords": [
     "pi",
     "pi-extension",
+    "pi-package",
     "agent",
     "subagent",
     "task",
-    "tmux"
+    "tmux",
+    "background-tasks",
+    "parallel-execution",
+    "session-management"
   ],
   "license": "MIT",
-  "dependencies": {
-    "@earendil-works/pi-coding-agent": "^0.79.0",
-    "@earendil-works/pi-tui": "^0.79.0",
-    "@sinclair/typebox": "^0.34.0"
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "@sinclair/typebox": "*"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
@@ -52,6 +55,13 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "video": "https://github.com/heyhuynhgiabuu/pi-task/releases/download/v0.2.0/demo-background-task.mp4",
+    "image": "https://raw.githubusercontent.com/heyhuynhgiabuu/pi-task/main/media/demo.png"
   },
   "repository": {
     "type": "git",

@@ -32,14 +32,10 @@ import {
 import {
   findJsonlSessionByName,
   normalizeConversationId,
-  parseMetadataFromBody,
-  readTaskBlock,
   findTaskSessionHistory,
   readRegistry,
   readTaskSessionsRegistry,
-  renderConversationSessions,
   upsertTaskSessionHistory,
-  writeConversationArtifacts,
   writeRegistry,
   writeTaskSessionsRegistry,
 } from "./conversation.js";
@@ -61,6 +57,7 @@ import {
   startBackgroundPolling,
   startToolStatsPolling,
 } from "./lifecycle/index.js";
+import { formatSdkBackgroundReceipt, startSdkBackgroundTask } from "./subagent/sdkBackground.js";
 import { runSdkSubagent } from "./subagent/runSdk.js";
 import {
   checkTaskCompletion,
@@ -71,6 +68,7 @@ import {
   killAgentPane,
   paneExists,
   setPaneRemainOnExit,
+  setPaneSelfDestruct,
   splitWindowPane,
   wrapWithPaneExitWatcher,
 } from "./subagent/tmux.js";
@@ -85,6 +83,7 @@ import type {
   BackgroundTask,
   RegistryEntry,
 } from "./types.js";
+import { ignoreStaleExtensionCtx } from "./stale-ctx.js";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -123,7 +122,7 @@ export default function (pi: ExtensionAPI) {
 
   // ── Polling loop (background task completion, pane death, timeout) ──────
 
-  const checkInterval = startBackgroundPolling(
+  const stopBackgroundPolling = startBackgroundPolling(
     {
       backgroundTasks,
       checkTaskCompletion,
@@ -143,7 +142,7 @@ export default function (pi: ExtensionAPI) {
   // ── Cleanup on shutdown ────────────────────────────────────────────────
 
   pi.on("session_shutdown", () => {
-    clearInterval(checkInterval);
+    stopBackgroundPolling();
     clearInterval(countInterval);
     taskWidget.dispose();
   });
@@ -234,26 +233,25 @@ export default function (pi: ExtensionAPI) {
           if (registeredTaskId) {
             id = registeredTaskId;
             sessionName = conversationId ?? `task-${id}`;
-            const block = readTaskBlock(piDir, id);
-        const previousMetadata = parseMetadataFromBody(block?.body);
-        const metadataAgent = previousMetadata?.agent_type;
-        if (metadataAgent && metadataAgent !== agent.name) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `conversation_id "${conversationId}" belongs to agent "${metadataAgent}", not "${agent.name}". Use the original agent_type or start a different conversation_id.`,
-              },
-            ],
-            details: {
-              phase: "failed" as const,
-              error: "conversation_id agent_type mismatch",
-              conversation_id: conversationId,
-            },
-            isError: true,
-          };
-        }
-        resume = true;
+            const previous = findTaskSessionHistory(piDir, id);
+            const metadataAgent = previous?.agentType;
+            if (metadataAgent && metadataAgent !== agent.name) {
+              return {
+                content: [
+                  {
+                    type: "text" as const,
+                    text: `conversation_id "${conversationId}" belongs to agent "${metadataAgent}", not "${agent.name}". Use the original agent_type or start a different conversation_id.`,
+                  },
+                ],
+                details: {
+                  phase: "failed" as const,
+                  error: "conversation_id agent_type mismatch",
+                  conversation_id: conversationId,
+                },
+                isError: true,
+              };
+            }
+            resume = true;
 
         const entry = readRegistry(piDir).find(
           (candidate) => candidate.id === id,
@@ -440,9 +438,9 @@ export default function (pi: ExtensionAPI) {
         await mkdir(artifactsDir, { recursive: true });
         const taskSessionsRegistry = readTaskSessionsRegistry(piDir);
         taskSessionsRegistry[conversationId] = {
-          task_id: id,
-          session_file: `${artifactsDir}/${id}`,
-        };
+              task_id: id,
+              updated_at: new Date().toISOString(),
+            };
         writeTaskSessionsRegistry(piDir, taskSessionsRegistry);
       }
 
@@ -517,7 +515,7 @@ export default function (pi: ExtensionAPI) {
 
       if (foregroundTask) {
         foregroundTasks.set(id, foregroundTask);
-        ensureTaskWidget(ctx);
+        ignoreStaleExtensionCtx(() => ensureTaskWidget(ctx));
       }
 
       // Prefer tmux when the parent Pi is running inside tmux so users can watch
@@ -525,107 +523,47 @@ export default function (pi: ExtensionAPI) {
       // unavailable, or when explicitly forced with PI_TASK_BACKEND=sdk.
       if (useSdkBackend) {
         if (isBackground) {
-          const bgtask: BackgroundTask = {
-            dir: artifactsDir,
-            agentType: agent.name,
-            sessionName,
-            originalPane: null,
-            description: descText,
-            startedAt: Date.now(),
-            toolUses: 0,
-            turns: 0,
-            conversationId,
-            recentCalls: [],
-          };
-
-          backgroundTasks.set(id, bgtask);
-          const entry: RegistryEntry = {
+          foregroundTasks.delete(id);
+          startSdkBackgroundTask({
             id,
             agentType: agent.name,
             description: descText,
             sessionName,
-            startedAt: bgtask.startedAt,
+            startedAt: Date.now(),
             piDir,
-            dir: artifactsDir,
+            artifactsDir,
             conversationId,
-          };
-
-          const entries = readRegistry(piDir);
-          entries.push(entry);
-          writeRegistry(piDir, entries);
-          upsertTaskSessionHistory(piDir, {
-            ...entry,
-            status: "running",
-            background: true,
+            run: runSdkFallback,
           });
-          pi.appendEntry("task-registry", entry);
-          ensureTaskWidget(ctx);
-
-          void runSdkFallback()
-            .then(async ({ output }) => {
-              const finalOutput =
-                output || "SDK subagent completed without assistant text.";
-              backgroundTasks.delete(id);
-              clearTaskWidgetIfIdle();
-              completeTask(pi, id, bgtask, finalOutput, "done", piDir);
-            })
-            .catch((error) => {
-              const message =
-                error instanceof Error ? error.message : String(error);
-              backgroundTasks.delete(id);
-              clearTaskWidgetIfIdle();
-              completeTask(
-                pi,
-                id,
-                bgtask,
-                `Task ${id} failed: ${message}`,
-                "failed",
-                piDir,
-              );
-            });
-
+          clearTaskWidgetIfIdle();
           return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Task ${id} started with SDK backend.`,
-              },
-            ],
-                details: {
-                  task_id: id,
-                  background: true,
-                  conversation_id: conversationId,
-                },
-              };
-            }
+            content: [{ type: "text" as const, text: formatSdkBackgroundReceipt(id) }],
+            details: {
+              phase: "running" as const,
+              backend: "sdk" as const,
+              background: true,
+              task_id: id,
+              agent_type: agent.name,
+              description: descText,
+              conversation_id: conversationId,
+            },
+          };
+        }
 
-            try {
-              const { output, sessionPath } = await runSdkFallback();
-          const finalOutput =
-            output || "SDK subagent completed without assistant text.";
-          if (conversationId) {
-            writeConversationArtifacts({
-              piDir,
-              taskId: id,
-              conversationId,
-              agentType: agent.name,
-              sessionFile: sessionPath ?? "unknown",
-              prompt: params.prompt,
-              result: finalOutput,
-            });
-          }
-              return {
-                content: [{ type: "text" as const, text: finalOutput }],
-                details: {
-                  phase: "done" as const,
-                  backend: "sdk" as const,
-                  session_path: sessionPath,
-                  conversation_id: conversationId,
-                },
+        try {
+          const { output, sessionPath } = await runSdkFallback();
+          const finalOutput = output || "SDK subagent completed without assistant text.";
+          return {
+            content: [{ type: "text" as const, text: finalOutput }],
+            details: {
+              phase: "done" as const,
+              backend: "sdk" as const,
+              session_path: sessionPath,
+              conversation_id: conversationId,
+            },
           };
         } catch (error) {
-          const message =
-            error instanceof Error ? error.message : String(error);
+          const message = error instanceof Error ? error.message : String(error);
           return {
             content: [
               { type: "text" as const, text: `SDK task failed: ${message}` },
@@ -656,10 +594,12 @@ export default function (pi: ExtensionAPI) {
         const splitResult = splitWindowPane(ctx.cwd, tmuxCommand);
         paneId = splitResult.paneId;
         originalPane = splitResult.originalPane;
-        setPaneRemainOnExit(paneId, true);
+        setPaneRemainOnExit(paneId, Boolean(foregroundTask));
         if (foregroundTask) {
           foregroundTask.paneId = paneId;
           foregroundTask.originalPane = originalPane;
+        } else {
+          setPaneSelfDestruct(paneId, true);
         }
       } catch {
         foregroundTasks.delete(id);
@@ -757,23 +697,23 @@ export default function (pi: ExtensionAPI) {
         });
         if (phase === "done") {
           killAgentPane(paneId, originalPane);
+        } else {
+          // The subagent pane is still alive after a cancel/failed/timeout
+          // (we never reached the done branch). Without this, a user-initiated
+          // session replacement while the foreground wait was in flight would
+          // abort the wait → return cancelled → leave the pane orphaned. Always
+          // tear down the pane on any terminal status so the user never ends up
+          // with a dangling tmux split. Best-effort: ignore failures (pane may
+          // already be gone).
+          try {
+            killAgentPane(paneId, originalPane);
+          } catch {
+            // ignore
+          }
         }
         foregroundTasks.delete(id);
         clearTaskWidgetIfIdle();
-
-        if (conversationId) {
-          writeConversationArtifacts({
-            piDir,
-            taskId: id,
-            conversationId,
-            agentType: agent.name,
-            sessionFile: `${sessionDir}/${sessionName}`,
-            prompt: params.prompt,
-            result: content,
-          });
-        }
-
-        const parsed = parseResultXml(content);
+            const parsed = parseResultXml(content);
         const durationMs = Date.now() - startedAt;
         const { toolUses, turns } = countToolUses(sessionDir, sessionName);
 
@@ -843,28 +783,18 @@ export default function (pi: ExtensionAPI) {
         status: "running",
         background: true,
       });
-      // Also persist to session store via appendEntry (audit trail)
-      pi.appendEntry("task-registry", entry);
+      // Also persist to session store via appendEntry (audit trail). This is
+      // best-effort because OpenPi can replace sessions while an older pi-task
+      // closure is still unwinding, making captured extension APIs stale. The
+      // JSON registry/history above are the durable source of truth.
+      ignoreStaleExtensionCtx(() => pi.appendEntry("task-registry", entry));
 
-      // ── Abort signal handling ──────────────────────────────────────────
-      if (signal) {
-        signal.addEventListener(
-          "abort",
-          () => {
-            killAgentPane(paneId, originalPane);
-            backgroundTasks.delete(id);
-            clearTaskWidgetIfIdle();
-            // Clean registry
-            const remaining = readRegistry(piDir).filter((e) => e.id !== id);
-            writeRegistry(piDir, remaining);
-                clearTaskWidgetIfIdle();
-          },
-          { once: true },
-        );
-      }
+      // Do not kill a background subagent when the parent session aborts or is
+      // replaced. Background tasks are intentionally detached; the registry and
+      // polling loop own their lifecycle after the pane is spawned.
 
       // ── Sticky widget ──────────────────────────────────────────────────
-      ensureTaskWidget(ctx);
+      ignoreStaleExtensionCtx(() => ensureTaskWidget(ctx));
 
       return {
         content: [
@@ -897,7 +827,16 @@ export default function (pi: ExtensionAPI) {
     handler: async (_args, ctx) => {
       const cwd = ctx.sessionManager?.getCwd?.() ?? process.cwd();
       const { piDir } = discoverAgents(cwd);
-      ctx.ui.notify(renderConversationSessions(piDir), "info");
+      const registry = readTaskSessionsRegistry(piDir);
+      const rows = Object.entries(registry)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([conversationId, entry]) => `- ${conversationId} -> ${entry.task_id}`);
+      ctx.ui.notify(
+        rows.length > 0
+          ? `Durable pi-task conversations:\n${rows.join("\n")}`
+          : "No durable pi-task conversations found.",
+        "info",
+      );
     },
   });
 }

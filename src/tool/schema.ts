@@ -15,6 +15,9 @@ export function taskParametersSchema() {
         workspace_group: Type.Optional(Type.String({
           description: "Shared HerdR workspace group. Concurrent tasks with the same value use panes in one workspace.",
         })),
+        cwd: Type.Optional(Type.String({
+          description: "Absolute existing directory where a newly launched child runs. Use a parent-created Git worktree for writer isolation. Defaults to the caller cwd; resumed launches reuse their stored cwd. pi-task does not create, merge, or remove the worktree.",
+        })),
 
     task_id: Type.Optional(
       Type.String({

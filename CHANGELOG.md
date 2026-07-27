@@ -6,6 +6,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.8] - 2026-07-28
+
+### Added
+
+- Optional validated `cwd` task input for running children in parent-created Git worktrees across SDK, tmux, and HerdR backends. The cwd is persisted for resumed launches; pi-task does not own worktree creation, merge, or cleanup.
+
+### Fixed
+
+- Reject foreground relaunch of an already-running durable task instead of starting a second child against the same session.
+
 ## [0.3.7] - 2026-07-22
 
 ### Changed

@@ -52,6 +52,7 @@ export function restoreActiveBackgroundTasks(
         startedAt: entry.startedAt,
         piDir: entry.piDir,
         dir: entry.dir,
+        cwd: entry.cwd,
         paneId: entry.paneId,
         completedAt: Date.now(),
       });
@@ -92,6 +93,7 @@ export function restoreActiveBackgroundTasks(
         startedAt: entry.startedAt,
         piDir: entry.piDir,
         dir: entry.dir,
+        cwd: entry.cwd,
         paneId: entry.paneId,
         completedAt: Date.now(),
       });
@@ -101,6 +103,7 @@ export function restoreActiveBackgroundTasks(
 
     backgroundTasks.set(entry.id, {
       dir: entry.dir,
+      cwd: entry.cwd,
       agentType: entry.agentType,
       sessionName: entry.sessionName,
         paneId,

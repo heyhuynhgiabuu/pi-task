@@ -47,6 +47,7 @@ export function completeTask(
     handle: task.handle,
     piDir,
     dir: task.dir,
+    cwd: task.cwd,
     conversationId: task.conversationId,
     sessionRef: completedSessionRef,
     status: phase,

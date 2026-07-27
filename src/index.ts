@@ -92,6 +92,8 @@ import type {
   TerminalHandle,
 } from "./types.js";
 import { ignoreStaleExtensionCtx } from "./stale-ctx.js";
+import { resolveTaskCwd } from "./task-cwd.js";
+import { serializeTaskAdmission } from "./task-admission.js";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -122,9 +124,13 @@ export default function (pi: ExtensionAPI) {
   // ── Restore active tasks from registry on load ──────────────────────────
 
   const syncHerdr = createSyncHerdrControl();
-  const registryEntryAlive = (entry: RegistryEntry): boolean => entry.handle?.backend === "herdr"
-    ? syncHerdr.exists(entry.handle)
-    : Boolean(entry.paneId && paneExists(entry.paneId));
+  const registryEntryAlive = (entry: RegistryEntry): boolean => {
+    if (entry.handle?.backend === "herdr") return syncHerdr.exists(entry.handle);
+    const paneId = entry.handle?.backend === "tmux"
+      ? entry.handle.resourceId
+      : entry.paneId;
+    return Boolean(paneId && paneExists(paneId));
+  };
   const registryEntryStatus = (entry: RegistryEntry): "alive" | "missing" | "unavailable" => {
     try {
       return registryEntryAlive(entry) ? "alive" : "missing";
@@ -139,7 +145,12 @@ export default function (pi: ExtensionAPI) {
     registryEntryAlive,
     (entry) => {
       if (entry.handle?.backend === "herdr") syncHerdr.close(entry.handle);
-      else if (entry.paneId) killAgentPane(entry.paneId, null);
+      else {
+        const paneId = entry.handle?.backend === "tmux"
+          ? entry.handle.resourceId
+          : entry.paneId;
+        if (paneId) killAgentPane(paneId, null);
+      }
     },
   );
 
@@ -204,7 +215,7 @@ export default function (pi: ExtensionAPI) {
       "For background tasks: DO NOT sleep, poll, or check on progress. You'll be notified",
       "After delegated work completes, read changed files, review diff, verify scope, and run relevant checks",
       "Send the user a concise summary of the result since the agent's output is not user-visible",
-      "For repo-local search (explore/general), name an absolute repo path in the prompt when the parent cwd is not the target (e.g. pi-task extension repo vs app repo)",
+      "For repo-local work outside the caller checkout, set cwd to an absolute existing directory; use a parent-created Git worktree for writer isolation",
         ],
         parameters: taskParametersSchema(),
 
@@ -231,9 +242,27 @@ export default function (pi: ExtensionAPI) {
         };
       }
       const agent = preflight.agent;
+      if (params.cwd !== undefined) {
+        const requestedTaskCwd = resolveTaskCwd(ctx.cwd, params.cwd);
+        if (requestedTaskCwd.kind === "invalid") {
+          return {
+            content: [{ type: "text" as const, text: requestedTaskCwd.message }],
+            details: { phase: "failed" as const, error: "invalid cwd" },
+            isError: true,
+          };
+        }
+      }
+      let persistedTaskCwd: string | undefined;
 
       // ── Resolve task identity: new, task resume, or conversation resume ──
       const conversationId = normalizeConversationId(params.conversation_id);
+      const taskId = normalizeConversationId(params.task_id);
+      const admissionKey = conversationId
+        ? `${piDir}\u0000conversation:${conversationId}`
+        : taskId
+          ? `${piDir}\u0000task:${taskId}`
+          : undefined;
+      return serializeTaskAdmission(admissionKey, async () => {
       const taskSessionsRegistry = conversationId
         ? readTaskSessionsRegistry(piDir)
         : {};
@@ -272,6 +301,7 @@ export default function (pi: ExtensionAPI) {
             id = registeredTaskId;
             sessionName = conversationId ?? `task-${id}`;
             const previous = findTaskSessionHistory(piDir, id);
+            persistedTaskCwd = previous?.cwd;
             const metadataAgent = previous?.agentType;
             if (metadataAgent && metadataAgent !== agent.name) {
               return {
@@ -294,6 +324,7 @@ export default function (pi: ExtensionAPI) {
         const entry = readRegistry(piDir).find(
           (candidate) => candidate.id === id,
         );
+        persistedTaskCwd = entry?.cwd ?? persistedTaskCwd;
         const entryStatus = entry ? registryEntryStatus(entry) : "missing";
         if (entryStatus === "unavailable") {
           return {
@@ -302,13 +333,17 @@ export default function (pi: ExtensionAPI) {
             isError: true,
           };
         }
-        if (
-          params.background !== false &&
-          entry &&
-          entryStatus === "alive"
-        ) {
+        if (entry && entryStatus === "alive") {
+          if (params.background === false) {
+            return {
+              content: [{ type: "text" as const, text: `Conversation "${conversationId}" is already running in the background and cannot be relaunched as foreground.` }],
+              details: { phase: "failed" as const, error: "active task cannot run foreground", task_id: id },
+              isError: true,
+            };
+          }
           const bgtask: BackgroundTask = {
             dir: artifactsDir,
+            cwd: entry.cwd,
             agentType: entry.agentType,
             sessionName,
             paneId: entry.handle?.resourceId ?? entry.paneId,
@@ -382,6 +417,7 @@ export default function (pi: ExtensionAPI) {
           id = `${Date.now().toString(36)}-${randomUUID().slice(0, 4)}`;
           sessionName = conversationId ?? `task-${id}`;
         } else {
+        persistedTaskCwd = entry.cwd;
         if (!existsSync(entry.dir)) {
           return {
             content: [
@@ -413,12 +449,17 @@ export default function (pi: ExtensionAPI) {
             isError: true,
           };
         }
-        if (
-          params.background !== false &&
-          entryStatus === "alive"
-        ) {
+        if (entryStatus === "alive") {
+          if (params.background === false) {
+            return {
+              content: [{ type: "text" as const, text: `Task "${params.task_id}" is already running in the background and cannot be relaunched as foreground.` }],
+              details: { phase: "failed" as const, error: "active task cannot run foreground", task_id: id },
+              isError: true,
+            };
+          }
           const bgtask: BackgroundTask = {
             dir: artifactsDir,
+            cwd: entry.cwd,
             agentType: entry.agentType,
             sessionName,
             paneId: entry.handle?.resourceId ?? entry.paneId,
@@ -481,6 +522,16 @@ export default function (pi: ExtensionAPI) {
          sessionName = conversationId ?? `task-${id}`;
        }
 
+      const taskCwdResolution = resolveTaskCwd(ctx.cwd, params.cwd, persistedTaskCwd);
+      if (taskCwdResolution.kind === "invalid") {
+        return {
+          content: [{ type: "text" as const, text: taskCwdResolution.message }],
+          details: { phase: "failed" as const, error: "invalid cwd" },
+          isError: true,
+        };
+      }
+      const taskCwd = taskCwdResolution.cwd;
+
       const durableBackendPreference = (process.env.PI_TASK_BACKEND ?? "auto").trim().toLowerCase();
       const herdrContextAvailable = process.env.HERDR_ENV === "1"
         && Boolean(process.env.HERDR_PANE_ID)
@@ -522,7 +573,7 @@ export default function (pi: ExtensionAPI) {
             agentName: agent.name,
             agentSource: agent.source,
             prompt: params.prompt,
-            cwd: ctx.cwd,
+            cwd: taskCwd,
           });
 
           const sessionDir = join(artifactsDir, "sessions", id);
@@ -598,7 +649,7 @@ export default function (pi: ExtensionAPI) {
                 : onSession,
               prompt: promptContent,
               agent,
-              cwd: ctx.cwd,
+              cwd: taskCwd,
               ctx,
               model: agent.model,
               thinkingLevel: agent.thinking,
@@ -611,6 +662,7 @@ export default function (pi: ExtensionAPI) {
         ? undefined
         : {
             dir: artifactsDir,
+            cwd: taskCwd,
             agentType: agent.name,
             sessionName,
                     backend: selectedBackend,
@@ -636,6 +688,7 @@ export default function (pi: ExtensionAPI) {
 
               const backgroundTask: BackgroundTask = {
                 dir: artifactsDir,
+                cwd: taskCwd,
                 agentType: agent.name,
                 sessionName,
                 backend: "sdk",
@@ -660,6 +713,7 @@ export default function (pi: ExtensionAPI) {
                 startedAt: backgroundTask.startedAt,
                 piDir,
                 artifactsDir,
+                cwd: taskCwd,
                 conversationId,
                 run: async () => runSdkFallback(undefined, bgOnSession),
                 onComplete: (result) => {
@@ -807,7 +861,7 @@ export default function (pi: ExtensionAPI) {
           handle = await herdrBackend.launch({
             agentArgs: piArgs,
             initialPrompt: promptContent,
-            cwd: ctx.cwd,
+            cwd: taskCwd,
             env: { PI_TASK_TOOL_DISABLED: "1" },
             label: `${agent.name}-${id.slice(0, 8)}`,
             workspaceGroup: params.workspace_group,
@@ -817,9 +871,9 @@ export default function (pi: ExtensionAPI) {
         } else {
           const shellCommand = `PI_TASK_TOOL_DISABLED=1 pi ${piArgs.map((a) => shellQuote(a)).join(" ")}`;
           const sessionFile = join(sessionDir, sessionName + ".jsonl");
-          const childCommand = `cd ${shellQuote(ctx.cwd)} && ${shellCommand}`;
+          const childCommand = `cd ${shellQuote(taskCwd)} && ${shellCommand}`;
           const terminalCommand = wrapWithPaneExitWatcher(sessionFile, childCommand);
-          const splitResult = splitWindowPane(ctx.cwd, terminalCommand);
+          const splitResult = splitWindowPane(taskCwd, terminalCommand);
           paneId = splitResult.paneId;
           originalPane = splitResult.originalPane;
           handle = { backend: "tmux", resourceId: paneId };
@@ -861,6 +915,7 @@ export default function (pi: ExtensionAPI) {
           handle,
           piDir,
           dir: artifactsDir,
+          cwd: taskCwd,
           conversationId,
           status: "running",
           background: false,
@@ -917,6 +972,7 @@ export default function (pi: ExtensionAPI) {
           handle,
           piDir,
           dir: artifactsDir,
+          cwd: taskCwd,
           conversationId,
           sessionRef: completedSessionRef,
           status: phase,
@@ -975,6 +1031,7 @@ export default function (pi: ExtensionAPI) {
 
       const bgtask: BackgroundTask = {
         dir: artifactsDir,
+        cwd: taskCwd,
         agentType: agent.name,
         sessionName,
         paneId,
@@ -1002,6 +1059,7 @@ export default function (pi: ExtensionAPI) {
         handle,
         piDir,
         dir: artifactsDir,
+        cwd: taskCwd,
         conversationId,
       };
 
@@ -1050,6 +1108,7 @@ export default function (pi: ExtensionAPI) {
           background: true,
         },
       };
+      });
     },
 
         renderCall,

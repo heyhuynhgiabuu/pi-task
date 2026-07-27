@@ -95,7 +95,7 @@ Durable specialist conversation:
 
     Note: true conversation resume requires the tmux/CLI backend so Pi can reopen the saved subagent session. SDK fallback can run foreground or background one-shot tasks, but it cannot resume a prior Pi session.
 
-If Pi restarts while background tasks are still running, pi-task restores them on startup. Treat restored tasks as still in flight: do not relaunch overlapping work unless you intentionally want a second competing run. Use `/task-sessions` to inspect what was restored before taking action.
+If Pi restarts while background tasks are still running, pi-task restores them on startup. Treat restored tasks as still in flight: do not relaunch overlapping work unless you intentionally want a second competing run. An active background task cannot be converted into a foreground relaunch; steer it in background mode or wait for completion. Use `/task-sessions` to inspect what was restored before taking action.
 
 ## Agent precedence
 
@@ -128,7 +128,16 @@ Pi has one session parent agent; all `*.md` agents under `agents/` are **task su
 
 Bundled agents in `agents/`: `explore`, `scout`, `general`, `reviewer`. They defer model selection to the current Pi session; a user or project agent can set `model:` explicitly. `readonly` blocks mutating tools (write/edit/apply_patch), not `bash`.
 
-When the target repo is not the parent session cwd (e.g. verifying the `pi-task` extension while cwd is an app), put an **absolute path** in the task `prompt` so explore/general search the right tree.
+When the child must actually run in another checkout, pass its absolute existing directory as `cwd`; otherwise the child inherits the caller cwd. For a mutating parallel task, the parent creates a Git worktree first, passes that worktree as `cwd`, then reviews, merges, and removes it after the task finishes. pi-task never creates, merges, or removes worktrees, and `workspace_group` only groups HerdR terminals—it is not filesystem isolation.
+
+```json
+{
+  "agent_type": "general",
+  "description": "Implement isolated fix",
+  "cwd": "/absolute/path/to/repo-fix-worktree",
+  "prompt": "Implement and verify the bounded fix. Do not edit parent-owned artifacts."
+}
+```
 
 ## Orchestration patterns with one tool
 

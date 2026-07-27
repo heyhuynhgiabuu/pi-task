@@ -5,7 +5,10 @@ export type { TerminalHandle, HerdrTerminalHandle } from "./subagent/terminalBac
 export type ExecutionBackend = "sdk" | TerminalBackendKind;
 
 export interface BackgroundTask {
+  /** Session artifact root used for completion polling. */
   dir: string;
+  /** Directory in which the child Pi process runs. */
+  cwd?: string;
   agentType: string;
   sessionName: string;
   /** Legacy tmux field retained while old in-memory callers are migrated. */
@@ -41,7 +44,9 @@ export interface RegistryEntry {
   paneId?: string;
   backend?: TerminalBackendKind;
   piDir: string;
+  /** Session artifact root, distinct from the child working directory. */
   dir: string;
+  cwd?: string;
   conversationId?: string;
   sessionRef?: string;
 }

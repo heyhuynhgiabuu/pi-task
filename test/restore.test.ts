@@ -100,6 +100,32 @@ describe("restoreActiveBackgroundTasks", () => {
     assert.equal(readJson<Array<{ id: string }>>(join(piDir, "task-registry.json"))[0]?.id, "task-herdr");
   });
 
+  it("preserves an isolated child cwd while restoring a live task", () => {
+    const piDir = makePiDir();
+    const taskDir = join(piDir, "artifacts", "sessions", "task-live");
+    const childCwd = join(piDir, "worktrees", "task-live");
+    writeSession(taskDir, "task-task-live");
+    mkdirSync(childCwd, { recursive: true });
+    writeJson(join(piDir, "task-registry.json"), [
+      {
+        id: "task-live",
+        dir: taskDir,
+        cwd: childCwd,
+        sessionName: "task-task-live",
+        startedAt: Date.now() - 1000,
+        paneId: "%live",
+        agentType: "general",
+        description: "isolated writer",
+        background: true,
+      },
+    ]);
+
+    const backgroundTasks = new Map();
+    restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true);
+
+    assert.equal(backgroundTasks.get("task-live")?.cwd, childCwd);
+  });
+
   it("marks non-terminal entries failed when their pane is gone", () => {
     const piDir = makePiDir();
     const taskDir = join(piDir, "artifacts", "sessions", "task-2");

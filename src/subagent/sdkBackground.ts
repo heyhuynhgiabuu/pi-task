@@ -14,6 +14,7 @@ export interface SdkBackgroundTaskInput {
   startedAt: number;
   piDir: string;
   artifactsDir: string;
+  cwd?: string;
   conversationId?: string;
   run: () => Promise<SdkBackgroundResult>;
   onComplete?: (result: SdkBackgroundResult) => void;
@@ -33,6 +34,7 @@ export function startSdkBackgroundTask(input: SdkBackgroundTaskInput): void {
     startedAt: input.startedAt,
     piDir: input.piDir,
     dir: input.artifactsDir,
+    cwd: input.cwd,
     conversationId: input.conversationId,
     status: "running",
     background: true,
@@ -50,6 +52,7 @@ export function startSdkBackgroundTask(input: SdkBackgroundTaskInput): void {
         startedAt: input.startedAt,
         piDir: input.piDir,
         dir: input.artifactsDir,
+        cwd: input.cwd,
         conversationId: input.conversationId,
         sessionRef: result.sessionPath ?? undefined,
         status: "done",
@@ -73,6 +76,7 @@ export function startSdkBackgroundTask(input: SdkBackgroundTaskInput): void {
         startedAt: input.startedAt,
         piDir: input.piDir,
         dir: input.artifactsDir,
+        cwd: input.cwd,
         conversationId: input.conversationId,
         status: "failed",
         completedAt: now(),

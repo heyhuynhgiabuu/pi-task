@@ -24,6 +24,8 @@ async function eventually(assertion: () => void): Promise<void> {
     const artifactsDir = join(piDir, "artifacts");
     mkdirSync(artifactsDir, { recursive: true });
     const sessionPath = join(root, "sub-session.jsonl");
+    const cwd = join(root, "isolated-worktree");
+    mkdirSync(cwd);
     let settled = false;
     let completedOutput = "";
 
@@ -35,6 +37,7 @@ async function eventually(assertion: () => void): Promise<void> {
       startedAt: 100,
       piDir,
       artifactsDir,
+      cwd,
       conversationId: "research",
       now: () => 200,
       run: async () => ({
@@ -57,6 +60,7 @@ async function eventually(assertion: () => void): Promise<void> {
       assert.equal(history[0].reportedStatus, "failure");
       assert.equal(history[0].resultValid, true);
       assert.equal(history[0].background, true);
+      assert.equal(history[0].cwd, cwd);
       assert.equal(history[0].sessionRef, sessionPath);
       assert.equal(history[0].completedAt, 200);
       assert.equal(completedOutput, "<status>failure</status>\n<summary>Tests failed</summary>");

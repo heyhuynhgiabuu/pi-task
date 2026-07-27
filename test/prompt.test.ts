@@ -1,8 +1,20 @@
 import { strict as assert } from "node:assert";
-import { readFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { buildTaskPrompt } from "../src/tool/prompt.js";
+import taskExtension from "../src/index.js";
 import { TASK_PROMPT_INSTRUCTIONS } from "../src/helpers.js";
+import { buildTaskPrompt, taskParametersSchema } from "../src/tool/index.js";
+import { resolveTaskCwd } from "../src/task-cwd.js";
+
+// Delegated pi-task children disable recursive registration; this test exercises host registration.
+const inheritedTaskToolDisabled = process.env.PI_TASK_TOOL_DISABLED;
+delete process.env.PI_TASK_TOOL_DISABLED;
+process.on("exit", () => {
+  if (inheritedTaskToolDisabled === undefined) delete process.env.PI_TASK_TOOL_DISABLED;
+  else process.env.PI_TASK_TOOL_DISABLED = inheritedTaskToolDisabled;
+});
 
 {
   const t = "buildTaskPrompt workspace scope";
@@ -16,6 +28,241 @@ import { TASK_PROMPT_INSTRUCTIONS } from "../src/helpers.js";
   assert.ok(prompt.includes("/tmp/parent-cwd"), t + " cwd");
   assert.ok(prompt.includes("## Workspace scope"), t + " section");
   assert.ok(prompt.includes("explore"), t + " explore rule");
+}
+
+{
+  const t = "task cwd is an explicit validated public contract";
+  const schema = taskParametersSchema() as { properties?: Record<string, { description?: string }> };
+  const cwdSchema = schema.properties?.cwd;
+  assert.ok(cwdSchema, t + " schema");
+  assert.match(cwdSchema.description ?? "", /absolute existing directory/i, t + " validation docs");
+  assert.match(cwdSchema.description ?? "", /does not create.*worktree/i, t + " lifecycle docs");
+
+  let tool: { execute: (...args: unknown[]) => Promise<{ isError?: boolean; details?: { error?: string } }> } | undefined;
+  let shutdown: (() => void) | undefined;
+  const pi = {
+    on(event: string, handler: () => void) {
+      if (event === "session_shutdown") shutdown = handler;
+    },
+    registerMessageRenderer() {},
+    registerTool(value: typeof tool) {
+      tool = value;
+    },
+    registerCommand() {},
+    getAllTools() {
+      return [];
+    },
+  };
+  taskExtension(pi as never);
+  assert.ok(tool, t + " registration");
+  const result = await tool.execute(
+    "cwd-contract",
+    {
+      agent_type: "explore",
+      prompt: "Inspect only",
+      description: "Inspect cwd",
+      cwd: "relative/worktree",
+      background: false,
+    },
+    undefined,
+    undefined,
+    { cwd: process.cwd() },
+  );
+  shutdown?.();
+  assert.equal(result.isError, true, t + " rejected");
+  assert.equal(result.details?.error, "invalid cwd", t + " error contract");
+}
+
+{
+  const t = "task cwd resume precedence";
+  const root = mkdtempSync(join(tmpdir(), "pi-task-cwd-"));
+  const persisted = join(root, "persisted-worktree");
+  const explicit = join(root, "replacement-worktree");
+  try {
+    mkdirSync(persisted);
+    mkdirSync(explicit);
+    assert.deepEqual(resolveTaskCwd(root, undefined, persisted), {
+      kind: "resolved",
+      cwd: persisted,
+    }, t + " persisted default");
+    assert.deepEqual(resolveTaskCwd(root, explicit, persisted), {
+      kind: "resolved",
+      cwd: explicit,
+    }, t + " explicit override");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const t = "active durable conversations reject foreground relaunch";
+  const root = mkdtempSync(join(tmpdir(), "pi-task-active-cwd-"));
+  const piDir = join(root, ".pi");
+  const artifactsDir = join(piDir, "artifacts", "tasks");
+  const originalPath = process.env.PATH;
+  const originalTmux = process.env.TMUX;
+  const originalBackend = process.env.PI_TASK_BACKEND;
+  let shutdown: (() => void) | undefined;
+  try {
+    mkdirSync(artifactsDir, { recursive: true });
+    const binDir = join(root, "bin");
+    mkdirSync(binDir);
+    const tmux = join(binDir, "tmux");
+    writeFileSync(tmux, "#!/bin/sh\ncase \"$1\" in\n  -V|display-message) printf '%s\\n' '%pane-1' ;;\n  *) exit 0 ;;\nesac\n");
+    chmodSync(tmux, 0o755);
+    process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+    process.env.TMUX = join(root, "tmux.sock");
+    process.env.PI_TASK_BACKEND = "invalid-after-active-check";
+
+    writeFileSync(join(piDir, "task-registry.json"), JSON.stringify([{
+      id: "active-task",
+      agentType: "explore",
+      description: "active isolated task",
+      sessionName: "active-conversation",
+      startedAt: Date.now() - 1000,
+      handle: {
+        backend: "tmux",
+        resourceId: "%pane-1",
+      },
+      piDir,
+      dir: artifactsDir,
+      cwd: root,
+      conversationId: "active-conversation",
+    }]));
+    writeFileSync(join(piDir, "task-session-history.json"), JSON.stringify([{
+      id: "active-task",
+      agentType: "explore",
+      description: "active isolated task",
+      sessionName: "active-conversation",
+      startedAt: Date.now() - 1000,
+      piDir,
+      dir: artifactsDir,
+      cwd: root,
+      conversationId: "active-conversation",
+      status: "running",
+      background: true,
+    }]));
+    writeFileSync(join(piDir, "artifacts", "task-sessions.json"), JSON.stringify({
+      "active-conversation": { task_id: "active-task", updated_at: new Date().toISOString() },
+    }));
+
+    let tool: { execute: (...args: unknown[]) => Promise<{ isError?: boolean; details?: { error?: string } }> } | undefined;
+    taskExtension({
+      on(event: string, handler: () => void) {
+        if (event === "session_shutdown") shutdown = handler;
+      },
+      registerMessageRenderer() {},
+      registerTool(value: typeof tool) {
+        tool = value;
+      },
+      registerCommand() {},
+      getAllTools() {
+        return [];
+      },
+    } as never);
+    assert.ok(tool, t + " registration");
+    const replacementCwd = join(root, "replacement-worktree");
+    mkdirSync(replacementCwd);
+    const result = await tool.execute(
+      "active-cwd-contract",
+      {
+        agent_type: "explore",
+        prompt: "Continue",
+        description: "Continue active task",
+        conversation_id: "active-conversation",
+        cwd: replacementCwd,
+        background: false,
+      },
+      undefined,
+      undefined,
+      { cwd: root },
+    );
+    assert.equal(result.isError, true, `${t} rejected: ${JSON.stringify(result)}`);
+    assert.equal(result.details?.error, "active task cannot run foreground", t + " error contract");
+  } finally {
+    shutdown?.();
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    if (originalTmux === undefined) delete process.env.TMUX;
+    else process.env.TMUX = originalTmux;
+    if (originalBackend === undefined) delete process.env.PI_TASK_BACKEND;
+    else process.env.PI_TASK_BACKEND = originalBackend;
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const t = "concurrent durable launches create one child";
+  const root = mkdtempSync(join(tmpdir(), "pi-task-concurrent-cwd-"));
+  const piDir = join(root, ".pi");
+  const originalPath = process.env.PATH;
+  const originalTmux = process.env.TMUX;
+  const originalBackend = process.env.PI_TASK_BACKEND;
+  let shutdown: (() => void) | undefined;
+  try {
+    mkdirSync(join(piDir, "artifacts", "tasks"), { recursive: true });
+    const binDir = join(root, "bin");
+    mkdirSync(binDir);
+    const tmux = join(binDir, "tmux");
+    writeFileSync(tmux, "#!/bin/sh\ncase \"$1\" in\n  -V) printf '%s\\n' 'tmux 3.4' ;;\n  display-message) case \"$*\" in *pane_width*) printf '%s\\n' '120 40' ;; *) printf '%s\\n' '%pane-1' ;; esac ;;\n  split-window) printf '%s\\n' '%pane-1' ;;\n  *) exit 0 ;;\nesac\n");
+    chmodSync(tmux, 0o755);
+    process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+    process.env.TMUX = join(root, "tmux.sock");
+    process.env.PI_TASK_BACKEND = "tmux";
+
+    let tool: { execute: (...args: unknown[]) => Promise<{ isError?: boolean; details?: { error?: string; task_id?: string } }> } | undefined;
+    taskExtension({
+      on(event: string, handler: () => void) {
+        if (event === "session_shutdown") shutdown = handler;
+      },
+      registerMessageRenderer() {},
+      registerTool(value: typeof tool) {
+        tool = value;
+      },
+      registerCommand() {},
+      appendEntry() {},
+      getAllTools() {
+        return [];
+      },
+    } as never);
+    assert.ok(tool, t + " registration");
+    const replacementCwd = join(root, "replacement-worktree");
+    mkdirSync(replacementCwd);
+    const base = {
+      agent_type: "explore",
+      prompt: "Continue",
+      description: "Concurrent durable task",
+      conversation_id: "concurrent-conversation",
+      background: true,
+    };
+    const [first, second] = await Promise.all([
+      tool.execute("concurrent-first", { ...base, cwd: root }, undefined, undefined, { cwd: root }),
+      tool.execute("concurrent-second", { ...base, cwd: replacementCwd }, undefined, undefined, { cwd: root }),
+    ]);
+    assert.equal(first.isError, undefined, t + " first launch");
+    assert.equal(second.isError, undefined, t + " second resume");
+    assert.ok(first.details?.task_id, t + " first task id");
+    assert.equal(second.details?.task_id, first.details?.task_id, t + " only one child");
+
+    const foreground = await tool.execute(
+      "concurrent-foreground",
+      { ...base, cwd: replacementCwd, background: false },
+      undefined,
+      undefined,
+      { cwd: root },
+    );
+    assert.equal(foreground.isError, true, t + " foreground rejection");
+    assert.equal(foreground.details?.error, "active task cannot run foreground", t + " foreground error");
+  } finally {
+    shutdown?.();
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    if (originalTmux === undefined) delete process.env.TMUX;
+    else process.env.TMUX = originalTmux;
+    if (originalBackend === undefined) delete process.env.PI_TASK_BACKEND;
+    else process.env.PI_TASK_BACKEND = originalBackend;
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 {
@@ -33,8 +280,14 @@ import { TASK_PROMPT_INSTRUCTIONS } from "../src/helpers.js";
     fileURLToPath(new URL("../src/index.ts", import.meta.url)),
     "utf8",
   );
-  assert.ok(indexSrc.includes("absolute repo path"), t);
+  assert.ok(indexSrc.includes("set cwd to an absolute existing directory"), t);
   assert.ok(!indexSrc.includes("pi.getAllTools()"), "extension load avoids runtime-only tool enumeration");
+  assert.ok(indexSrc.includes("cwd: taskCwd"), t + " prompt and backend cwd");
+  assert.ok(indexSrc.includes("shellQuote(taskCwd)"), t + " tmux shell cwd");
+  assert.ok(indexSrc.includes("splitWindowPane(taskCwd"), t + " tmux pane cwd");
+  assert.ok(indexSrc.includes("previous?.cwd"), t + " conversation resume cwd");
+  assert.ok(indexSrc.includes("persistedTaskCwd = entry.cwd"), t + " task resume cwd");
+  assert.ok(indexSrc.includes("resolveTaskCwd(ctx.cwd, params.cwd, persistedTaskCwd)"), t + " resume precedence");
 }
 
 console.log("prompt.test.ts: all passed");

@@ -49,8 +49,8 @@
     "typebox": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.81.0",
-    "@earendil-works/pi-tui": "^0.81.0",
+    "@earendil-works/pi-coding-agent": "^0.82.0",
+    "@earendil-works/pi-tui": "^0.82.0",
     "@types/node": "^20.0.0",
     "tsx": "^4.20.6",
     "typebox": "1.1.38",

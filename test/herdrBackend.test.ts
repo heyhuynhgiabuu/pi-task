@@ -219,7 +219,7 @@ test("ungrouped HerdR launch splits the caller pane before starting Pi", async (
   ]);
 });
 
-test("HerdR sends the initial task prompt as raw agent input after startup", async () => {
+test("HerdR separates initial task text from the explicit Enter submission", async () => {
   const calls: string[][] = [];
   const backend = createHerdrTerminalBackend({
     env: {
@@ -253,11 +253,87 @@ test("HerdR sends the initial task prompt as raw agent input after startup", asy
     initialPrompt,
   });
 
-  assert.deepEqual(calls.at(-1), [
-    "agent",
-    "prompt",
-    "w1:p2",
-    initialPrompt,
+  assert.deepEqual(calls.slice(-3), [
+    ["pane", "send-text", "w1:p2", initialPrompt],
+    [
+      "agent",
+      "wait",
+      "w1:p2",
+      "--until",
+      "working",
+      "--until",
+      "blocked",
+      "--until",
+      "done",
+      "--timeout",
+      "5000",
+    ],
+    ["pane", "send-keys", "w1:p2", "enter"],
+  ]);
+});
+
+test("HerdR retries Enter when initial submission causes no state change", async () => {
+  const calls: string[][] = [];
+  const backend = createHerdrTerminalBackend({
+    env: {
+      HERDR_ENV: "1",
+      HERDR_PANE_ID: "w1:p1",
+      HERDR_SOCKET_PATH: "/tmp/herdr.sock",
+    },
+    run: async (_command, args) => {
+      calls.push([...args]);
+      if (args[0] === "pane" && args[1] === "split") {
+        return {
+          stdout: JSON.stringify({
+            pane: { pane_id: "w1:p2", terminal_id: "term-2" },
+          }),
+          stderr: "",
+        };
+      }
+      if (args[0] === "agent" && args[1] === "wait") {
+        const error = new Error("herdr exited unsuccessfully") as Error & {
+          stderr?: string;
+        };
+        error.stderr = JSON.stringify({
+          error: {
+            code: "timeout",
+            message: "timed out waiting for agent status",
+          },
+        });
+        throw error;
+      }
+      return {
+        stdout: JSON.stringify({
+          agent: { pane_id: "w1:p2", terminal_id: "term-2" },
+        }),
+        stderr: "",
+      };
+    },
+  });
+
+  await backend.launch({
+    cwd: "/repo",
+    agentArgs: ["--session", "task"],
+    initialPrompt: "Review the diff.",
+  });
+
+  assert.deepEqual(calls.slice(-4), [
+    ["pane", "send-text", "w1:p2", "Review the diff."],
+    [
+      "agent",
+      "wait",
+      "w1:p2",
+      "--until",
+      "working",
+      "--until",
+      "blocked",
+      "--until",
+      "done",
+      "--timeout",
+      "5000",
+    ],
+    ["pane", "send-keys", "w1:p2", "enter"],
+    ["pane", "send-keys", "w1:p2", "enter"],
   ]);
 });
 

@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- HerdR initial prompts now wait for an observed agent state transition and retry Enter once when submission stalls, preventing child panes from remaining idle with the task prompt in the editor.
+
 ## [0.3.8] - 2026-07-28
 
 ### Added

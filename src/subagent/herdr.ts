@@ -116,8 +116,8 @@ function isAgentPaneBusy(error: unknown): boolean {
   return /agent_pane_busy|not an available shell/i.test(errorText(error));
 }
 
-function isAgentWaitTimeout(error: unknown): boolean {
-  return /timed out waiting for agent status|"code"\s*:\s*"timeout"/i.test(
+function isAgentPromptRetryable(error: unknown): boolean {
+  return /agent_prompt_stalled|timed out waiting for agent status|"code"\s*:\s*"timeout"|"code"\s*:\s*"agent_prompt_stalled"/i.test(
     errorText(error),
   );
 }
@@ -274,17 +274,12 @@ export function createHerdrTerminalBackend(
             }
           }
           if (input.initialPrompt !== undefined) {
-            await run([
-              "pane",
-              "send-text",
+            const promptArgs = [
+              "agent",
+              "prompt",
               created.pane_id,
               input.initialPrompt,
-            ]);
-            await sleep(300);
-            const submissionObserved = run([
-              "agent",
-              "wait",
-              created.pane_id,
+              "--wait",
               "--until",
               "working",
               "--until",
@@ -292,17 +287,26 @@ export function createHerdrTerminalBackend(
               "--until",
               "done",
               "--timeout",
-              "5000",
-            ]).then(
-              () => true,
-              (error) => {
-                if (isAgentWaitTimeout(error)) return false;
-                throw error;
-              },
-            );
-            await run(["pane", "send-keys", created.pane_id, "enter"]);
-            if (!(await submissionObserved)) {
-              await run(["pane", "send-keys", created.pane_id, "enter"]);
+              "8000",
+            ];
+            try {
+              await run(promptArgs);
+            } catch (error) {
+              if (!isAgentPromptRetryable(error)) throw error;
+              await run(["agent", "send-keys", created.pane_id, "enter"]);
+              await run([
+                "agent",
+                "wait",
+                created.pane_id,
+                "--until",
+                "working",
+                "--until",
+                "blocked",
+                "--until",
+                "done",
+                "--timeout",
+                "8000",
+              ]);
             }
           }
           if (groupKey) {

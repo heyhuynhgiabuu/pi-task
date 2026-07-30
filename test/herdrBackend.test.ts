@@ -219,7 +219,7 @@ test("ungrouped HerdR launch splits the caller pane before starting Pi", async (
   ]);
 });
 
-test("HerdR separates initial task text from the explicit Enter submission", async () => {
+test("HerdR submits initial task text through agent prompt wait", async () => {
   const calls: string[][] = [];
   const backend = createHerdrTerminalBackend({
     env: {
@@ -253,26 +253,28 @@ test("HerdR separates initial task text from the explicit Enter submission", asy
     initialPrompt,
   });
 
-  assert.deepEqual(calls.slice(-3), [
-    ["pane", "send-text", "w1:p2", initialPrompt],
-    [
-      "agent",
-      "wait",
-      "w1:p2",
-      "--until",
-      "working",
-      "--until",
-      "blocked",
-      "--until",
-      "done",
-      "--timeout",
-      "5000",
-    ],
-    ["pane", "send-keys", "w1:p2", "enter"],
+  assert.deepEqual(calls.at(-1), [
+    "agent",
+    "prompt",
+    "w1:p2",
+    initialPrompt,
+    "--wait",
+    "--until",
+    "working",
+    "--until",
+    "blocked",
+    "--until",
+    "done",
+    "--timeout",
+    "8000",
   ]);
+  assert.equal(
+    calls.some((args) => args[0] === "pane" && args[1] === "send-text"),
+    false,
+  );
 });
 
-test("HerdR retries Enter when initial submission causes no state change", async () => {
+test("HerdR retries stalled initial prompt through agent-level Enter", async () => {
   const calls: string[][] = [];
   const backend = createHerdrTerminalBackend({
     env: {
@@ -290,14 +292,14 @@ test("HerdR retries Enter when initial submission causes no state change", async
           stderr: "",
         };
       }
-      if (args[0] === "agent" && args[1] === "wait") {
+      if (args[0] === "agent" && args[1] === "prompt") {
         const error = new Error("herdr exited unsuccessfully") as Error & {
           stderr?: string;
         };
         error.stderr = JSON.stringify({
           error: {
-            code: "timeout",
-            message: "timed out waiting for agent status",
+            code: "agent_prompt_stalled",
+            message: "prompt did not observe a state change",
           },
         });
         throw error;
@@ -317,8 +319,23 @@ test("HerdR retries Enter when initial submission causes no state change", async
     initialPrompt: "Review the diff.",
   });
 
-  assert.deepEqual(calls.slice(-4), [
-    ["pane", "send-text", "w1:p2", "Review the diff."],
+  assert.deepEqual(calls.slice(-3), [
+    [
+      "agent",
+      "prompt",
+      "w1:p2",
+      "Review the diff.",
+      "--wait",
+      "--until",
+      "working",
+      "--until",
+      "blocked",
+      "--until",
+      "done",
+      "--timeout",
+      "8000",
+    ],
+    ["agent", "send-keys", "w1:p2", "enter"],
     [
       "agent",
       "wait",
@@ -330,11 +347,104 @@ test("HerdR retries Enter when initial submission causes no state change", async
       "--until",
       "done",
       "--timeout",
-      "5000",
+      "8000",
     ],
-    ["pane", "send-keys", "w1:p2", "enter"],
-    ["pane", "send-keys", "w1:p2", "enter"],
   ]);
+});
+
+test("HerdR rejects non-retryable initial prompt failures", async () => {
+  const backend = createHerdrTerminalBackend({
+    env: {
+      HERDR_ENV: "1",
+      HERDR_PANE_ID: "w1:p1",
+      HERDR_SOCKET_PATH: "/tmp/herdr.sock",
+    },
+    run: async (_command, args) => {
+      if (args[0] === "pane" && args[1] === "split") {
+        return {
+          stdout: JSON.stringify({
+            pane: { pane_id: "w1:p2", terminal_id: "term-2" },
+          }),
+          stderr: "",
+        };
+      }
+      if (args[0] === "agent" && args[1] === "prompt") {
+        const error = new Error("agent identity mismatch");
+        throw error;
+      }
+      return {
+        stdout: JSON.stringify({
+          agent: { pane_id: "w1:p2", terminal_id: "term-2" },
+        }),
+        stderr: "",
+      };
+    },
+  });
+
+  await assert.rejects(
+    backend.launch({
+      cwd: "/repo",
+      agentArgs: ["--session", "task"],
+      initialPrompt: "Review the diff.",
+    }),
+    /agent identity mismatch/,
+  );
+});
+
+test("HerdR settles retry command failures without detached waiters", async () => {
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => unhandled.push(reason);
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const backend = createHerdrTerminalBackend({
+      env: {
+        HERDR_ENV: "1",
+        HERDR_PANE_ID: "w1:p1",
+        HERDR_SOCKET_PATH: "/tmp/herdr.sock",
+      },
+      run: async (_command, args) => {
+        if (args[0] === "pane" && args[1] === "split") {
+          return {
+            stdout: JSON.stringify({
+              pane: { pane_id: "w1:p2", terminal_id: "term-2" },
+            }),
+            stderr: "",
+          };
+        }
+        if (args[0] === "agent" && args[1] === "prompt") {
+          const error = new Error("herdr exited unsuccessfully") as Error & {
+            stderr?: string;
+          };
+          error.stderr = JSON.stringify({
+            error: { code: "timeout", message: "timed out waiting" },
+          });
+          throw error;
+        }
+        if (args[0] === "agent" && args[1] === "send-keys") {
+          throw new Error("send failed");
+        }
+        return {
+          stdout: JSON.stringify({
+            agent: { pane_id: "w1:p2", terminal_id: "term-2" },
+          }),
+          stderr: "",
+        };
+      },
+    });
+
+    await assert.rejects(
+      backend.launch({
+        cwd: "/repo",
+        agentArgs: ["--session", "task"],
+        initialPrompt: "Review the diff.",
+      }),
+      /send failed/,
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
 });
 
 test("parallel HerdR launches serialize workspace and pane creation", async () => {

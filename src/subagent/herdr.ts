@@ -352,6 +352,149 @@ async function closeCreatedResource(
   }
 }
 
+async function verifyPromptTimeout(
+  run: HerdrRun,
+  promptIdentity: HerdrAgentInfo,
+): Promise<void> {
+  let current: HerdrAgentInfo;
+  try {
+    current = await readAgent(run, promptIdentity.pane_id);
+  } catch (readError) {
+    throw new HerdrIdentityError(
+      `HerdR could not verify prompt timeout identity: ${errorText(readError)}`,
+    );
+  }
+  assertSameAgentIdentity(promptIdentity, current);
+  if (current.state_change_seq <= promptIdentity.state_change_seq) {
+    throw new Error(
+      `HerdR prompt timeout did not prove activity for ${promptIdentity.pane_id}`,
+    );
+  }
+}
+
+async function retryStalledPrompt(
+  run: HerdrRun,
+  promptIdentity: HerdrAgentInfo,
+  error: unknown,
+  retryTimeoutMs: number,
+  retryPollMs: number,
+): Promise<void> {
+  const stalledBaseline = stalledPromptBaseline(error);
+  if (stalledBaseline === undefined) {
+    throw new HerdrIdentityError(
+      "HerdR stalled prompt did not include HerdR's state sequence baseline",
+    );
+  }
+  let beforeRetry: HerdrAgentInfo;
+  try {
+    beforeRetry = await readAgent(run, promptIdentity.pane_id);
+  } catch (readError) {
+    throw new HerdrIdentityError(
+      `HerdR could not verify retry identity: ${errorText(readError)}`,
+    );
+  }
+  assertSameAgentIdentity(promptIdentity, beforeRetry);
+  if (beforeRetry.state_change_seq < stalledBaseline) {
+    throw new HerdrIdentityError(
+      `HerdR retry state sequence regressed for ${promptIdentity.pane_id}`,
+    );
+  }
+  if (beforeRetry.state_change_seq > stalledBaseline) {
+    await waitForRetryTransition(
+      run,
+      beforeRetry,
+      stalledBaseline,
+      retryTimeoutMs,
+      retryPollMs,
+    );
+    return;
+  }
+  if (!beforeRetry.name) {
+    throw new HerdrIdentityError(
+      `HerdR cannot safely retry an unnamed agent in ${promptIdentity.pane_id}`,
+    );
+  }
+  // HerdR 0.7.5 has no compare-and-send operation. Targeting the captured
+  // agent name makes HerdR re-resolve the live named agent inside send-keys;
+  // the process-group snapshot rejects replacements observed before that call.
+  // HerdR exposes no atomic identity token, so post-send verification still
+  // fails closed if a same-name replacement races the call.
+  try {
+    await run(["agent", "send-keys", beforeRetry.name, "enter"]);
+  } catch (sendError) {
+    throw new HerdrIdentityError(
+      `HerdR could not verify retry submission: ${errorText(sendError)}`,
+    );
+  }
+  await waitForRetryTransition(
+    run,
+    beforeRetry,
+    beforeRetry.state_change_seq,
+    retryTimeoutMs,
+    retryPollMs,
+  );
+}
+
+async function readStartedAgent(
+  run: HerdrRun,
+  created: HerdrPane,
+): Promise<HerdrAgentInfo> {
+  const promptIdentity = await readAgent(run, created.pane_id);
+  if (
+    promptIdentity.terminal_id !== created.terminal_id ||
+    (promptIdentity.agent !== undefined && promptIdentity.agent !== "pi")
+  ) {
+    throw new HerdrIdentityError(
+      `HerdR agent identity did not match started pane ${created.pane_id}`,
+    );
+  }
+  return promptIdentity;
+}
+
+async function submitInitialPrompt(
+  run: HerdrRun,
+  created: HerdrPane,
+  promptIdentity: HerdrAgentInfo,
+  initialPrompt: string,
+  promptTimeoutMs: number,
+  retryTimeoutMs: number,
+  retryPollMs: number,
+): Promise<void> {
+  const promptArgs = [
+    "agent",
+    "prompt",
+    created.pane_id,
+    initialPrompt,
+    "--wait",
+    "--until",
+    "working",
+    "--until",
+    "blocked",
+    "--until",
+    "done",
+    "--timeout",
+    String(promptTimeoutMs),
+  ];
+  try {
+    await run(promptArgs);
+  } catch (error) {
+    const code = errorCode(error);
+    if (code === "timeout") {
+      await verifyPromptTimeout(run, promptIdentity);
+    } else if (code === "agent_prompt_stalled") {
+      await retryStalledPrompt(
+        run,
+        promptIdentity,
+        error,
+        retryTimeoutMs,
+        retryPollMs,
+      );
+    } else {
+      throw error;
+    }
+  }
+}
+
 function isAgentPaneBusy(error: unknown): boolean {
   return /agent_pane_busy|not an available shell/i.test(errorText(error));
 }
@@ -518,110 +661,17 @@ export function createHerdrTerminalBackend(
             }
           }
           if (input.initialPrompt !== undefined) {
-            const promptIdentity = await readAgent(run, created.pane_id);
+            const promptIdentity = await readStartedAgent(run, created);
             expectedAgent = promptIdentity;
-            if (
-              promptIdentity.terminal_id !== created.terminal_id ||
-              (promptIdentity.agent !== undefined && promptIdentity.agent !== "pi")
-            ) {
-              throw new HerdrIdentityError(
-                `HerdR agent identity did not match started pane ${created.pane_id}`,
-              );
-            }
-            const promptArgs = [
-              "agent",
-              "prompt",
-              created.pane_id,
+            await submitInitialPrompt(
+              run,
+              created,
+              promptIdentity,
               input.initialPrompt,
-              "--wait",
-              "--until",
-              "working",
-              "--until",
-              "blocked",
-              "--until",
-              "done",
-              "--timeout",
-              String(promptTimeoutMs),
-            ];
-            try {
-              await run(promptArgs);
-            } catch (error) {
-              const code = errorCode(error);
-              if (code === "timeout") {
-                let current: HerdrAgentInfo;
-                try {
-                  current = await readAgent(run, created.pane_id);
-                } catch (readError) {
-                  throw new HerdrIdentityError(
-                    `HerdR could not verify prompt timeout identity: ${errorText(readError)}`,
-                  );
-                }
-                assertSameAgentIdentity(promptIdentity, current);
-                if (current.state_change_seq <= promptIdentity.state_change_seq) {
-                  throw new Error(
-                    `HerdR prompt timeout did not prove activity for ${created.pane_id}`,
-                  );
-                }
-              } else if (code === "agent_prompt_stalled") {
-                const stalledBaseline = stalledPromptBaseline(error);
-                if (stalledBaseline === undefined) {
-                  throw new HerdrIdentityError(
-                    "HerdR stalled prompt did not include HerdR's state sequence baseline",
-                  );
-                }
-                let beforeRetry: HerdrAgentInfo;
-                try {
-                  beforeRetry = await readAgent(run, created.pane_id);
-                } catch (readError) {
-                  throw new HerdrIdentityError(
-                    `HerdR could not verify retry identity: ${errorText(readError)}`,
-                  );
-                }
-                assertSameAgentIdentity(promptIdentity, beforeRetry);
-                if (beforeRetry.state_change_seq < stalledBaseline) {
-                  throw new HerdrIdentityError(
-                    `HerdR retry state sequence regressed for ${created.pane_id}`,
-                  );
-                }
-                if (beforeRetry.state_change_seq > stalledBaseline) {
-                  await waitForRetryTransition(
-                    run,
-                    beforeRetry,
-                    stalledBaseline,
-                    retryTimeoutMs,
-                    retryPollMs,
-                  );
-                } else {
-                  if (!beforeRetry.name) {
-                    throw new HerdrIdentityError(
-                      `HerdR cannot safely retry an unnamed agent in ${created.pane_id}`,
-                    );
-                  }
-                  // HerdR 0.7.5 has no compare-and-send operation. Targeting the
-                  // captured agent name makes HerdR re-resolve the live named
-                  // agent inside send-keys; the process-group snapshot rejects
-                  // replacements observed before that call. HerdR exposes no
-                  // atomic identity token, so post-send verification still
-                  // fails closed if a same-name replacement races the call.
-                  try {
-                    await run(["agent", "send-keys", beforeRetry.name, "enter"]);
-                  } catch (sendError) {
-                    throw new HerdrIdentityError(
-                      `HerdR could not verify retry submission: ${errorText(sendError)}`,
-                    );
-                  }
-                  await waitForRetryTransition(
-                    run,
-                    beforeRetry,
-                    beforeRetry.state_change_seq,
-                    retryTimeoutMs,
-                    retryPollMs,
-                  );
-                }
-              } else {
-                throw error;
-              }
-            }
+              promptTimeoutMs,
+              retryTimeoutMs,
+              retryPollMs,
+            );
           }
           if (groupKey) {
             const group = existingGroup ?? {

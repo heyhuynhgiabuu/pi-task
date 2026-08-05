@@ -942,6 +942,81 @@ test("HerdR skips destructive cleanup when agent startup fails before identity c
   );
 });
 
+test("HerdR cleans up after a prompt failure once identity was captured", async () => {
+  const calls: string[][] = [];
+  const backend = createHerdrTerminalBackend({
+    env: {
+      HERDR_ENV: "1",
+      HERDR_PANE_ID: "w1:p1",
+      HERDR_SOCKET_PATH: "/tmp/herdr.sock",
+    },
+    run: async (_command, args) => {
+      calls.push([...args]);
+      if (args[0] === "pane" && args[1] === "split") {
+        return {
+          stdout: JSON.stringify({
+            pane: { pane_id: "w1:p2", terminal_id: "term-2" },
+          }),
+          stderr: "",
+        };
+      }
+      if (args[0] === "agent" && args[1] === "start") {
+        return {
+          stdout: JSON.stringify({
+            agent: { pane_id: "w1:p2", terminal_id: "term-2" },
+          }),
+          stderr: "",
+        };
+      }
+      if (args[0] === "agent" && args[1] === "get") {
+        return {
+          stdout: JSON.stringify({
+            result: {
+              agent: {
+                pane_id: "w1:p2",
+                terminal_id: "term-2",
+                name: "pi-task",
+                agent: "pi",
+                agent_status: "idle",
+                state_change_seq: 10,
+              },
+            },
+          }),
+          stderr: "",
+        };
+      }
+      if (args[0] === "pane" && args[1] === "process-info") {
+        return processInfoResult();
+      }
+      if (args[0] === "agent" && args[1] === "prompt") {
+        throw new Error("prompt failed before HerdR returned a structured error");
+      }
+      if (args[0] === "pane" && args[1] === "get") {
+        return {
+          stdout: JSON.stringify({
+            pane: { pane_id: "w1:p2", terminal_id: "term-2", agent: "pi" },
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "", stderr: "" };
+    },
+  });
+
+  await assert.rejects(
+    backend.launch({
+      cwd: "/repo",
+      agentArgs: ["--session", "task"],
+      initialPrompt: "Review the diff.",
+    }),
+    /prompt failed/i,
+  );
+  assert.equal(
+    calls.some((args) => args[0] === "pane" && args[1] === "close"),
+    true,
+  );
+});
+
 test("parallel HerdR launches serialize workspace and pane creation", async () => {
   let activeRuns = 0;
   let maxActiveRuns = 0;

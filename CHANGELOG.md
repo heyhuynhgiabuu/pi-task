@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- HerdR initial prompt retries now require the exact `agent_prompt_stalled` error and its versioned lifecycle baseline, target the captured named agent, verify its terminal process group and newer lifecycle sequence (including valid `idle` transitions), and skip destructive cleanup when identity cannot be verified.
+
 ## [0.3.8] - 2026-07-28
 
 ### Added

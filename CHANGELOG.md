@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.3.9] - 2026-08-05
+
 ### Fixed
 
 - HerdR initial prompt retries now require the exact `agent_prompt_stalled` error and its versioned lifecycle baseline, target the captured named agent, verify its terminal process group and newer lifecycle sequence (including valid `idle` transitions), and skip destructive cleanup when identity cannot be verified.
@@ -474,5 +476,6 @@ See the git history: `git log --oneline -- CHANGELOG.md`.
     [0.1.5]: https://github.com/heyhuynhgiabuu/pi-task/releases/tag/v0.1.5
   [0.2.0]: https://github.com/heyhuynhgiabuu/pi-task/releases/tag/v0.2.0
   [0.1.6]: https://github.com/heyhuynhgiabuu/pi-task/releases/tag/v0.1.6
+  [0.3.9]: https://github.com/heyhuynhgiabuu/pi-task/releases/tag/v0.3.9
   [Keep a Changelog]: https://keepachangelog.com/
   [Semantic Versioning]: https://semver.org/

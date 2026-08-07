@@ -184,7 +184,12 @@ Background mode (background: true):
 - You will be notified automatically when it finishes
 - DO NOT sleep, poll, ask the task for status, or duplicate its work while it runs in background
 - Avoid working with the same files or topics the background task is using
-- Work on non-overlapping tasks, or briefly tell the user what you launched and end your response`;
+- Work on non-overlapping tasks, or briefly tell the user what you launched and end your response
+
+Task control:
+- Use operation: "status" with task_id to inspect a running or completed task without relaunching it.
+- Use operation: "cancel" with task_id to cancel a live tmux or strongly-identified HerdR background task. If cleanup fails, the result reports cleanup_pending and keeps a durable retry receipt. SDK background cancellation is reported as unsupported rather than guessed.
+- Omit operation for the normal start/resume API described above`;
 
 /** @deprecated Import from ./agent-tools.js */
 export { ALL_TOOL_NAMES } from "./agent-tools.js";

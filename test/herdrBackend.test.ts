@@ -65,6 +65,9 @@ test("grouped HerdR launch starts Pi in the new workspace root pane", async () =
     }),
     JSON.stringify({ pane: { pane_id: "w2:p1", terminal_id: "term-1" } }),
     JSON.stringify({ agent: { pane_id: "w2:p1", terminal_id: "term-1" } }),
+    JSON.stringify({ process_info: { pane_id: "w2:p1", foreground_process_group_id: 42 } }),
+    JSON.stringify({ agent: { pane_id: "w2:p1", terminal_id: "term-1", name: "task-agent", agent_status: "working", state_change_seq: 1 } }),
+    JSON.stringify({ process_info: { pane_id: "w2:p1", foreground_process_group_id: 42 } }),
   ];
   const backend = createHerdrTerminalBackend({
     env: {
@@ -89,6 +92,8 @@ test("grouped HerdR launch starts Pi in the new workspace root pane", async () =
     resourceId: "w2:p1",
     socketPath: "/tmp/herdr.sock",
     terminalId: "term-1",
+    agentName: "task-agent",
+    foregroundProcessGroupId: 42,
     workspaceId: "w2",
     workspaceGroup: "parallel-retry",
   });
@@ -115,6 +120,9 @@ test("grouped HerdR launch starts Pi in the new workspace root pane", async () =
       "--session",
       "task",
     ],
+    ["pane", "process-info", "--pane", "w2:p1"],
+    ["agent", "get", "w2:p1"],
+    ["pane", "process-info", "--pane", "w2:p1"],
   ]);
 });
 
@@ -133,6 +141,18 @@ test("HerdR launch retries until a new workspace root is an available shell", as
             workspace: { workspace_id: "w-ready" },
             root_pane: { pane_id: "w-ready:p1" },
           }),
+          stderr: "",
+        };
+      }
+      if (args[0] === "pane" && args[1] === "process-info") {
+        return {
+          stdout: JSON.stringify({ process_info: { pane_id: "w-ready:p1", foreground_process_group_id: 42 } }),
+          stderr: "",
+        };
+      }
+      if (args[0] === "agent" && args[1] === "get") {
+        return {
+          stdout: JSON.stringify({ agent: { pane_id: "w-ready:p1", terminal_id: "term-ready", name: "task-agent", agent_status: "working", state_change_seq: 1 } }),
           stderr: "",
         };
       }
@@ -187,6 +207,18 @@ test("ungrouped HerdR launch splits the caller pane before starting Pi", async (
           stderr: "",
         };
       }
+      if (args[0] === "pane" && args[1] === "process-info") {
+        return {
+          stdout: JSON.stringify({ process_info: { pane_id: "w1:p2", foreground_process_group_id: 42 } }),
+          stderr: "",
+        };
+      }
+      if (args[0] === "agent" && args[1] === "get") {
+        return {
+          stdout: JSON.stringify({ agent: { pane_id: "w1:p2", terminal_id: "term-2", name: "task-agent", agent_status: "working", state_change_seq: 1 } }),
+          stderr: "",
+        };
+      }
       if (args[0] === "agent") {
         return {
           stdout: JSON.stringify({
@@ -209,6 +241,8 @@ test("ungrouped HerdR launch splits the caller pane before starting Pi", async (
     resourceId: "w1:p2",
     socketPath: "/tmp/herdr.sock",
     terminalId: "term-2",
+    agentName: "task-agent",
+    foregroundProcessGroupId: 42,
   });
   assert.deepEqual(calls, [
     [
@@ -233,6 +267,9 @@ test("ungrouped HerdR launch splits the caller pane before starting Pi", async (
       "--session",
       "task",
     ],
+    ["pane", "process-info", "--pane", "w1:p2"],
+    ["agent", "get", "w1:p2"],
+    ["pane", "process-info", "--pane", "w1:p2"],
   ]);
 });
 
@@ -1031,6 +1068,20 @@ test("parallel HerdR launches serialize workspace and pane creation", async () =
         stderr: "",
       };
     }
+    if (args[0] === "pane" && args[1] === "process-info") {
+      const paneId = args[3]!;
+      return {
+        stdout: JSON.stringify({ process_info: { pane_id: paneId, foreground_process_group_id: 42 } }),
+        stderr: "",
+      };
+    }
+    if (args[0] === "agent" && args[1] === "get") {
+      const paneId = args[2]!;
+      return {
+        stdout: JSON.stringify({ agent: { pane_id: paneId, terminal_id: `term-${paneId.split("p").at(-1)}`, name: "task-agent", agent_status: "working", state_change_seq: 1 } }),
+        stderr: "",
+      };
+    }
     if (args[0] === "pane" && args[1] === "get") {
       return {
         stdout: JSON.stringify({
@@ -1156,12 +1207,46 @@ test("HerdR liveness requires the owned pane to still host Pi", async () => {
   }
 });
 
-test("HerdR cleanup closes the task workspace without requiring a live agent pane", async () => {
+test("HerdR treats a structured missing pane as dead, not unavailable", async () => {
+  const backend = createHerdrTerminalBackend({
+    env: {
+      HERDR_ENV: "1",
+      HERDR_PANE_ID: "w1:p1",
+      HERDR_SOCKET_PATH: "/tmp/herdr.sock",
+    },
+    run: async () => {
+      throw Object.assign(new Error("herdr exited unsuccessfully"), {
+        stderr: JSON.stringify({ error: { code: "pane_not_found" } }),
+      });
+    },
+  });
+
+  assert.equal(
+    await backend.isAlive({
+      backend: "herdr",
+      resourceId: "w1:p2",
+      socketPath: "/tmp/herdr.sock",
+      terminalId: "term-2",
+    }),
+    false,
+  );
+});
+
+test("HerdR cleanup closes the task workspace after identity verification", async () => {
   const calls: string[][] = [];
   const backend = createHerdrTerminalBackend({
     env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock" },
     run: async (_command, args) => {
       calls.push([...args]);
+      if (args[0] === "pane" && args[1] === "get") {
+        return { stdout: JSON.stringify({ pane: { pane_id: "w2:p2", terminal_id: "term-2" } }), stderr: "" };
+      }
+      if (args[0] === "pane" && args[1] === "process-info") {
+        return { stdout: JSON.stringify({ process_info: { pane_id: "w2:p2", foreground_process_group_id: 42 } }), stderr: "" };
+      }
+      if (args[0] === "agent" && args[1] === "get") {
+        return { stdout: JSON.stringify({ agent: { pane_id: "w2:p2", terminal_id: "term-2", name: "task-agent", agent_status: "working", state_change_seq: 1 } }), stderr: "" };
+      }
       return { stdout: "", stderr: "" };
     },
   });
@@ -1171,18 +1256,35 @@ test("HerdR cleanup closes the task workspace without requiring a live agent pan
     resourceId: "w2:p2",
     socketPath: "/tmp/herdr.sock",
     terminalId: "term-2",
+    agentName: "task-agent",
+    foregroundProcessGroupId: 42,
     workspaceId: "w2",
   });
 
-  assert.deepEqual(calls, [["workspace", "close", "w2"]]);
+  assert.deepEqual(calls, [
+    ["pane", "get", "w2:p2"],
+    ["pane", "process-info", "--pane", "w2:p2"],
+    ["agent", "get", "w2:p2"],
+    ["pane", "process-info", "--pane", "w2:p2"],
+    ["workspace", "close", "w2"],
+  ]);
 });
 
-test("HerdR cleanup after restart closes only an untracked grouped task pane", async () => {
+test("HerdR cleanup after restart closes a grouped task pane after identity verification", async () => {
   const calls: string[][] = [];
   const backend = createHerdrTerminalBackend({
     env: { HERDR_ENV: "1", HERDR_SOCKET_PATH: "/tmp/herdr.sock" },
     run: async (_command, args) => {
       calls.push([...args]);
+      if (args[0] === "pane" && args[1] === "get") {
+        return { stdout: JSON.stringify({ pane: { pane_id: "w2:p2", terminal_id: "term-2" } }), stderr: "" };
+      }
+      if (args[0] === "pane" && args[1] === "process-info") {
+        return { stdout: JSON.stringify({ process_info: { pane_id: "w2:p2", foreground_process_group_id: 42 } }), stderr: "" };
+      }
+      if (args[0] === "agent" && args[1] === "get") {
+        return { stdout: JSON.stringify({ agent: { pane_id: "w2:p2", terminal_id: "term-2", name: "task-agent", agent_status: "working", state_change_seq: 1 } }), stderr: "" };
+      }
       return { stdout: "", stderr: "" };
     },
   });
@@ -1192,11 +1294,56 @@ test("HerdR cleanup after restart closes only an untracked grouped task pane", a
     resourceId: "w2:p2",
     socketPath: "/tmp/herdr.sock",
     terminalId: "term-2",
+    agentName: "task-agent",
+    foregroundProcessGroupId: 42,
     workspaceId: "w2",
     workspaceGroup: "post-restart",
   });
 
-  assert.deepEqual(calls, [["pane", "close", "w2:p2"]]);
+  assert.deepEqual(calls, [
+    ["pane", "get", "w2:p2"],
+    ["pane", "process-info", "--pane", "w2:p2"],
+    ["agent", "get", "w2:p2"],
+    ["pane", "process-info", "--pane", "w2:p2"],
+    ["pane", "close", "w2:p2"],
+  ]);
+});
+
+test("sync HerdR ownership checks agent and process identity when persisted", () => {
+  const calls: string[][] = [];
+  const control = createSyncHerdrControl(
+    { HERDR_SOCKET_PATH: "/tmp/herdr.sock" },
+    (args) => {
+      calls.push([...args]);
+      if (args[1] === "get" && args[0] === "pane") {
+        return JSON.stringify({ pane: { pane_id: "w1:p2", terminal_id: "term-2" } });
+      }
+      if (args[0] === "pane" && args[1] === "process-info") {
+        return JSON.stringify({ process_info: { pane_id: "w1:p2", foreground_process_group_id: 42 } });
+      }
+      if (args[0] === "agent" && args[1] === "get") {
+        return JSON.stringify({ agent: {
+          pane_id: "w1:p2",
+          terminal_id: "term-2",
+          name: "task-agent",
+          agent_status: "working",
+          state_change_seq: 7,
+        } });
+      }
+      throw new Error(`unexpected command: ${args.join(" ")}`);
+    },
+  );
+
+  assert.equal(control.exists({
+    backend: "herdr",
+    resourceId: "w1:p2",
+    socketPath: "/tmp/herdr.sock",
+    terminalId: "term-2",
+    agentName: "task-agent",
+    foregroundProcessGroupId: 42,
+  }), true);
+  assert.ok(calls.some((args) => args[0] === "agent" && args[1] === "get"));
+  assert.ok(calls.some((args) => args[0] === "pane" && args[1] === "process-info"));
 });
 
 test("sync steering accepts HerdR mutation commands with empty stdout", () => {
@@ -1269,6 +1416,72 @@ test("sync cleanup after restart closes only an untracked grouped task pane", ()
   });
 
   assert.deepEqual(calls, [["pane", "close", "w2:p2"]]);
+});
+
+test("sync cleanup closes an ungrouped workspace when its identity-bearing pane is missing", () => {
+  const calls: string[][] = [];
+  const control = createSyncHerdrControl(
+    { HERDR_SOCKET_PATH: "/tmp/herdr.sock" },
+    (args) => {
+      calls.push([...args]);
+      if (args[0] === "pane" && args[1] === "get") {
+        throw Object.assign(new Error("herdr exited unsuccessfully"), {
+          stderr: JSON.stringify({ error: { code: "pane_not_found" } }),
+        });
+      }
+      return "";
+    },
+  );
+
+  control.close({
+    backend: "herdr",
+    resourceId: "w2:p2",
+    socketPath: "/tmp/herdr.sock",
+    terminalId: "term-2",
+    agentName: "task-agent",
+    foregroundProcessGroupId: 42,
+    workspaceId: "w2",
+  });
+
+  assert.deepEqual(calls, [
+    ["pane", "get", "w2:p2"],
+    ["pane", "get", "w2:p2"],
+    ["workspace", "close", "w2"],
+  ]);
+});
+
+test("sync grouped cleanup preserves uncertainty when its identity-bearing pane is missing", () => {
+  const calls: string[][] = [];
+  const control = createSyncHerdrControl(
+    { HERDR_SOCKET_PATH: "/tmp/herdr.sock" },
+    (args) => {
+      calls.push([...args]);
+      if (args[0] === "pane" && args[1] === "get") {
+        throw Object.assign(new Error("herdr exited unsuccessfully"), {
+          stderr: JSON.stringify({ error: { code: "pane_not_found" } }),
+        });
+      }
+      return "";
+    },
+  );
+
+  assert.throws(
+    () => control.close({
+      backend: "herdr",
+      resourceId: "w2:p2",
+      socketPath: "/tmp/herdr.sock",
+      terminalId: "term-2",
+      agentName: "task-agent",
+      foregroundProcessGroupId: 42,
+      workspaceId: "w2",
+      workspaceGroup: "shared",
+    }),
+    /grouped workspace identity could not be verified/i,
+  );
+  assert.deepEqual(calls, [
+    ["pane", "get", "w2:p2"],
+    ["pane", "get", "w2:p2"],
+  ]);
 });
 
 test("sync cleanup ignores an already-closed HerdR workspace", () => {

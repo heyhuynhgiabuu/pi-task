@@ -15,6 +15,9 @@ export type TerminalHandle =
       resourceId: string;
       socketPath: string;
       terminalId: string;
+      /** Captured Pi agent identity for destructive cleanup after restart. */
+      agentName?: string;
+      foregroundProcessGroupId?: number;
       workspaceId?: string;
       workspaceGroup?: string;
     };

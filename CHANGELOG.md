@@ -6,6 +6,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-07
+
+### Added
+
+- Added provider-safe `task` control operations for durable task `status` and backend-aware `cancel`, with explicit SDK cancellation refusal.
+- Added durable cancellation and cleanup receipts with restore retry handling.
+
+### Changed
+
+- Updated the development baseline to Pi 0.84.1 and TypeBox 1.3.7.
+- Hardened polling, resume, tmux, and HerdR lifecycle ownership against stale completion and resource replacement races.
+
+### Fixed
+
+- HerdR structured missing-resource errors now correctly distinguish dead panes from unavailable control, while grouped cleanup fails closed and ungrouped workspace cleanup remains recoverable.
+
 ## [0.3.9] - 2026-08-05
 
 ### Fixed
@@ -476,6 +492,7 @@ See the git history: `git log --oneline -- CHANGELOG.md`.
     [0.1.5]: https://github.com/heyhuynhgiabuu/pi-task/releases/tag/v0.1.5
   [0.2.0]: https://github.com/heyhuynhgiabuu/pi-task/releases/tag/v0.2.0
   [0.1.6]: https://github.com/heyhuynhgiabuu/pi-task/releases/tag/v0.1.6
+  [0.4.0]: https://github.com/heyhuynhgiabuu/pi-task/releases/tag/v0.4.0
   [0.3.9]: https://github.com/heyhuynhgiabuu/pi-task/releases/tag/v0.3.9
   [Keep a Changelog]: https://keepachangelog.com/
   [Semantic Versioning]: https://semver.org/

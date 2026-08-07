@@ -97,6 +97,26 @@ Durable specialist conversation:
 
 If Pi restarts while background tasks are still running, pi-task restores them on startup. Treat restored tasks as still in flight: do not relaunch overlapping work unless you intentionally want a second competing run. An active background task cannot be converted into a foreground relaunch; steer it in background mode or wait for completion. Use `/task-sessions` to inspect what was restored before taking action.
 
+### Task control
+
+The existing `task` tool also exposes lifecycle control without starting another agent:
+
+```json
+{
+  "operation": "status",
+  "task_id": "task-id-or-conversation-id"
+}
+```
+
+```json
+{
+  "operation": "cancel",
+  "task_id": "task-id-or-conversation-id"
+}
+```
+
+`status` is read-only and resolves by task id, session name, or conversation id. `cancel` only closes a live task-owned tmux or strongly-identified HerdR resource and persists `cancelled` before cleanup. If cleanup fails, the tool reports `cleanup_pending` and keeps a durable retry receipt for the next restore. SDK background cancellation is reported as unsupported because the SDK backend currently does not retain a durable cancellation handle. Existing start/resume requests omit `operation`.
+
 ## Agent precedence
 
 When two agents have the same name, later sources override earlier ones:

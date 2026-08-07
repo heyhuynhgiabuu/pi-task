@@ -32,8 +32,12 @@ process.on("exit", () => {
 
 {
   const t = "task cwd is an explicit validated public contract";
-  const schema = taskParametersSchema() as { properties?: Record<string, { description?: string }> };
-  const cwdSchema = schema.properties?.cwd;
+  const schema = taskParametersSchema() as {
+    properties?: Record<string, { description?: string }>;
+    anyOf?: Array<{ properties?: Record<string, { description?: string }> }>;
+  };
+  const startSchema = schema.anyOf?.find((candidate) => candidate.properties?.cwd) ?? schema;
+  const cwdSchema = startSchema.properties?.cwd;
   assert.ok(cwdSchema, t + " schema");
   assert.match(cwdSchema.description ?? "", /absolute existing directory/i, t + " validation docs");
   assert.match(cwdSchema.description ?? "", /does not create.*worktree/i, t + " lifecycle docs");
@@ -287,7 +291,7 @@ process.on("exit", () => {
   assert.ok(indexSrc.includes("splitWindowPane(taskCwd"), t + " tmux pane cwd");
   assert.ok(indexSrc.includes("previous?.cwd"), t + " conversation resume cwd");
   assert.ok(indexSrc.includes("persistedTaskCwd = entry.cwd"), t + " task resume cwd");
-  assert.ok(indexSrc.includes("resolveTaskCwd(ctx.cwd, params.cwd, persistedTaskCwd)"), t + " resume precedence");
+  assert.ok(indexSrc.includes("resolveTaskCwd(ctx.cwd, taskParams.cwd, persistedTaskCwd)"), t + " resume precedence");
 }
 
 console.log("prompt.test.ts: all passed");

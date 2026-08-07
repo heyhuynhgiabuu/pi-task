@@ -45,6 +45,7 @@ export function startBackgroundPolling(
         try {
           const elapsed = Date.now() - task.startedAt;
           if (elapsed > deps.TASK_TIMEOUT_MS) {
+            if (deps.backgroundTasks.get(id) !== task) continue;
             deps.completeTask(
               deps.pi,
               id,
@@ -72,11 +73,13 @@ export function startBackgroundPolling(
           if (stopped) return;
 
           if (snapshot.status === "completed") {
+            if (deps.backgroundTasks.get(id) !== task) continue;
             deps.completeTask(deps.pi, id, task, snapshot.content, "done", deps.piDir);
             deps.backgroundTasks.delete(id);
             deps.clearTaskWidgetIfIdle();
             pollErrors.delete(id);
           } else if (snapshot.status === "failed" || snapshot.status === "timeout") {
+            if (deps.backgroundTasks.get(id) !== task) continue;
             deps.completeTask(
               deps.pi,
               id,
@@ -96,6 +99,7 @@ export function startBackgroundPolling(
           const count = (pollErrors.get(id) ?? 0) + 1;
           pollErrors.set(id, count);
           if (count >= deps.MAX_POLL_ERRORS) {
+            if (deps.backgroundTasks.get(id) !== task) continue;
             deps.completeTask(
               deps.pi,
               id,

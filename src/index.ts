@@ -72,6 +72,7 @@ import {
 import {
   hasTmux,
   killAgentPane,
+  killAgentPaneStrict,
   paneExists,
   setPaneRemainOnExit,
   setPaneSelfDestruct,
@@ -94,6 +95,8 @@ import type {
 import { ignoreStaleExtensionCtx } from "./stale-ctx.js";
 import { resolveTaskCwd } from "./task-cwd.js";
 import { serializeTaskAdmission } from "./task-admission.js";
+import { handleTaskControl } from "./task-control-api.js";
+import { parseTaskControlRequest, parseTaskStartRequest } from "./task-control.js";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -139,17 +142,32 @@ export default function (pi: ExtensionAPI) {
       throw error;
     }
   };
+  const registryEntryCancellationStatus = (entry: RegistryEntry): "alive" | "missing" | "unavailable" => {
+    if (
+      entry.handle?.backend === "herdr" &&
+      entry.handle.foregroundProcessGroupId === undefined
+    ) {
+      return "unavailable";
+    }
+    return registryEntryStatus(entry);
+  };
   restoreActiveBackgroundTasks(
     piDir,
     backgroundTasks,
     registryEntryAlive,
     (entry) => {
-      if (entry.handle?.backend === "herdr") syncHerdr.close(entry.handle);
-      else {
+      if (entry.handle?.backend === "herdr") {
+        if (
+          entry.handle.foregroundProcessGroupId === undefined
+        ) {
+          throw new Error("HerdR restore cleanup requires persisted agent identity");
+        }
+        syncHerdr.close(entry.handle);
+      } else {
         const paneId = entry.handle?.backend === "tmux"
           ? entry.handle.resourceId
           : entry.paneId;
-        if (paneId) killAgentPane(paneId, null);
+        if (paneId) killAgentPaneStrict(paneId, null);
       }
     },
   );
@@ -188,6 +206,15 @@ export default function (pi: ExtensionAPI) {
     BACKGROUND_CHECK_MS,
   );
 
+  const controlTask = (request: Parameters<typeof handleTaskControl>[0]) =>
+    handleTaskControl(request, {
+      pi,
+      piDir,
+      backgroundTasks,
+      registryEntryStatus: registryEntryCancellationStatus,
+      clearTaskWidgetIfIdle,
+    });
+
   // ── Cleanup on shutdown ────────────────────────────────────────────────
 
   pi.on("session_shutdown", () => {
@@ -220,12 +247,25 @@ export default function (pi: ExtensionAPI) {
         parameters: taskParametersSchema(),
 
         async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      const controlRequest = parseTaskControlRequest(params);
+      if (controlRequest) return controlTask(controlRequest);
+      const parsedTaskParams = parseTaskStartRequest(params);
+      if (!parsedTaskParams) {
+        return {
+          content: [{ type: "text" as const, text: "Invalid task request: expected a start/resume request." }],
+          details: { phase: "failed" as const, error: "invalid_task_request" },
+          isError: true,
+        };
+      }
+
+      let taskParams = parsedTaskParams;
+
       const { agents, piDir } = discoverAgents(ctx.cwd, BUNDLED_AGENT_DIR);
       const parentToolNames = pi
         .getAllTools()
         .map((tool) => tool.name)
         .filter(Boolean);
-      const preflight = resolveTaskAgentPreflight(agents, params.agent_type);
+      const preflight = resolveTaskAgentPreflight(agents, taskParams.agent_type);
       if (!preflight.ok) {
         return {
           content: [
@@ -242,8 +282,8 @@ export default function (pi: ExtensionAPI) {
         };
       }
       const agent = preflight.agent;
-      if (params.cwd !== undefined) {
-        const requestedTaskCwd = resolveTaskCwd(ctx.cwd, params.cwd);
+      if (taskParams.cwd !== undefined) {
+        const requestedTaskCwd = resolveTaskCwd(ctx.cwd, taskParams.cwd);
         if (requestedTaskCwd.kind === "invalid") {
           return {
             content: [{ type: "text" as const, text: requestedTaskCwd.message }],
@@ -255,8 +295,8 @@ export default function (pi: ExtensionAPI) {
       let persistedTaskCwd: string | undefined;
 
       // ── Resolve task identity: new, task resume, or conversation resume ──
-      const conversationId = normalizeConversationId(params.conversation_id);
-      const taskId = normalizeConversationId(params.task_id);
+      const conversationId = normalizeConversationId(taskParams.conversation_id);
+      const taskId = normalizeConversationId(taskParams.task_id);
       const admissionKey = conversationId
         ? `${piDir}\u0000conversation:${conversationId}`
         : taskId
@@ -271,15 +311,15 @@ export default function (pi: ExtensionAPI) {
         : undefined;
 
       if (
-        params.task_id &&
+        taskParams.task_id &&
         registeredTaskId &&
-        params.task_id !== registeredTaskId
+        taskParams.task_id !== registeredTaskId
       ) {
         return {
           content: [
             {
               type: "text" as const,
-              text: `conversation_id "${conversationId}" maps to ${registeredTaskId}, not ${params.task_id}. Omit task_id or use the mapped task id.`,
+              text: `conversation_id "${conversationId}" maps to ${registeredTaskId}, not ${taskParams.task_id}. Omit task_id or use the mapped task id.`,
             },
           ],
           details: {
@@ -325,6 +365,13 @@ export default function (pi: ExtensionAPI) {
           (candidate) => candidate.id === id,
         );
         persistedTaskCwd = entry?.cwd ?? persistedTaskCwd;
+        if (entry?.cleanupPending) {
+          return {
+            content: [{ type: "text" as const, text: `Conversation "${conversationId}" is cancelled but backend cleanup is still pending; retry after the resource is cleaned up.` }],
+            details: { phase: "failed" as const, error: "cleanup_pending", task_id: id },
+            isError: true,
+          };
+        }
         const entryStatus = entry ? registryEntryStatus(entry) : "missing";
         if (entryStatus === "unavailable") {
           return {
@@ -334,7 +381,7 @@ export default function (pi: ExtensionAPI) {
           };
         }
         if (entry && entryStatus === "alive") {
-          if (params.background === false) {
+          if (taskParams.background === false) {
             return {
               content: [{ type: "text" as const, text: `Conversation "${conversationId}" is already running in the background and cannot be relaunched as foreground.` }],
               details: { phase: "failed" as const, error: "active task cannot run foreground", task_id: id },
@@ -350,7 +397,7 @@ export default function (pi: ExtensionAPI) {
             handle: entry.handle,
             backend: entry.handle?.backend ?? "tmux",
             originalPane: null,
-            description: params.description || entry.description,
+            description: taskParams.description || entry.description,
             startedAt: entry.startedAt,
             toolUses: 0,
             turns: 0,
@@ -358,7 +405,7 @@ export default function (pi: ExtensionAPI) {
             recentCalls: [],
           };
                     backgroundTasks.set(id, bgtask);
-          const steerResult = steerRunningBackgroundTask(bgtask.paneId, params.prompt, bgtask.handle);
+          const steerResult = steerRunningBackgroundTask(bgtask.paneId, taskParams.prompt, bgtask.handle);
           if (!steerResult.ok) {
             return {
               content: [{ type: "text" as const, text: `Conversation "${conversationId}" was restored, but the follow-up prompt could not be delivered (${steerResult.reason}).` }],
@@ -377,22 +424,22 @@ export default function (pi: ExtensionAPI) {
             details: {
               task_id: id,
               agent_type: agent.name,
-              description: params.description,
+              description: taskParams.description,
               conversation_id: conversationId,
               tmux_session: sessionName,
               background: true,
             },
           };
         }
-      } else if (params.task_id) {
+      } else if (taskParams.task_id) {
         // Look up active tasks first, then durable completed-session history.
         const entries = readRegistry(piDir);
         let entry =
           entries.find(
-            (e) => e.id === params.task_id || e.sessionName === params.task_id,
+            (e) => e.id === taskParams.task_id || e.sessionName === taskParams.task_id,
           ) ??
-          findTaskSessionHistory(piDir, params.task_id) ??
-          findJsonlSessionByName(piDir, params.task_id, agent.name);
+          findTaskSessionHistory(piDir, taskParams.task_id) ??
+          findJsonlSessionByName(piDir, taskParams.task_id, agent.name);
 
         // Older history entries were written before we stored the
         // actual JSONL path needed by `pi --session`. Repair them by
@@ -413,17 +460,24 @@ export default function (pi: ExtensionAPI) {
           }
         }
         if (!entry) {
-          params = { ...params, task_id: undefined };
+          taskParams = { ...taskParams, task_id: undefined };
           id = `${Date.now().toString(36)}-${randomUUID().slice(0, 4)}`;
           sessionName = conversationId ?? `task-${id}`;
         } else {
         persistedTaskCwd = entry.cwd;
+        if (entry.cleanupPending) {
+          return {
+            content: [{ type: "text" as const, text: `Task "${taskParams.task_id}" is cancelled but backend cleanup is still pending; retry after the resource is cleaned up.` }],
+            details: { phase: "failed" as const, error: "cleanup_pending", task_id: entry.id },
+            isError: true,
+          };
+        }
         if (!existsSync(entry.dir)) {
           return {
             content: [
               {
                 type: "text" as const,
-                text: `Task "${params.task_id}" artifact directory no longer exists: ${entry.dir}`,
+                text: `Task "${taskParams.task_id}" artifact directory no longer exists: ${entry.dir}`,
               },
             ],
             details: {
@@ -450,9 +504,9 @@ export default function (pi: ExtensionAPI) {
           };
         }
         if (entryStatus === "alive") {
-          if (params.background === false) {
+          if (taskParams.background === false) {
             return {
-              content: [{ type: "text" as const, text: `Task "${params.task_id}" is already running in the background and cannot be relaunched as foreground.` }],
+              content: [{ type: "text" as const, text: `Task "${taskParams.task_id}" is already running in the background and cannot be relaunched as foreground.` }],
               details: { phase: "failed" as const, error: "active task cannot run foreground", task_id: id },
               isError: true,
             };
@@ -466,7 +520,7 @@ export default function (pi: ExtensionAPI) {
             handle: entry.handle,
             backend: entry.handle?.backend ?? "tmux",
             originalPane: null,
-            description: params.description || entry.description,
+            description: taskParams.description || entry.description,
             startedAt: entry.startedAt,
             toolUses: 0,
             turns: 0,
@@ -474,10 +528,10 @@ export default function (pi: ExtensionAPI) {
             recentCalls: [],
           };
           backgroundTasks.set(id, bgtask);
-          const steerResult = steerRunningBackgroundTask(bgtask.paneId, params.prompt, bgtask.handle);
+          const steerResult = steerRunningBackgroundTask(bgtask.paneId, taskParams.prompt, bgtask.handle);
           if (!steerResult.ok) {
             return {
-              content: [{ type: "text" as const, text: `Task "${params.task_id}" was restored, but the follow-up prompt could not be delivered (${steerResult.reason}).` }],
+              content: [{ type: "text" as const, text: `Task "${taskParams.task_id}" was restored, but the follow-up prompt could not be delivered (${steerResult.reason}).` }],
               details: { phase: "failed" as const, error: `resume steering failed: ${steerResult.reason}` },
               isError: true,
             };
@@ -487,13 +541,13 @@ export default function (pi: ExtensionAPI) {
             content: [
               {
                 type: "text" as const,
-                text: `Resumed task "${params.task_id}" and delivered the follow-up prompt. The subagent is still running in background; avoid relaunching overlapping work. Use /task-sessions to inspect it, and it will notify on completion.`,
+                text: `Resumed task "${taskParams.task_id}" and delivered the follow-up prompt. The subagent is still running in background; avoid relaunching overlapping work. Use /task-sessions to inspect it, and it will notify on completion.`,
               },
             ],
             details: {
               task_id: id,
               agent_type: entry.agentType,
-              description: params.description || entry.description,
+              description: taskParams.description || entry.description,
               conversation_id: entry.conversationId ?? conversationId,
               tmux_session: sessionName,
               background: true,
@@ -506,7 +560,7 @@ export default function (pi: ExtensionAPI) {
             content: [
               {
                 type: "text" as const,
-                text: `Task "${params.task_id}" was found, but its session JSONL file could not be resolved. Cannot resume without a --session file path.`,
+                text: `Task "${taskParams.task_id}" was found, but its session JSONL file could not be resolved. Cannot resume without a --session file path.`,
               },
             ],
             details: {
@@ -522,7 +576,7 @@ export default function (pi: ExtensionAPI) {
          sessionName = conversationId ?? `task-${id}`;
        }
 
-      const taskCwdResolution = resolveTaskCwd(ctx.cwd, params.cwd, persistedTaskCwd);
+      const taskCwdResolution = resolveTaskCwd(ctx.cwd, taskParams.cwd, persistedTaskCwd);
       if (taskCwdResolution.kind === "invalid") {
         return {
           content: [{ type: "text" as const, text: taskCwdResolution.message }],
@@ -563,8 +617,8 @@ export default function (pi: ExtensionAPI) {
         writeTaskSessionsRegistry(piDir, taskSessionsRegistry);
       }
 
-      const descText = params.description || "";
-      const isBackground = params.background ?? TASK_BACKGROUND_DEFAULT;
+      const descText = taskParams.description || "";
+      const isBackground = taskParams.background ?? TASK_BACKGROUND_DEFAULT;
       // default true
 
           // ── Build the prompt (instructions are inlined; no CONTEXT.md file) ─
@@ -572,7 +626,7 @@ export default function (pi: ExtensionAPI) {
             description: descText,
             agentName: agent.name,
             agentSource: agent.source,
-            prompt: params.prompt,
+            prompt: taskParams.prompt,
             cwd: taskCwd,
           });
 
@@ -864,7 +918,7 @@ export default function (pi: ExtensionAPI) {
             cwd: taskCwd,
             env: { PI_TASK_TOOL_DISABLED: "1" },
             label: `${agent.name}-${id.slice(0, 8)}`,
-            workspaceGroup: params.workspace_group,
+            workspaceGroup: taskParams.workspace_group,
           });
           paneId = handle.resourceId;
           originalPane = process.env.HERDR_PANE_ID ?? null;

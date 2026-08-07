@@ -18,6 +18,21 @@ export function restoreActiveBackgroundTasks(
   const staleIds: string[] = [];
 
   for (const entry of registry) {
+    if (entry.cleanupPending) {
+      try {
+        if (closeResource) closeResource(entry);
+        else if (entry.handle?.backend !== "herdr" && (entry.handle?.resourceId ?? entry.paneId)) {
+          killAgentPane(entry.handle?.resourceId ?? entry.paneId!, null);
+        } else if (entry.handle?.backend === "herdr") {
+          continue;
+        }
+        staleIds.push(entry.id);
+      } catch {
+        // Keep the terminal cleanup receipt for a later retry.
+      }
+      continue;
+    }
+
     if (!existsSync(entry.dir)) {
       staleIds.push(entry.id);
       continue;
@@ -56,33 +71,42 @@ export function restoreActiveBackgroundTasks(
         paneId: entry.paneId,
         completedAt: Date.now(),
       });
-      if (entry.handle?.backend === "herdr" && entry.handle.workspaceId) {
-        try {
-          closeResource?.(entry);
-        } catch {
-          // A missing resource is still removed from durable state below.
+      let cleanupSucceeded = true;
+      if (entry.handle?.backend === "herdr") {
+        if (!closeResource) cleanupSucceeded = false;
+        else {
+          try {
+            closeResource(entry);
+          } catch {
+            cleanupSucceeded = false;
+          }
         }
       } else if (paneAlive && paneId) {
         try {
           if (closeResource) closeResource(entry);
-          else if (entry.handle?.backend !== "herdr") killAgentPane(paneId, null);
+          else killAgentPane(paneId, null);
         } catch {
-          // A missing resource is still removed from durable state below.
+          cleanupSucceeded = false;
         }
       }
 
-      staleIds.push(entry.id);
+      if (cleanupSucceeded) staleIds.push(entry.id);
       continue;
     }
 
     if (!paneAlive) {
-      if (entry.handle?.backend === "herdr" && entry.handle.workspaceId) {
-        try {
-          closeResource?.(entry);
-        } catch {
-          // A missing resource is still removed from durable state below.
+      let cleanupSucceeded = true;
+      if (entry.handle?.backend === "herdr") {
+        if (!closeResource) cleanupSucceeded = false;
+        else {
+          try {
+            closeResource(entry);
+          } catch {
+            cleanupSucceeded = false;
+          }
         }
       }
+      if (!cleanupSucceeded) continue;
       upsertTaskSessionHistory(piDir, {
         id: entry.id,
         status: "failed",

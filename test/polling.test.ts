@@ -265,4 +265,44 @@ function makeDeps(
   assert.equal(completeCount, 1, `${t}: expected exactly one completion`);
 }
 
+{
+  const t = "cancellation removes a task before an in-flight completion snapshot is applied";
+  const backgroundTasks = new Map<any, any>();
+  const task = {
+    dir: "/tmp/pi-task-artifacts",
+    sessionName: "s1",
+    paneId: "%1",
+    originalPane: null,
+    startedAt: Date.now(),
+  };
+  backgroundTasks.set("t1", task);
+  let release!: () => void;
+  const check = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let completeCount = 0;
+
+  const stop = startBackgroundPolling(
+    makeDeps({
+      backgroundTasks,
+      checkTaskCompletion: async () => {
+        await check;
+        return { status: "completed", content: "stale" };
+      },
+      completeTask: () => {
+        completeCount += 1;
+      },
+    }),
+    5,
+  );
+
+  await sleep(30);
+  backgroundTasks.delete("t1");
+  release();
+  await sleep(40);
+  stop();
+
+  assert.equal(completeCount, 0, `${t}: stale completion must be ignored`);
+}
+
 console.log("ALL POLLING TESTS PASSED");

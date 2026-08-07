@@ -48,7 +48,50 @@ test("completion preserves the child-reported outcome separately from execution"
   assert.equal(details?.result_valid, true);
 });
 
-test("completion is persisted and removed from the registry before pane cleanup", () => {
+test("cancellation is persisted before its resource cleanup", () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-cancel-completion-"));
+  const task: BackgroundTask = {
+    dir: join(piDir, "artifacts", "tasks", "task-cancel"),
+    agentType: "explore",
+    sessionName: "task-task-cancel",
+    paneId: "w1:p3",
+    originalPane: null,
+    description: "cancel ordering",
+    startedAt: Date.now() - 1000,
+    toolUses: 0,
+    turns: 0,
+  };
+  writeRegistry(piDir, [{
+    id: "task-cancel",
+    agentType: task.agentType,
+    description: task.description,
+    sessionName: task.sessionName,
+    startedAt: task.startedAt,
+    paneId: task.paneId,
+    piDir,
+    dir: task.dir,
+  }]);
+
+  let cleanupObservedCancellation = false;
+  completeTask(
+    { sendMessage: () => {} } as never,
+    "task-cancel",
+    task,
+    "Task was cancelled by request.",
+    "cancelled",
+    piDir,
+    () => {
+      cleanupObservedCancellation = readRegistry(piDir).some((entry) =>
+        entry.id === "task-cancel" && entry.cleanupPending === true
+      ) && readTaskSessionHistory(piDir).some((entry) => entry.id === "task-cancel" && entry.status === "cancelled");
+    },
+  );
+
+  assert.equal(cleanupObservedCancellation, true);
+  assert.equal(readTaskSessionHistory(piDir)[0]?.status, "cancelled");
+});
+
+test("completion is persisted and leaves cleanup pending when pane cleanup fails", () => {
   const piDir = mkdtempSync(join(tmpdir(), "pi-task-completion-"));
   const task: BackgroundTask = {
     dir: join(piDir, "artifacts", "tasks", "task-1"),
@@ -88,13 +131,14 @@ test("completion is persisted and removed from the registry before pane cleanup"
     "done",
     piDir,
     () => {
-      cleanupObservedDurableState = readRegistry(piDir).length === 0
-        && readTaskSessionHistory(piDir).some((entry) => entry.id === "task-1" && entry.status === "done");
+      cleanupObservedDurableState = readRegistry(piDir).some((entry) =>
+        entry.id === "task-1" && entry.cleanupPending === true
+      ) && readTaskSessionHistory(piDir).some((entry) => entry.id === "task-1" && entry.status === "done");
       throw new Error("simulated cleanup failure");
     },
   );
 
   assert.equal(cleanupObservedDurableState, true);
   assert.equal(notificationSent, true);
-  assert.equal(readRegistry(piDir).length, 0);
+  assert.equal(readRegistry(piDir)[0]?.cleanupPending, true);
 });

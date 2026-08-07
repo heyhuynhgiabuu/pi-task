@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -65,6 +65,7 @@ describe("restoreActiveBackgroundTasks", () => {
       join(piDir, "task-session-history.json"),
     );
     assert.equal(history[0]?.status, "done");
+
   });
 
   it("preserves durable records during a temporary backend outage", () => {
@@ -106,19 +107,17 @@ describe("restoreActiveBackgroundTasks", () => {
     const childCwd = join(piDir, "worktrees", "task-live");
     writeSession(taskDir, "task-task-live");
     mkdirSync(childCwd, { recursive: true });
-    writeJson(join(piDir, "task-registry.json"), [
-      {
-        id: "task-live",
-        dir: taskDir,
-        cwd: childCwd,
-        sessionName: "task-task-live",
-        startedAt: Date.now() - 1000,
-        paneId: "%live",
-        agentType: "general",
-        description: "isolated writer",
-        background: true,
-      },
-    ]);
+    writeJson(join(piDir, "task-registry.json"), [{
+      id: "task-live",
+      dir: taskDir,
+      cwd: childCwd,
+      sessionName: "task-task-live",
+      startedAt: Date.now() - 1000,
+      paneId: "%live",
+      agentType: "general",
+      description: "isolated writer",
+      background: true,
+    }]);
 
     const backgroundTasks = new Map();
     restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true);
@@ -130,18 +129,16 @@ describe("restoreActiveBackgroundTasks", () => {
     const piDir = makePiDir();
     const taskDir = join(piDir, "artifacts", "sessions", "task-2");
     writeSession(taskDir, "task-task-2");
-    writeJson(join(piDir, "task-registry.json"), [
-      {
-        id: "task-2",
-        dir: taskDir,
-        sessionName: "task-task-2",
-        startedAt: Date.now() - 1000,
-        paneId: "%missing",
-        agentType: "scout",
-        description: "lost task",
-        background: true,
-      },
-    ]);
+    writeJson(join(piDir, "task-registry.json"), [{
+      id: "task-2",
+      dir: taskDir,
+      sessionName: "task-task-2",
+      startedAt: Date.now() - 1000,
+      paneId: "%missing",
+      agentType: "scout",
+      description: "lost task",
+      background: true,
+    }]);
     writeJson(join(piDir, "task-session-history.json"), [
       { id: "task-2", status: "running", startedAt: Date.now() - 1000 },
     ]);
@@ -157,7 +154,58 @@ describe("restoreActiveBackgroundTasks", () => {
     assert.equal(history[0]?.status, "failed");
   });
 
-  it("continues restoring when cleanup of a dead grouped HerdR pane fails", () => {
+  it("retries terminal cleanup receipts without restoring them as running tasks", () => {
+  const piDir = makePiDir();
+  const taskDir = join(piDir, "artifacts", "sessions", "task-cleanup");
+  mkdirSync(taskDir, { recursive: true });
+  writeJson(join(piDir, "task-registry.json"), [{
+    id: "task-cleanup",
+    dir: taskDir,
+    sessionName: "task-task-cleanup",
+    startedAt: Date.now() - 1000,
+    paneId: "%cleanup",
+    agentType: "scout",
+    description: "pending cleanup",
+    cleanupPending: true,
+    cleanupPhase: "cancelled",
+  }]);
+
+  let closeCount = 0;
+  const backgroundTasks = new Map();
+  restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true, () => {
+    closeCount += 1;
+  });
+
+  assert.equal(closeCount, 1);
+  assert.equal(backgroundTasks.size, 0);
+  assert.deepEqual(readJson<unknown[]>(join(piDir, "task-registry.json")), []);
+});
+
+it("preserves terminal cleanup receipts when retry still fails", () => {
+  const piDir = makePiDir();
+  const taskDir = join(piDir, "artifacts", "sessions", "task-cleanup-fail");
+  mkdirSync(taskDir, { recursive: true });
+  const entry = {
+    id: "task-cleanup-fail",
+    dir: taskDir,
+    sessionName: "task-task-cleanup-fail",
+    startedAt: Date.now() - 1000,
+    paneId: "%cleanup-fail",
+    agentType: "scout",
+    description: "pending cleanup failure",
+    cleanupPending: true,
+    cleanupPhase: "cancelled",
+  };
+  writeJson(join(piDir, "task-registry.json"), [entry]);
+
+  restoreActiveBackgroundTasks(piDir, new Map(), () => true, () => {
+    throw new Error("backend unavailable");
+  });
+
+  assert.deepEqual(readJson<unknown[]>(join(piDir, "task-registry.json")), [entry]);
+});
+
+it("preserves a dead HerdR record when identity-safe cleanup fails", () => {
     const piDir = makePiDir();
     const taskDir = join(piDir, "artifacts", "sessions", "task-herdr-dead");
     writeSession(taskDir, "task-task-herdr-dead");
@@ -193,10 +241,7 @@ describe("restoreActiveBackgroundTasks", () => {
       );
     });
 
-    assert.deepEqual(readJson<unknown[]>(join(piDir, "task-registry.json")), []);
-    const history = readJson<Array<{ id: string; status: string }>>(
-      join(piDir, "task-session-history.json"),
-    );
-    assert.equal(history[0]?.status, "failed");
+    assert.equal(readJson<Array<{ id: string }>>(join(piDir, "task-registry.json"))[0]?.id, "task-herdr-dead");
+    assert.equal(existsSync(join(piDir, "task-session-history.json")), false);
   });
 });

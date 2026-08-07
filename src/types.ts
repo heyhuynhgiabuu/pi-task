@@ -49,6 +49,9 @@ export interface RegistryEntry {
   cwd?: string;
   conversationId?: string;
   sessionRef?: string;
+  /** Terminal cleanup must be retried before this record is removed. */
+  cleanupPending?: boolean;
+  cleanupPhase?: "done" | "cancelled" | "timeout" | "failed";
 }
 
 /** Durable task→session mapping used for resume after task completion. */

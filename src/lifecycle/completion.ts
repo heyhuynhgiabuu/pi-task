@@ -7,15 +7,20 @@ import {
 } from "../conversation.js";
 import { assessTaskResult, parseResultXml } from "../helpers.js";
 import { createSyncHerdrControl } from "../subagent/herdr.js";
-import { killAgentPane } from "../subagent/tmux.js";
+import { killAgentPaneStrict } from "../subagent/tmux.js";
 import { ignoreStaleExtensionCtx } from "../stale-ctx.js";
-import type { BackgroundTask } from "../types.js";
+import type { BackgroundTask, RegistryEntry } from "../types.js";
 
 function closeTaskResource(task: BackgroundTask): void {
   if (task.handle?.backend === "herdr") {
+    if (
+      task.handle.foregroundProcessGroupId === undefined
+    ) {
+      throw new Error("HerdR cleanup requires persisted agent identity");
+    }
     createSyncHerdrControl().close(task.handle);
   } else if (task.paneId) {
-    killAgentPane(task.paneId, task.originalPane);
+    killAgentPaneStrict(task.paneId, task.originalPane);
   }
 }
 
@@ -24,10 +29,10 @@ export function completeTask(
   id: string,
   task: BackgroundTask,
   content: string,
-  phase: "done" | "timeout" | "failed",
+  phase: "done" | "cancelled" | "timeout" | "failed",
   piDir: string,
   resourceCloser: (task: BackgroundTask) => void = closeTaskResource,
-): void {
+): { cleanupSucceeded: boolean } {
   const parsed = parseResultXml(content);
   const assessment = assessTaskResult(parsed);
   const durationMs = Date.now() - task.startedAt;
@@ -58,13 +63,34 @@ export function completeTask(
   });
 
   const entries = readRegistry(piDir).filter((entry) => entry.id !== id);
-  writeRegistry(piDir, entries);
+  const cleanupEntry: RegistryEntry = {
+    id,
+    agentType: task.agentType,
+    description: task.description,
+    sessionName: task.sessionName,
+    startedAt: task.startedAt,
+    handle: task.handle,
+    paneId: task.paneId,
+    piDir,
+    dir: task.dir,
+    cwd: task.cwd,
+    conversationId: task.conversationId,
+    sessionRef: completedSessionRef,
+    cleanupPending: true,
+    cleanupPhase: phase,
+  };
+  // Keep a terminal cleanup receipt durable across a crash between the
+  // state write and backend close. Restore retries it and removes it only
+  // after close succeeds.
+  writeRegistry(piDir, [...entries, cleanupEntry]);
 
+  let cleanupSucceeded = true;
   try {
     resourceCloser(task);
   } catch {
-    // Completion is already durable. Cleanup is best-effort and restore can retry it.
+    cleanupSucceeded = false;
   }
+  if (cleanupSucceeded) writeRegistry(piDir, entries);
 
   const summaryText = parsed.summary?.trim()
     ? parsed.summary.trim()
@@ -107,4 +133,6 @@ export function completeTask(
       },
     ),
   );
+
+  return { cleanupSucceeded };
 }

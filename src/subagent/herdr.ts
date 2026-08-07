@@ -122,7 +122,27 @@ function workspaceFrom(value: unknown): HerdrWorkspace {
 }
 
 function isMissingWorkspace(error: unknown): boolean {
-  return /workspace_not_found|workspace not found/i.test(String(error));
+  return /workspace_not_found|workspace not found/i.test(errorText(error));
+}
+
+function isMissingPane(error: unknown): boolean {
+  return /pane_not_found|pane not found|no such pane|can't find pane/i.test(errorText(error));
+}
+
+async function closeHerdrPane(run: HerdrRun, paneId: string): Promise<void> {
+  try {
+    await run(["pane", "close", paneId]);
+  } catch (error) {
+    if (!isMissingPane(error)) throw error;
+  }
+}
+
+async function closeHerdrWorkspace(run: HerdrRun, workspaceId: string): Promise<void> {
+  try {
+    await run(["workspace", "close", workspaceId]);
+  } catch (error) {
+    if (!isMissingWorkspace(error)) throw error;
+  }
 }
 
 function errorText(error: unknown): string {
@@ -549,6 +569,20 @@ export function createHerdrTerminalBackend(
     if (current.terminal_id !== handle.terminalId) {
       throw new Error("HerdR ownership mismatch: terminal changed");
     }
+    if (
+      handle.agentName !== undefined ||
+      handle.foregroundProcessGroupId !== undefined
+    ) {
+      const agent = await readAgent(run, handle.resourceId);
+      if (
+        agent.terminal_id !== handle.terminalId ||
+        (handle.agentName !== undefined && agent.name !== handle.agentName) ||
+        (handle.foregroundProcessGroupId !== undefined &&
+          agent.foreground_process_group_id !== handle.foregroundProcessGroupId)
+      ) {
+        throw new Error("HerdR ownership mismatch: agent identity changed");
+      }
+    }
     return handle;
   };
 
@@ -660,9 +694,9 @@ export function createHerdrTerminalBackend(
               await sleep(50);
             }
           }
+          const promptIdentity = await readStartedAgent(run, created);
+          expectedAgent = promptIdentity;
           if (input.initialPrompt !== undefined) {
-            const promptIdentity = await readStartedAgent(run, created);
-            expectedAgent = promptIdentity;
             await submitInitialPrompt(
               run,
               created,
@@ -686,6 +720,10 @@ export function createHerdrTerminalBackend(
             resourceId: created.pane_id,
             socketPath,
             terminalId: created.terminal_id,
+            ...(expectedAgent?.name ? { agentName: expectedAgent.name } : {}),
+            ...(expectedAgent?.foreground_process_group_id !== undefined
+              ? { foregroundProcessGroupId: expectedAgent.foreground_process_group_id }
+              : {}),
             ...(workspace || existingGroup
               ? { workspaceId: workspace?.workspace_id ?? existingGroup!.workspaceId }
               : {}),
@@ -716,8 +754,8 @@ export function createHerdrTerminalBackend(
         if (paneFrom(payload).terminal_id !== owned.terminalId) return false;
         return paneHostsPi(payload);
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (/ownership mismatch|not[_ -]?found/i.test(message)) return false;
+        const message = errorText(error);
+        if (/ownership mismatch/i.test(message) || isMissingPane(error)) return false;
         const unavailable = new Error(`HerdR control unavailable: ${message}`);
         unavailable.name = "HerdrUnavailableError";
         throw unavailable;
@@ -756,32 +794,52 @@ export function createHerdrTerminalBackend(
     async close(handle) {
       return serializeLaunch(async () => {
       if (
-        handle.backend === "herdr" &&
-        handle.workspaceId &&
-        handle.workspaceGroup
+        handle.backend !== "herdr" ||
+        handle.foregroundProcessGroupId === undefined
       ) {
-        const key = workspaceGroupKey(handle.socketPath, handle.workspaceGroup);
+        throw new Error("HerdR cleanup requires persisted agent identity");
+      }
+      let owned: HerdrTerminalHandle;
+      try {
+        owned = await verifyOwnership(handle);
+      } catch (error) {
+        if (isMissingPane(error) && handle.backend === "herdr") {
+          if (handle.workspaceId && !handle.workspaceGroup) {
+            await closeHerdrWorkspace(run, handle.workspaceId);
+            return;
+          }
+          throw new Error("HerdR grouped workspace identity could not be verified");
+        }
+        throw error;
+      }
+      if (
+        owned.backend === "herdr" &&
+        owned.workspaceId &&
+        owned.workspaceGroup
+      ) {
+        const key = workspaceGroupKey(owned.socketPath, owned.workspaceGroup);
         const group = groupedWorkspaces.get(key);
-        if (!group || group.workspaceId !== handle.workspaceId) {
-          await run(["pane", "close", handle.resourceId]);
+        if (!group || group.workspaceId !== owned.workspaceId) {
+          await closeHerdrPane(run, owned.resourceId);
           return;
         }
-        if (!group.paneIds.delete(handle.resourceId)) return;
-        if (group.paneIds.size > 0) {
-          await run(["pane", "close", handle.resourceId]);
+        if (!group.paneIds.has(owned.resourceId)) return;
+        if (group.paneIds.size > 1) {
+          await closeHerdrPane(run, owned.resourceId);
+          group.paneIds.delete(owned.resourceId);
           return;
         }
+        await closeHerdrWorkspace(run, owned.workspaceId);
+        group.paneIds.delete(owned.resourceId);
         groupedWorkspaces.delete(key);
-        await run(["workspace", "close", handle.workspaceId]);
         return;
       }
-      if (handle.backend === "herdr" && handle.workspaceId) {
-        await run(["workspace", "close", handle.workspaceId]);
+      if (owned.backend === "herdr" && owned.workspaceId) {
+        await closeHerdrWorkspace(run, owned.workspaceId);
         return;
       }
 
-      const owned = await verifyOwnership(handle);
-      await run(["pane", "close", owned.resourceId]);
+      await closeHerdrPane(run, owned.resourceId);
       });
     },
   };
@@ -810,17 +868,50 @@ export function createSyncHerdrControl(
       if (!env.HERDR_SOCKET_PATH || env.HERDR_SOCKET_PATH !== handle.socketPath)
         return false;
       try {
+        const pane = paneFrom(
+          decode(
+            run(["pane", "get", handle.resourceId], handle.socketPath),
+            "pane get",
+          ),
+        );
+        if (pane.terminal_id !== handle.terminalId) return false;
+        if (
+          handle.agentName === undefined &&
+          handle.foregroundProcessGroupId === undefined
+        ) {
+          return true;
+        }
+        const processBefore = processInfoFrom(
+          decode(
+            run(["pane", "process-info", "--pane", handle.resourceId], handle.socketPath),
+            "pane process-info",
+          ),
+        );
+        const agent = agentFrom(
+          decode(
+            run(["agent", "get", handle.resourceId], handle.socketPath),
+            "agent get",
+          ),
+        );
+        const processAfter = processInfoFrom(
+          decode(
+            run(["pane", "process-info", "--pane", handle.resourceId], handle.socketPath),
+            "pane process-info",
+          ),
+        );
         return (
-          paneFrom(
-            decode(
-              run(["pane", "get", handle.resourceId], handle.socketPath),
-              "pane get",
-            ),
-          ).terminal_id === handle.terminalId
+          processBefore.pane_id === agent.pane_id &&
+          processAfter.pane_id === agent.pane_id &&
+          processBefore.foreground_process_group_id ===
+            processAfter.foreground_process_group_id &&
+          agent.terminal_id === handle.terminalId &&
+          (handle.agentName === undefined || agent.name === handle.agentName) &&
+          (handle.foregroundProcessGroupId === undefined ||
+            processAfter.foreground_process_group_id === handle.foregroundProcessGroupId)
         );
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (/not[_ -]?found/i.test(message)) return false;
+        const message = errorText(error);
+        if (/ownership mismatch/i.test(message) || isMissingPane(error)) return false;
         const unavailable = new Error(`HerdR control unavailable: ${message}`);
         unavailable.name = "HerdrUnavailableError";
         throw unavailable;
@@ -834,6 +925,34 @@ export function createSyncHerdrControl(
     },
     close(handle: HerdrTerminalHandle): void {
       if (
+        handle.agentName !== undefined ||
+        handle.foregroundProcessGroupId !== undefined
+      ) {
+        if (!this.exists(handle)) {
+          try {
+            run(["pane", "get", handle.resourceId], handle.socketPath);
+          } catch (error) {
+            if (isMissingPane(error)) {
+              if (handle.workspaceId && !handle.workspaceGroup) {
+                try {
+                  run(["workspace", "close", handle.workspaceId], handle.socketPath);
+                } catch (workspaceError) {
+                  if (!isMissingWorkspace(workspaceError)) throw workspaceError;
+                }
+                return;
+              }
+              if (handle.workspaceId && handle.workspaceGroup) {
+                throw new Error(
+                  "HerdR grouped workspace identity could not be verified",
+                );
+              }
+              return;
+            }
+          }
+          throw new Error("HerdR ownership mismatch: agent identity changed");
+        }
+      }
+      if (
         handle.backend === "herdr" &&
         handle.workspaceId &&
         handle.workspaceGroup
@@ -841,20 +960,30 @@ export function createSyncHerdrControl(
         const key = workspaceGroupKey(handle.socketPath, handle.workspaceGroup);
         const group = groupedWorkspaces.get(key);
         if (!group || group.workspaceId !== handle.workspaceId) {
-          run(["pane", "close", handle.resourceId], handle.socketPath);
+          try {
+            run(["pane", "close", handle.resourceId], handle.socketPath);
+          } catch (error) {
+            if (!isMissingPane(error)) throw error;
+          }
           return;
         }
-        if (!group.paneIds.delete(handle.resourceId)) return;
-        if (group.paneIds.size > 0) {
-          run(["pane", "close", handle.resourceId], handle.socketPath);
+        if (!group.paneIds.has(handle.resourceId)) return;
+        if (group.paneIds.size > 1) {
+          try {
+            run(["pane", "close", handle.resourceId], handle.socketPath);
+          } catch (error) {
+            if (!isMissingPane(error)) throw error;
+          }
+          group.paneIds.delete(handle.resourceId);
           return;
         }
-        groupedWorkspaces.delete(key);
         try {
           run(["workspace", "close", handle.workspaceId], handle.socketPath);
         } catch (error) {
           if (!isMissingWorkspace(error)) throw error;
         }
+        group.paneIds.delete(handle.resourceId);
+        groupedWorkspaces.delete(key);
         return;
       }
       if (handle.backend === "herdr" && handle.workspaceId) {
@@ -866,7 +995,11 @@ export function createSyncHerdrControl(
         return;
       }
       if (!this.exists(handle)) throw new Error("HerdR ownership mismatch");
-      run(["pane", "close", handle.resourceId], handle.socketPath);
+      try {
+        run(["pane", "close", handle.resourceId], handle.socketPath);
+      } catch (error) {
+        if (!isMissingPane(error)) throw error;
+      }
     },
   };
 }

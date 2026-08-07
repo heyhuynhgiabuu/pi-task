@@ -116,6 +116,31 @@ export function killAgentPane(paneId: string, originalPane?: string | null): voi
   tmuxCmdQuiet(["kill-pane", "-t", paneId]);
 }
 
+/** Close a task pane while distinguishing an unavailable tmux server from an already-gone pane. */
+export function killAgentPaneStrict(paneId: string, originalPane?: string | null): void {
+  if (originalPane) {
+    try {
+      tmuxCmd(["select-pane", "-t", originalPane]);
+    } catch {
+      // Original pane may have been closed; still try to kill the agent pane.
+    }
+  }
+  let existingPane: string;
+  try {
+    existingPane = tmuxCmd(["display-message", "-p", "-t", paneId, "#{pane_id}"]);
+  } catch (error) {
+    if (/can't find pane|no such pane|pane.*not found/i.test(String(error))) return;
+    throw error;
+  }
+  if (existingPane !== paneId) throw new Error(`tmux pane identity mismatch: ${paneId}`);
+  try {
+    tmuxCmd(["kill-pane", "-t", paneId]);
+  } catch (error) {
+    if (/can't find pane|no such pane|pane.*not found/i.test(String(error))) return;
+    throw error;
+  }
+}
+
 /** Inject text into a running subagent pane (steer / follow-up). */
 export function tmuxSteerPane(paneId: string, message: string): void {
   const bufferName = `pi-task-steer-${process.pid}-${Date.now()}`;

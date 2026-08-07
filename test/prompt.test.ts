@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import taskExtension from "../src/index.js";
 import { TASK_PROMPT_INSTRUCTIONS } from "../src/helpers.js";
-import { buildTaskPrompt, taskParametersSchema } from "../src/tool/index.js";
+import { buildTaskFollowUpPrompt, buildTaskPrompt, taskParametersSchema } from "../src/tool/index.js";
 import { resolveTaskCwd } from "../src/task-cwd.js";
 
 // Delegated pi-task children disable recursive registration; this test exercises host registration.
@@ -27,7 +27,43 @@ process.on("exit", () => {
   });
   assert.ok(prompt.includes("/tmp/parent-cwd"), t + " cwd");
   assert.ok(prompt.includes("## Workspace scope"), t + " section");
+  assert.ok(prompt.includes("Default workspace: /tmp/parent-cwd."), t + " default workspace");
+  assert.ok(!prompt.includes("parent Pi session cwd"), t + " does not mislabel task cwd");
+  assert.ok(prompt.includes("Do not search sibling repositories"), t + " boundary");
   assert.ok(prompt.includes("explore"), t + " explore rule");
+}
+
+{
+  const t = "task prompt makes context handoff explicit";
+  const prompt = buildTaskPrompt({
+    description: "audit",
+    agentName: "reviewer",
+    agentSource: "bundled",
+    prompt: "Goal: audit the manifest.",
+    parentContext: "The parent found naming drift in manifest and session records.",
+    proposedChanges: [
+      "stable stepId: one durable identifier per logical step, preserved across retries",
+      "tool_batch_started: record the batch boundary before tool execution",
+    ],
+    cwd: "/repo",
+  });
+  assert.match(prompt, /## Parent context/);
+  assert.match(prompt, /naming drift in manifest/);
+  assert.match(prompt, /## Proposed changes/);
+  assert.match(prompt, /stable stepId: one durable identifier per logical step/);
+  assert.match(prompt, /## Workspace scope/);
+  assert.doesNotMatch(prompt, /## Working Directory/);
+  assert.match(prompt, /## Handoff integrity/);
+  assert.match(prompt, /A referenced file is evidence, not a context handoff/);
+  assert.match(prompt, /enumerate every proposed change/);
+
+  const followUp = buildTaskFollowUpPrompt({
+    prompt: "Continue the audit.",
+    parentContext: "The parent clarified the retry identity requirement.",
+    proposedChanges: ["abort closure id: preserve the id through cancellation cleanup"],
+  });
+  assert.match(followUp, /retry identity requirement/);
+  assert.match(followUp, /abort closure id: preserve the id/);
 }
 
 {
@@ -41,6 +77,9 @@ process.on("exit", () => {
   assert.ok(cwdSchema, t + " schema");
   assert.match(cwdSchema.description ?? "", /absolute existing directory/i, t + " validation docs");
   assert.match(cwdSchema.description ?? "", /does not create.*worktree/i, t + " lifecycle docs");
+  const promptSchema = schema.properties?.prompt;
+  assert.ok(promptSchema, t + " prompt schema");
+  assert.match(promptSchema.description ?? "", /parent_context.*proposed_changes/i, t + " handoff docs");
 
   let tool: { execute: (...args: unknown[]) => Promise<{ isError?: boolean; details?: { error?: string } }> } | undefined;
   let shutdown: (() => void) | undefined;
@@ -179,7 +218,7 @@ process.on("exit", () => {
       },
       undefined,
       undefined,
-      { cwd: root },
+      { cwd: root, isProjectTrusted: () => true },
     );
     assert.equal(result.isError, true, `${t} rejected: ${JSON.stringify(result)}`);
     assert.equal(result.details?.error, "active task cannot run foreground", t + " error contract");
@@ -240,8 +279,8 @@ process.on("exit", () => {
       background: true,
     };
     const [first, second] = await Promise.all([
-      tool.execute("concurrent-first", { ...base, cwd: root }, undefined, undefined, { cwd: root }),
-      tool.execute("concurrent-second", { ...base, cwd: replacementCwd }, undefined, undefined, { cwd: root }),
+      tool.execute("concurrent-first", { ...base, cwd: root }, undefined, undefined, { cwd: root, isProjectTrusted: () => true }),
+      tool.execute("concurrent-second", { ...base, cwd: replacementCwd }, undefined, undefined, { cwd: root, isProjectTrusted: () => true }),
     ]);
     assert.equal(first.isError, undefined, t + " first launch");
     assert.equal(second.isError, undefined, t + " second resume");
@@ -253,7 +292,7 @@ process.on("exit", () => {
       { ...base, cwd: replacementCwd, background: false },
       undefined,
       undefined,
-      { cwd: root },
+      { cwd: root, isProjectTrusted: () => true },
     );
     assert.equal(foreground.isError, true, t + " foreground rejection");
     assert.equal(foreground.details?.error, "active task cannot run foreground", t + " foreground error");
@@ -285,6 +324,7 @@ process.on("exit", () => {
     "utf8",
   );
   assert.ok(indexSrc.includes("set cwd to an absolute existing directory"), t);
+  assert.ok(indexSrc.includes("file paths alone are not a context handoff"), t + " handoff guideline");
   assert.ok(!indexSrc.includes("pi.getAllTools()"), "extension load avoids runtime-only tool enumeration");
   assert.ok(indexSrc.includes("cwd: taskCwd"), t + " prompt and backend cwd");
   assert.ok(indexSrc.includes("shellQuote(taskCwd)"), t + " tmux shell cwd");

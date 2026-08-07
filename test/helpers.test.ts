@@ -1075,10 +1075,14 @@ import {
       );
       for (const required of [
         "Goal: the exact outcome wanted",
+        "Parent context: facts, decisions, and constraints",
+        "Proposed changes: one item per change",
+        "Scope and references",
         "Non-goals: what to avoid or leave untouched",
         "Write/read policy",
-        "Stop condition",
+        "Acceptance criteria and stop condition",
         "Verification recipe",
+        "reviewer request with missing parent_context or proposed_changes is rejected",
         "Fan-out and synthesize",
         "Adversarial verification",
       ]) {

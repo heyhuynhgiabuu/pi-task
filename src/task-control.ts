@@ -24,6 +24,8 @@ export interface TaskStartRequest {
   agent_type: string;
   prompt: string;
   description: string;
+  parent_context?: string;
+  proposed_changes?: string[];
   workspace_group?: string;
   cwd?: string;
   task_id?: string;
@@ -114,6 +116,27 @@ export function fromHistoryEntry(entry: TaskSessionHistoryEntry): TaskControlRec
   };
 }
 
+function parsePromptHandoff(prompt: string): {
+  parentContext?: string;
+  proposedChanges?: string[];
+} {
+  const sections = new Map<string, string>();
+  const sectionPattern = /(?:^|\n)(Parent context|Proposed changes):\s*([\s\S]*?)(?=\n(?:Parent context|Proposed changes|Scope|Non-goals|Write\/read policy|Acceptance criteria|Stop condition|Verification recipe|References):|$)/gi;
+  for (const match of prompt.matchAll(sectionPattern)) {
+    sections.set(match[1]!.toLowerCase(), match[2]!.trim());
+  }
+
+  const parentContext = sections.get("parent context") || undefined;
+  const proposedSection = sections.get("proposed changes");
+  const proposedChanges = proposedSection
+    ? proposedSection
+      .split(/\r?\n/)
+      .map((line) => line.replace(/^[-*]\s+/, "").trim())
+      .filter(Boolean)
+    : undefined;
+  return { parentContext, proposedChanges };
+}
+
 export function parseTaskStartRequest(value: unknown): TaskStartRequest | undefined {
   if (!value || typeof value !== "object") return undefined;
   const candidate = value as Record<string, unknown>;
@@ -139,10 +162,39 @@ export function parseTaskStartRequest(value: unknown): TaskStartRequest | undefi
   if (candidate.background !== undefined && typeof candidate.background !== "boolean") {
     return undefined;
   }
+  const parsedPromptHandoff = parsePromptHandoff(candidate.prompt);
+  const suppliedParentContext = typeof candidate.parent_context === "string"
+    ? candidate.parent_context.trim()
+    : undefined;
+  if (candidate.parent_context !== undefined && suppliedParentContext === undefined) {
+    return undefined;
+  }
+  const suppliedProposedChanges = Array.isArray(candidate.proposed_changes)
+    ? candidate.proposed_changes
+      .filter((change): change is string => typeof change === "string")
+      .map((change) => change.trim())
+      .filter(Boolean)
+    : undefined;
+  if (
+    candidate.proposed_changes !== undefined &&
+    (!Array.isArray(candidate.proposed_changes) ||
+      suppliedProposedChanges === undefined ||
+      suppliedProposedChanges.length !== candidate.proposed_changes.length)
+  ) {
+    return undefined;
+  }
+  const parentContext = suppliedParentContext ?? parsedPromptHandoff.parentContext;
+  const proposedChanges = suppliedProposedChanges ?? parsedPromptHandoff.proposedChanges;
+  const isReviewer = candidate.agent_type === "reviewer";
+  if (isReviewer && (!parentContext || !proposedChanges?.length)) {
+    return undefined;
+  }
   return {
     agent_type: candidate.agent_type,
     prompt: candidate.prompt,
     description: candidate.description,
+    ...(parentContext !== undefined ? { parent_context: parentContext } : {}),
+    ...(proposedChanges !== undefined ? { proposed_changes: proposedChanges } : {}),
     ...(typeof candidate.workspace_group === "string" ? { workspace_group: candidate.workspace_group } : {}),
     ...(typeof candidate.cwd === "string" ? { cwd: candidate.cwd } : {}),
     ...(typeof candidate.task_id === "string" ? { task_id: candidate.task_id } : {}),

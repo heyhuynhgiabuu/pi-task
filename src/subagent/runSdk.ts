@@ -1,4 +1,4 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, SettingsManager } from "@earendil-works/pi-coding-agent";
 import type { AgentConfig } from "../helpers.js";
 
 export interface RunSdkSubagentOptions {
@@ -11,11 +11,29 @@ export interface RunSdkSubagentOptions {
   tools?: string[];
   excludeTools?: string[];
   systemPrompt?: string;
+  skillPaths?: string[];
   /**
    * Called with the AgentSession after creation but before prompt().
    * Return an unsubscribe function that will be called on cleanup.
    */
   onSession?: (session: any) => () => void;
+}
+
+export function buildSdkResourceLoaderOptions(options: {
+  cwd: string;
+  agentDir: string;
+  settingsManager: SettingsManager;
+  systemPrompt?: string;
+  skillPaths?: string[];
+}) {
+  return {
+    cwd: options.cwd,
+    agentDir: options.agentDir,
+    settingsManager: options.settingsManager,
+    systemPromptOverride: () => options.systemPrompt,
+    additionalSkillPaths: options.skillPaths,
+    noExtensions: true,
+  };
 }
 
 export async function resolveSdkModel(
@@ -60,7 +78,7 @@ export async function runSdkSubagent(options: RunSdkSubagentOptions): Promise<{
     throw new Error("No model available for SDK subagent execution");
   }
 
-  const { createAgentSession, DefaultResourceLoader, getAgentDir } =
+  const { createAgentSession, DefaultResourceLoader, getAgentDir, SettingsManager } =
     await import("@earendil-works/pi-coding-agent");
   const previousDisabled = process.env.PI_TASK_TOOL_DISABLED;
   process.env.PI_TASK_TOOL_DISABLED = "1";
@@ -68,12 +86,18 @@ export async function runSdkSubagent(options: RunSdkSubagentOptions): Promise<{
   let unsubSession: (() => void) | undefined;
   try {
     const agentDir = getAgentDir();
-    const resourceLoader = new DefaultResourceLoader({
-      cwd: options.cwd,
-      agentDir,
-      systemPromptOverride: () => options.systemPrompt,
-      noExtensions: true,
-    } as any);
+    const settingsManager = SettingsManager.create(options.cwd, agentDir, {
+      projectTrusted: options.ctx.isProjectTrusted(),
+    });
+    const resourceLoader = new DefaultResourceLoader(
+      buildSdkResourceLoaderOptions({
+        cwd: options.cwd,
+        agentDir,
+        settingsManager,
+        systemPrompt: options.systemPrompt,
+        skillPaths: options.skillPaths,
+      }) as any,
+    );
 
     await resourceLoader.reload();
 

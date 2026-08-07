@@ -20,6 +20,8 @@ export interface BuildPiArgvOptions {
   parentToolNames?: string[];
   taskToolName?: string;
   promptLaunch?: PiPromptLaunchOptions;
+  /** Absolute skill paths passed to Pi's repeatable --skill option. */
+  skillPaths?: string[];
 }
 
 export function buildPiArgv(opts: BuildPiArgvOptions): string[] {
@@ -38,6 +40,9 @@ export function buildPiArgv(opts: BuildPiArgvOptions): string[] {
   }
   if (agent.model) args.push("--model", agent.model);
   if (agent.thinking) args.push("--thinking", agent.thinking);
+  for (const skillPath of opts.skillPaths ?? []) {
+    args.push("--skill", skillPath);
+  }
   args.push("--tools", allowedTools.join(","));
   args.push("--name", sessionName);
   args.push("--session-dir", sessionDir);

@@ -57,6 +57,33 @@ test("task start parsing supplies runtime validation for the flat provider schem
   }), undefined);
 });
 
+test("reviewer starts require structured parent context and proposed semantics", () => {
+  const base = {
+    agent_type: "reviewer",
+    description: "Audit the manifest",
+    prompt: "Read the files and account for the proposed changes.",
+  };
+  assert.equal(parseTaskStartRequest(base), undefined);
+  assert.deepEqual(parseTaskStartRequest({
+    ...base,
+    prompt: "Goal: audit the manifest.\nParent context:\nThe parent found naming drift across the manifest and session records.\nProposed changes:\n- stable stepId: preserve one durable id across retries\n- tool_batch_started: record the batch boundary before execution\nScope: inspect the manifest and session records.",
+  })?.proposed_changes, [
+    "stable stepId: preserve one durable id across retries",
+    "tool_batch_started: record the batch boundary before execution",
+  ]);
+  assert.deepEqual(parseTaskStartRequest({
+    ...base,
+    parent_context: "The parent found naming drift across the manifest and session records.",
+    proposed_changes: [
+      "stable stepId: one durable identifier per logical step, preserved across retries",
+      "tool_batch_started: record the batch boundary before tool execution",
+    ],
+  })?.proposed_changes, [
+    "stable stepId: one durable identifier per logical step, preserved across retries",
+    "tool_batch_started: record the batch boundary before tool execution",
+  ]);
+});
+
 test("task control parsing trims references and rejects malformed requests", () => {
   assert.deepEqual(parseTaskControlRequest({ operation: "status", task_id: " task-1 " }), {
     operation: "status",

@@ -16,9 +16,9 @@ For the full high-quality 89s @ 56 fps version, [download the MP4](https://githu
 - Background tasks: parent continues, task widget shows progress, completion arrives as a follow-up.
 - Tmux backend for observable subagent panes.
 - HerdR and tmux terminal backends, with SDK fallback when neither is available.
-- Agent frontmatter support: `model`, `thinking`, `tools`, `disallowed_tools`.
+- Agent frontmatter support: `model`, `thinking`, `skills`, `tools`, `disallowed_tools`.
 - Built-in starter agents: `scout`, `explore`, `general`, `reviewer`.
-- Project/user agent overrides via `.pi/agents/*.md` or `~/.pi/agents/*.md`.
+- Project/user agent overrides via `.pi/agents/*.md` or `~/.pi/agent/agents/*.md`.
 
 ## Install
 
@@ -38,10 +38,15 @@ Restart Pi after installing or changing extension config.
 
 Prompt contract for every non-trivial task:
 - goal: the exact outcome wanted
+- parent_context: facts, decisions, and constraints learned outside referenced files
+- proposed_changes: one item per change, including intended semantics and acceptance implications; required and non-empty for a new reviewer task
+- scope and references: what to inspect, why each reference matters, and the base/diff to review; paths are evidence, not context handoff
 - non-goals: what to avoid or leave untouched
 - write/read policy: whether the child may edit or must stay read-only
-- stop condition: what must be true before it can stop
+- acceptance criteria and stop condition: observable conditions that must be true before stopping
 - verification recipe: checks to run or evidence to gather
+
+A reviewer request with missing parent_context or proposed_changes is rejected. If there are no design changes, pass an explicit item such as “No proposed design changes; assess the implementation against the stated goal.”
 
 Foreground task:
 
@@ -50,7 +55,9 @@ Foreground task:
   "agent_type": "explore",
   "description": "Find auth flow",
   "background": false,
-  "prompt": "Goal: map the auth flow. Non-goals: do not edit files. Write/read policy: read-only. Stop condition: auth entrypoints, middleware, and session issuance are mapped. Verification: return file:line evidence."
+  "parent_context": "No parent-only context; map current repository behavior.",
+  "proposed_changes": ["No proposed design changes; document current behavior only."],
+  "prompt": "Goal: map the auth flow. Scope: auth entrypoints, middleware, and session issuance. Non-goals: do not edit files. Write/read policy: read-only. Acceptance criteria: return file:line evidence for each mapped path. Stop condition: the flow is mapped. Verification: return file:line evidence. References: inspect the repository under the working directory."
 }
 ```
 
@@ -61,7 +68,9 @@ Background task:
   "agent_type": "scout",
   "description": "Research SDK docs",
   "background": true,
-  "prompt": "Goal: research the latest Pi SDK extension APIs. Non-goals: no code changes. Write/read policy: read-only. Stop condition: official docs and key APIs are summarized. Verification: cite official docs."
+  "parent_context": "The parent needs version-matched official guidance, not an implementation.",
+  "proposed_changes": ["No proposed design changes; return research only."],
+  "prompt": "Goal: research the latest Pi SDK extension APIs. Scope: official documentation and version-matched examples. Non-goals: no code changes. Write/read policy: read-only. Acceptance criteria: summarize the relevant APIs with citations. Stop condition: official docs and key APIs are summarized. Verification: cite official docs. References: explain why each source matters."
 }
 ```
 
@@ -122,7 +131,7 @@ The existing `task` tool also exposes lifecycle control without starting another
 When two agents have the same name, later sources override earlier ones:
 
 1. bundled agents from this package
-2. user agents: `~/.pi/agents/*.md`
+2. user agents: `~/.pi/agent/agents/*.md`
 3. project agents: `.pi/agents/*.md`
 
 ## Agent frontmatter
@@ -133,6 +142,7 @@ description: Local read-only code explorer
 model: opencode-go/deepseek-v4-flash
 thinking: off
 readonly: true
+skills: memory, verification-before-completion
 # hidden: true      # omit from task tool catalog; block invoke
 # proactive: true   # listed in proactive delegation block on task tool
 tools: read, grep, find, ls
@@ -144,9 +154,11 @@ disallowed_tools: edit, write
 
 Pi has one session parent agent; all `*.md` agents under `agents/` are **task subagents** only. pi-task always appends the agent Markdown body to the child system prompt; `prompt_mode` is not a supported frontmatter field. Use `hidden` for internal/orchestration-only agents.
 
+`skills:` is a comma-separated list of native Pi skill names. pi-task resolves each name against Pi's skill registry and passes the resulting file path through repeatable `--skill` flags to terminal children; SDK children receive the same explicit skill paths. An unknown declared skill fails the task instead of silently dropping the skill. Skill loading remains progressive: the child may need to read or invoke the declared skill to load its full instructions.
+
 `tools:` is an explicit allowlist. If omitted, pi-task starts from the tools actually registered in the parent Pi session, then removes `disallowed_tools`. `readonly: true` always adds write/edit/apply_patch to the deny list, even when `tools:` is explicit. It does **not** deny `bash`; use explicit `tools:` or `disallowed_tools: bash` when an agent must not run shell. Recursive `task` delegation is always blocked.
 
-Bundled agents in `agents/`: `explore`, `scout`, `general`, `reviewer`. They defer model selection to the current Pi session; a user or project agent can set `model:` explicitly. `readonly` blocks mutating tools (write/edit/apply_patch), not `bash`.
+Bundled agents in `agents/`: `explore`, `scout`, `general`, `reviewer`. They declare role-specific native skills and defer model selection to the current Pi session; a user or project agent can set `model:` explicitly. Those declared skills must be installed in Pi's skill registry. `readonly` blocks mutating tools (write/edit/apply_patch), not `bash`.
 
 When the child must actually run in another checkout, pass its absolute existing directory as `cwd`; otherwise the child inherits the caller cwd. For a mutating parallel task, the parent creates a Git worktree first, passes that worktree as `cwd`, then reviews, merges, and removes it after the task finishes. pi-task never creates, merges, or removes worktrees, and `workspace_group` only groups HerdR terminals—it is not filesystem isolation.
 

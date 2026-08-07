@@ -30,7 +30,17 @@ export function taskParametersSchema() {
     prompt: Type.Optional(
       Type.String({
         description:
-          "The complete task for the agent to perform. Be detailed and self-contained. Include goal, non-goals, write/read policy, stop condition, and verification recipe.",
+          "Required for start requests; omitted for status/cancel controls. Be detailed and self-contained: include goal, scope, non-goals, write/read policy, acceptance criteria, stop condition, verification recipe, and why each reference matters. Put parent-only reasoning in parent_context and enumerate proposed changes in proposed_changes.",
+      }),
+    ),
+    parent_context: Type.Optional(
+      Type.String({
+        description: "Facts, decisions, and constraints the parent learned outside the referenced files. Required for reviewer tasks.",
+      }),
+    ),
+    proposed_changes: Type.Optional(
+      Type.Array(Type.String(), {
+        description: "One item per proposed change, including its intended semantics and acceptance implication. Required and non-empty for reviewer tasks; use an explicit 'no design changes' item when applicable.",
       }),
     ),
     description: Type.Optional(

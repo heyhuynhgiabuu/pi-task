@@ -62,6 +62,7 @@ import {
 } from "./lifecycle/index.js";
 import { formatSdkBackgroundReceipt, startSdkBackgroundTask } from "./subagent/sdkBackground.js";
 import { runSdkSubagent } from "./subagent/runSdk.js";
+import { resolveAgentSkillPaths } from "./subagent/skills.js";
 import { createDefaultHerdrTerminalBackend, createSyncHerdrControl } from "./subagent/herdr.js";
 import { selectTerminalBackend } from "./subagent/terminalBackend.js";
 import { steerRunningBackgroundTask } from "./subagent/steer.js";
@@ -80,6 +81,7 @@ import {
   wrapWithPaneExitWatcher,
 } from "./subagent/tmux.js";
 import {
+  buildTaskFollowUpPrompt,
   buildTaskPrompt,
   createTaskCompleteRenderer,
   renderCall,
@@ -235,6 +237,7 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "Delegate work to a specialist agent via the task tool",
     promptGuidelines: [
       "Delegate complex multi-step work to a specialist agent when the work benefits from isolated context",
+      "Copy parent-synthesized facts, decisions, and proposed-change semantics into the task prompt; file paths alone are not a context handoff",
       "Launch multiple agents concurrently by making multiple tool calls in a single message",
       "Do NOT duplicate work you've delegated — wait for the result or work on non-overlapping tasks",
       "Use agent_type to route to the right specialist",
@@ -405,7 +408,15 @@ export default function (pi: ExtensionAPI) {
             recentCalls: [],
           };
                     backgroundTasks.set(id, bgtask);
-          const steerResult = steerRunningBackgroundTask(bgtask.paneId, taskParams.prompt, bgtask.handle);
+          const steerResult = steerRunningBackgroundTask(
+            bgtask.paneId,
+            buildTaskFollowUpPrompt({
+              prompt: taskParams.prompt,
+              parentContext: taskParams.parent_context,
+              proposedChanges: taskParams.proposed_changes,
+            }),
+            bgtask.handle,
+          );
           if (!steerResult.ok) {
             return {
               content: [{ type: "text" as const, text: `Conversation "${conversationId}" was restored, but the follow-up prompt could not be delivered (${steerResult.reason}).` }],
@@ -528,7 +539,15 @@ export default function (pi: ExtensionAPI) {
             recentCalls: [],
           };
           backgroundTasks.set(id, bgtask);
-          const steerResult = steerRunningBackgroundTask(bgtask.paneId, taskParams.prompt, bgtask.handle);
+          const steerResult = steerRunningBackgroundTask(
+            bgtask.paneId,
+            buildTaskFollowUpPrompt({
+              prompt: taskParams.prompt,
+              parentContext: taskParams.parent_context,
+              proposedChanges: taskParams.proposed_changes,
+            }),
+            bgtask.handle,
+          );
           if (!steerResult.ok) {
             return {
               content: [{ type: "text" as const, text: `Task "${taskParams.task_id}" was restored, but the follow-up prompt could not be delivered (${steerResult.reason}).` }],
@@ -585,6 +604,21 @@ export default function (pi: ExtensionAPI) {
         };
       }
       const taskCwd = taskCwdResolution.cwd;
+      let skillPaths: string[];
+      try {
+        skillPaths = await resolveAgentSkillPaths(
+          agent.skills,
+          taskCwd,
+          ctx.isProjectTrusted(),
+        );
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return {
+          content: [{ type: "text" as const, text: message }],
+          details: { phase: "failed" as const, error: "agent skills unavailable" },
+          isError: true,
+        };
+      }
 
       const durableBackendPreference = (process.env.PI_TASK_BACKEND ?? "auto").trim().toLowerCase();
       const herdrContextAvailable = process.env.HERDR_ENV === "1"
@@ -627,6 +661,8 @@ export default function (pi: ExtensionAPI) {
             agentName: agent.name,
             agentSource: agent.source,
             prompt: taskParams.prompt,
+            parentContext: taskParams.parent_context,
+            proposedChanges: taskParams.proposed_changes,
             cwd: taskCwd,
           });
 
@@ -684,6 +720,7 @@ export default function (pi: ExtensionAPI) {
         taskToolName,
         resumeSessionRef,
         promptLaunch,
+        skillPaths,
       );
       const useSdkBackend = selectedBackend === "sdk";
 
@@ -710,6 +747,7 @@ export default function (pi: ExtensionAPI) {
               tools: toolSelection.tools,
               excludeTools: toolSelection.excludeTools,
               systemPrompt: agent.body,
+              skillPaths,
             });
 
       const foregroundTask: BackgroundTask | undefined = isBackground

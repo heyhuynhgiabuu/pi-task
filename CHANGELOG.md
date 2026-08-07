@@ -6,6 +6,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-08-07
+
+### Added
+
+- Added explicit per-agent native Pi skill loading for terminal and SDK subagents, with fail-closed unknown-skill handling.
+- Added structured reviewer handoff requirements for parent context, proposed-change semantics, acceptance criteria, and evidence.
+
+### Changed
+
+- Aligned bundled and global agent prompts and simplified generated workspace handoff wording.
+
+### Fixed
+
+- Fixed bundled agent catalog descriptions and removed stale or unavailable tool references from agent templates.
+- Corrected the documented global agent path and added prompt regression coverage.
+
 ## [0.4.0] - 2026-08-07
 
 ### Added

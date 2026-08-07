@@ -24,6 +24,7 @@ import { loadAgentsFromDir, parseBool } from "../src/helpers.js";
       join(dir, "meta.md"),
       `---
 description: Meta agent
+skills: memory, verification-before-completion
 hidden: true
 proactive: yes
 readonly: true
@@ -45,6 +46,7 @@ No description.`,
     assert.equal(a.hidden, true, t + " hidden");
     assert.equal(a.proactive, true, t + " proactive");
     assert.equal(a.readonly, true, t + " readonly");
+      assert.deepEqual(a.skills, ["memory", "verification-before-completion"], t + " skills");
       assert.ok(
         !a.disallowedTools.includes("harness"),
         "readonly does not inject absent orchestration tools into disallowed tools",

@@ -49,6 +49,8 @@ export interface AgentConfig {
   description: string;
   model?: string;
   thinking?: string;
+  /** Skill names from frontmatter `skills:`; resolved to paths before launch. */
+  skills?: string[];
   /** Explicit allowlist from frontmatter `tools:` */
   tools?: string | string[];
   disallowedTools?: string[];
@@ -156,12 +158,17 @@ When NOT to use:
 - To search code within 2-3 files, use Read instead
 - If no available agent fits the task, use other tools directly
 
-Prompt contract:
+Prompt contract (put these fields in the task request):
 - Goal: the exact outcome wanted
+- Parent context: facts, decisions, and constraints learned outside the referenced files
+- Proposed changes: one item per change, including intended semantics and acceptance implications; required and non-empty for a new reviewer task
+- Scope and references: what to inspect, why each reference matters, and the base/diff to review; paths are evidence, not context handoff
 - Non-goals: what to avoid or leave untouched
 - Write/read policy: whether the agent may edit files or must stay read-only
-- Stop condition: what must be true before the task is considered complete
-- Verification recipe: the checks the agent must run or the evidence it must gather
+- Acceptance criteria and stop condition: observable conditions that must be true before stopping
+- Verification recipe: checks to run or evidence to gather
+
+A reviewer request with missing parent_context or proposed_changes is rejected. If there are no design changes, pass an explicit item such as "No proposed design changes; assess the implementation against the stated goal." Generic tasks may omit these structured fields, but must still copy relevant parent reasoning into prompt.
 
 Usage notes:
 1. Provide complete context in the prompt — the subagent starts with a fresh context
@@ -465,12 +472,14 @@ export function loadAgentsFromDir(
     const tools = parseToolList(
       frontmatter.tools as string | string[] | undefined,
     );
+    const skills = parseToolList(frontmatter.skills);
 
     agents.push({
       name,
       description: frontmatter.description,
       model: frontmatter.model,
       thinking: frontmatter.thinking,
+      skills: skills.length > 0 ? skills : undefined,
       tools: tools.length > 0 ? tools : undefined,
       disallowedTools,
       hidden,
@@ -621,6 +630,7 @@ export function formatAgentList(agents: AgentConfig[]): string {
       taskToolName?: string,
       resumeSessionRef?: string,
       promptLaunch?: PiPromptLaunchOptions,
+      skillPaths?: string[],
     ): string[] {
       return buildPiArgv({
         agent,
@@ -632,6 +642,7 @@ export function formatAgentList(agents: AgentConfig[]): string {
         parentToolNames,
         taskToolName,
         promptLaunch,
+        skillPaths,
       });
     }
 

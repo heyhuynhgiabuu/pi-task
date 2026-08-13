@@ -142,3 +142,73 @@ test("completion is persisted and leaves cleanup pending when pane cleanup fails
   assert.equal(notificationSent, true);
   assert.equal(readRegistry(piDir)[0]?.cleanupPending, true);
 });
+
+test("completion notification defaults to a follow-up turn", () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-completion-delivery-"));
+  const task: BackgroundTask = {
+    dir: join(piDir, "artifacts", "tasks", "task-default"),
+    agentType: "general",
+    sessionName: "task-task-default",
+    originalPane: null,
+    description: "default delivery",
+    startedAt: Date.now() - 1000,
+    toolUses: 0,
+    turns: 0,
+  };
+  let options: unknown;
+  const previous = process.env.PI_TASK_COMPLETION_DELIVERY;
+  delete process.env.PI_TASK_COMPLETION_DELIVERY;
+  try {
+    completeTask(
+      {
+        sendMessage: (_message: unknown, opts: unknown) => {
+          options = opts;
+        },
+      } as never,
+      "task-default",
+      task,
+      "<summary>done</summary>",
+      "done",
+      piDir,
+    );
+  } finally {
+    if (previous === undefined) delete process.env.PI_TASK_COMPLETION_DELIVERY;
+    else process.env.PI_TASK_COMPLETION_DELIVERY = previous;
+  }
+  assert.deepEqual(options, { triggerTurn: true, deliverAs: "followUp" });
+});
+
+test("completion notification defers to the next user turn when configured", () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-completion-nextturn-"));
+  const task: BackgroundTask = {
+    dir: join(piDir, "artifacts", "tasks", "task-nextturn"),
+    agentType: "explore",
+    sessionName: "task-task-nextturn",
+    originalPane: null,
+    description: "deferred delivery",
+    startedAt: Date.now() - 1000,
+    toolUses: 0,
+    turns: 0,
+  };
+  let options: unknown;
+  const previous = process.env.PI_TASK_COMPLETION_DELIVERY;
+  process.env.PI_TASK_COMPLETION_DELIVERY = "nextTurn";
+  try {
+    completeTask(
+      {
+        sendMessage: (_message: unknown, opts: unknown) => {
+          options = opts;
+        },
+      } as never,
+      "task-nextturn",
+      task,
+      "<summary>done</summary>",
+      "done",
+      piDir,
+    );
+  } finally {
+    if (previous === undefined) delete process.env.PI_TASK_COMPLETION_DELIVERY;
+    else process.env.PI_TASK_COMPLETION_DELIVERY = previous;
+  }
+  assert.deepEqual(options, { triggerTurn: true, deliverAs: "nextTurn" });
+});

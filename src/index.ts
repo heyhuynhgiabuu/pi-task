@@ -49,6 +49,7 @@ import {
   resolveTaskAgentPreflight,
   assessTaskResult,
   buildTaskEnvelope,
+  completionDeliveryOptions,
   formatBackgroundReceipt,
   parseResultXml,
   shellQuote,
@@ -843,7 +844,7 @@ export default function (pi: ExtensionAPI) {
                           full_output: parsed.raw.trim() || result.output.trim(),
                         },
                       },
-                      { triggerTurn: true, deliverAs: "followUp" },
+                      completionDeliveryOptions(process.env.PI_TASK_COMPLETION_DELIVERY),
                     ),
                   );
                 },
@@ -871,7 +872,7 @@ export default function (pi: ExtensionAPI) {
                           background: true,
                         },
                       },
-                      { triggerTurn: true, deliverAs: "followUp" },
+                      completionDeliveryOptions(process.env.PI_TASK_COMPLETION_DELIVERY),
                     ),
                   );
                 },

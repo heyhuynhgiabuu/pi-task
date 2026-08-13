@@ -1212,3 +1212,59 @@ console.log("ALL TASK HELPER TESTS PASSED");
         t,
       );
     }
+
+{
+  const { resolveCompletionDelivery, completionDeliveryOptions } =
+    await import("../src/helpers.js");
+  assert.equal(
+    typeof resolveCompletionDelivery,
+    "function",
+    "resolveCompletionDelivery is exported",
+  );
+  assert.equal(
+    typeof completionDeliveryOptions,
+    "function",
+    "completionDeliveryOptions is exported",
+  );
+}
+
+{
+  const { resolveCompletionDelivery } = await import("../src/helpers.js");
+  const t = "resolveCompletionDelivery defaults to followUp";
+  assert.equal(resolveCompletionDelivery(undefined), "followUp", t + " unset");
+  assert.equal(resolveCompletionDelivery(""), "followUp", t + " empty");
+  assert.equal(resolveCompletionDelivery("garbage"), "followUp", t + " invalid");
+  assert.equal(
+    resolveCompletionDelivery(" followup "),
+    "followUp",
+    t + " explicit followUp",
+  );
+  assert.equal(resolveCompletionDelivery("followup"), "followUp", t + " case-insensitive followup");
+}
+
+{
+  const { resolveCompletionDelivery } = await import("../src/helpers.js");
+  const t = "resolveCompletionDelivery accepts nextTurn";
+  assert.equal(resolveCompletionDelivery("nextTurn"), "nextTurn", t);
+  assert.equal(
+    resolveCompletionDelivery(" nextturn "),
+    "nextTurn",
+    t + " trimmed and case-insensitive",
+  );
+  assert.equal(resolveCompletionDelivery("NEXTTURN"), "nextTurn", t + " uppercase");
+}
+
+{
+  const { completionDeliveryOptions } = await import("../src/helpers.js");
+  const t = "completionDeliveryOptions keeps the turn trigger and defers delivery per config";
+  assert.deepEqual(
+    completionDeliveryOptions(undefined),
+    { triggerTurn: true, deliverAs: "followUp" },
+    t + " default",
+  );
+  assert.deepEqual(
+    completionDeliveryOptions("nextTurn"),
+    { triggerTurn: true, deliverAs: "nextTurn" },
+    t + " nextTurn",
+  );
+}

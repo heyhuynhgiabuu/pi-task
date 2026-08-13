@@ -187,6 +187,7 @@ Keep the parent responsible for orchestration decisions and final verification. 
 | Variable | Effect |
 |----------|--------|
 | `PI_TASK_CHILD_NO_EXTENSIONS=1` | Child `pi` runs with `--no-extensions` (fewer startup failures in tmux subagents). |
+| `PI_TASK_COMPLETION_DELIVERY` | Background completion delivery: `followUp` (default) forces a new model turn per completed task; `nextTurn` queues the completion and delivers the result with your next prompt, avoiding redundant turns when the parent already has the results. A queued completion is held in memory and lost if the session ends before the next prompt (task-session history keeps the recovery pointer). Requires Pi 0.34+. |
 | `PI_TASK_POLL_MS` | Background poll interval (default 2000). |
 | `PI_TASK_BACKEND` | `auto` (default), `herdr`, `tmux`, or `sdk`. `auto` prefers HerdR only when Pi is already running inside an active HerdR pane, then tmux, then SDK. |
 | `PI_TASK_TOOL_NAME` | Delegation tool name, default `task`. Set `Agent` to align with Claude Code's native subagent tool name. Use a unique valid tool name. |

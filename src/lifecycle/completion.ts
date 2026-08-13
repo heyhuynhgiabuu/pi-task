@@ -5,7 +5,7 @@ import {
   upsertTaskSessionHistory,
   writeRegistry,
 } from "../conversation.js";
-import { assessTaskResult, parseResultXml } from "../helpers.js";
+import { assessTaskResult, completionDeliveryOptions, parseResultXml } from "../helpers.js";
 import { createSyncHerdrControl } from "../subagent/herdr.js";
 import { killAgentPaneStrict } from "../subagent/tmux.js";
 import { ignoreStaleExtensionCtx } from "../stale-ctx.js";
@@ -127,10 +127,7 @@ export function completeTask(
           full_output: parsed.raw.trim() || content.trim(),
         },
       },
-      {
-        triggerTurn: true,
-        deliverAs: "followUp",
-      },
+      completionDeliveryOptions(process.env.PI_TASK_COMPLETION_DELIVERY),
     ),
   );
 

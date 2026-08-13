@@ -372,6 +372,37 @@ export function chooseTmuxSplitDirection(
   return paneWidth >= 2 * paneHeight ? "-h" : "-v";
 }
 
+export type CompletionDelivery = "followUp" | "nextTurn";
+
+/**
+ * Resolve how background task-completion results reach the parent. `followUp`
+ * (default) forces a new model turn per completed task; `nextTurn` queues the
+ * result and delivers it with the next user prompt, avoiding a redundant turn
+ * when the parent already has the result (issue #15). A queued result is held
+ * in memory only and is lost if the session ends before the next prompt; the
+ * durable task-session history retains its recovery pointer. Unset, empty, or
+ * unrecognized values fall back to `followUp`.
+ */
+export function resolveCompletionDelivery(
+  configured?: string,
+): CompletionDelivery {
+  return configured?.trim().toLowerCase() === "nextturn"
+    ? "nextTurn"
+    : "followUp";
+}
+
+/**
+ * Send options for background task-completion notifications. `triggerTurn`
+ * stays true so the default `followUp` still forces a turn when the parent is
+ * idle; Pi ignores it for queued `nextTurn` delivery.
+ */
+export function completionDeliveryOptions(configured?: string): {
+  triggerTurn: boolean;
+  deliverAs: CompletionDelivery;
+} {
+  return { triggerTurn: true, deliverAs: resolveCompletionDelivery(configured) };
+}
+
 export function buildTmuxSplitWindowArgs(
   cwd: string,
   command: string,

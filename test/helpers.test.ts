@@ -1230,16 +1230,27 @@ console.log("ALL TASK HELPER TESTS PASSED");
 
 {
   const { resolveCompletionDelivery } = await import("../src/helpers.js");
-  const t = "resolveCompletionDelivery defaults to followUp";
-  assert.equal(resolveCompletionDelivery(undefined), "followUp", t + " unset");
-  assert.equal(resolveCompletionDelivery(""), "followUp", t + " empty");
-  assert.equal(resolveCompletionDelivery("garbage"), "followUp", t + " invalid");
+  const t = "resolveCompletionDelivery defaults to adaptive steer";
+  assert.equal(resolveCompletionDelivery(undefined), "steer", t + " unset");
+  assert.equal(resolveCompletionDelivery(""), "steer", t + " empty");
+  assert.equal(resolveCompletionDelivery("garbage"), "steer", t + " invalid");
   assert.equal(
     resolveCompletionDelivery(" followup "),
     "followUp",
     t + " explicit followUp",
   );
   assert.equal(resolveCompletionDelivery("followup"), "followUp", t + " case-insensitive followup");
+}
+
+{
+  const { resolveCompletionDelivery } = await import("../src/helpers.js");
+  const t = "resolveCompletionDelivery accepts steer explicitly";
+  assert.equal(resolveCompletionDelivery("steer"), "steer", t);
+  assert.equal(
+    resolveCompletionDelivery(" STEER "),
+    "steer",
+    t + " trimmed and case-insensitive",
+  );
 }
 
 {
@@ -1259,8 +1270,13 @@ console.log("ALL TASK HELPER TESTS PASSED");
   const t = "completionDeliveryOptions keeps the turn trigger and defers delivery per config";
   assert.deepEqual(
     completionDeliveryOptions(undefined),
+    { triggerTurn: true, deliverAs: "steer" },
+    t + " adaptive default",
+  );
+  assert.deepEqual(
+    completionDeliveryOptions("followUp"),
     { triggerTurn: true, deliverAs: "followUp" },
-    t + " default",
+    t + " explicit followUp",
   );
   assert.deepEqual(
     completionDeliveryOptions("nextTurn"),

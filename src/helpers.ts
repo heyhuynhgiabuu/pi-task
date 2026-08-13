@@ -372,29 +372,37 @@ export function chooseTmuxSplitDirection(
   return paneWidth >= 2 * paneHeight ? "-h" : "-v";
 }
 
-export type CompletionDelivery = "followUp" | "nextTurn";
+export type CompletionDelivery = "steer" | "followUp" | "nextTurn";
 
 /**
- * Resolve how background task-completion results reach the parent. `followUp`
- * (default) forces a new model turn per completed task; `nextTurn` queues the
- * result and delivers it with the next user prompt, avoiding a redundant turn
- * when the parent already has the result (issue #15). A queued result is held
- * in memory only and is lost if the session ends before the next prompt; the
- * durable task-session history retains its recovery pointer. Unset, empty, or
- * unrecognized values fall back to `followUp`.
+ * Resolve how background task-completion results reach the parent (issue #15):
+ * - `steer` (default, adaptive): while the parent is streaming, the result is
+ *   injected into the current turn mid-work — no extra turn (a steer landing
+ *   in the parent's final response still costs one assistant response, same
+ *   as `followUp`); while idle, the trigger fires so autonomous runs react.
+ *   Note: the completion reaches the model as a user-role message mid-turn,
+ *   not at a natural stopping point.
+ * - `followUp`: always forces a new model turn per completed task.
+ * - `nextTurn`: queues the result and delivers it with the next user prompt.
+ *   A queued result is held in memory only and is lost if the session ends
+ *   before the next prompt; the durable task-session history retains its
+ *   recovery pointer.
+ * Unset, empty, or unrecognized values fall back to `steer`.
  */
 export function resolveCompletionDelivery(
   configured?: string,
 ): CompletionDelivery {
-  return configured?.trim().toLowerCase() === "nextturn"
-    ? "nextTurn"
-    : "followUp";
+  const mode = configured?.trim().toLowerCase();
+  if (mode === "nextturn") return "nextTurn";
+  if (mode === "followup") return "followUp";
+  return "steer";
 }
 
 /**
  * Send options for background task-completion notifications. `triggerTurn`
- * stays true so the default `followUp` still forces a turn when the parent is
- * idle; Pi ignores it for queued `nextTurn` delivery.
+ * stays true so an idle parent still gets a turn; while streaming, Pi routes
+ * by `deliverAs` — `steer` folds into the current turn, `followUp` queues a
+ * follow-up turn. Pi ignores `triggerTurn` for queued `nextTurn` delivery.
  */
 export function completionDeliveryOptions(configured?: string): {
   triggerTurn: boolean;

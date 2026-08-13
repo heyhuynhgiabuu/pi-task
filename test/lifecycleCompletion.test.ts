@@ -143,7 +143,7 @@ test("completion is persisted and leaves cleanup pending when pane cleanup fails
   assert.equal(readRegistry(piDir)[0]?.cleanupPending, true);
 });
 
-test("completion notification defaults to a follow-up turn", () => {
+test("completion notification defaults to adaptive steer delivery", () => {
   const piDir = mkdtempSync(join(tmpdir(), "pi-task-completion-delivery-"));
   const task: BackgroundTask = {
     dir: join(piDir, "artifacts", "tasks", "task-default"),
@@ -175,7 +175,7 @@ test("completion notification defaults to a follow-up turn", () => {
     if (previous === undefined) delete process.env.PI_TASK_COMPLETION_DELIVERY;
     else process.env.PI_TASK_COMPLETION_DELIVERY = previous;
   }
-  assert.deepEqual(options, { triggerTurn: true, deliverAs: "followUp" });
+  assert.deepEqual(options, { triggerTurn: true, deliverAs: "steer" });
 });
 
 test("completion notification defers to the next user turn when configured", () => {

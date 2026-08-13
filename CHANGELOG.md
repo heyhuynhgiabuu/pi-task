@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
-- Added `PI_TASK_COMPLETION_DELIVERY=nextTurn` to deliver background task-completion results with the next user prompt instead of forcing a model turn per completed task (issue #15). `followUp` remains the default for autonomous orchestration; a queued result is held in memory and lost if the session ends before the next prompt.
+- Added `PI_TASK_COMPLETION_DELIVERY` for background task-completion delivery (issue #15). `steer` is the adaptive default: while the parent streams, results fold into the current turn mid-work without a dedicated completion turn; while idle, a turn still triggers so autonomous runs react (requires Pi 0.32+). `followUp` restores the pre-0.4.2 behavior (one forced turn per completion); `nextTurn` delivers queued results with the next user prompt — a queued result is held in memory and lost if the session ends before the next prompt (`nextTurn` requires Pi 0.34+).
 
 ## [0.4.1] - 2026-08-07
 

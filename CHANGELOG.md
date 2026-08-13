@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-08-12
+
 ### Added
 
 - Added `PI_TASK_COMPLETION_DELIVERY=nextTurn` to deliver background task-completion results with the next user prompt instead of forcing a model turn per completed task (issue #15). `followUp` remains the default for autonomous orchestration; a queued result is held in memory and lost if the session ends before the next prompt.

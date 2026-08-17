@@ -20,15 +20,18 @@ function parseMarkdownFrontmatter(content: string): {
   frontmatter: Record<string, string>;
   body: string;
 } {
-  if (!content.startsWith("---\n")) {
+  // Git checkouts on Windows may provide CRLF agent files; parse the same
+  // frontmatter contract regardless of checkout line endings.
+  const normalizedContent = content.replace(/\r\n/g, "\n");
+  if (!normalizedContent.startsWith("---\n")) {
     return { frontmatter: {}, body: content };
   }
 
-  const end = content.indexOf("\n---", 4);
+  const end = normalizedContent.indexOf("\n---", 4);
   if (end === -1) return { frontmatter: {}, body: content };
 
-  const raw = content.slice(4, end).trim();
-  const body = content.slice(end + "\n---".length).replace(/^\n/, "");
+  const raw = normalizedContent.slice(4, end).trim();
+  const body = normalizedContent.slice(end + "\n---".length).replace(/^\n/, "");
   const frontmatter: Record<string, string> = {};
 
   for (const line of raw.split("\n")) {
@@ -49,6 +52,8 @@ export interface AgentConfig {
   description: string;
   model?: string;
   thinking?: string;
+  /** Optional Fast Mode default from frontmatter `fast:`. */
+  fast?: boolean;
   /** Skill names from frontmatter `skills:`; resolved to paths before launch. */
   skills?: string[];
   /** Explicit allowlist from frontmatter `tools:` */
@@ -501,6 +506,7 @@ export function loadAgentsFromDir(
     const hidden = parseBool(frontmatter.hidden);
     const proactive = parseBool(frontmatter.proactive);
     const readonly = parseBool(frontmatter.readonly);
+    const fast = parseBool(frontmatter.fast);
     // Always-on xAI disallow list — these tools are never useful for
     // task subagents and risk leaking provider-specific behavior.
     const withDefaults = [
@@ -520,6 +526,7 @@ export function loadAgentsFromDir(
       description: frontmatter.description,
       model: frontmatter.model,
       thinking: frontmatter.thinking,
+      fast,
       skills: skills.length > 0 ? skills : undefined,
       tools: tools.length > 0 ? tools : undefined,
       disallowedTools,
@@ -578,6 +585,13 @@ export function parseBool(value: unknown): boolean | undefined {
   if (value === false || value === "false" || value === "no" || value === "0")
     return false;
   return undefined;
+}
+
+export function resolveTaskFastMode(
+  taskFast: boolean | undefined,
+  agentFast: boolean | undefined,
+): boolean {
+  return taskFast ?? agentFast ?? false;
 }
 
 function isAgentHidden(agent: AgentConfig): boolean {
@@ -672,6 +686,8 @@ export function formatAgentList(agents: AgentConfig[]): string {
       resumeSessionRef?: string,
       promptLaunch?: PiPromptLaunchOptions,
       skillPaths?: string[],
+      fast?: boolean,
+      fastExtensionPath?: string,
     ): string[] {
       return buildPiArgv({
         agent,
@@ -684,6 +700,8 @@ export function formatAgentList(agents: AgentConfig[]): string {
         taskToolName,
         promptLaunch,
         skillPaths,
+        fast,
+        fastExtensionPath,
       });
     }
 

@@ -81,6 +81,26 @@ test("task start parsing supplies runtime validation for the flat provider schem
   }), undefined);
 });
 
+test("fast is an optional start setting and survives task control parsing", () => {
+  const schema = taskParametersSchema();
+  const base = {
+    agent_type: "explore",
+    description: "Inspect the repository",
+    prompt: "Map the repository.",
+  };
+
+  assert.equal(Value.Check(schema, { ...base, fast: true }), true);
+  assert.equal(Value.Check(schema, { ...base, fast: false }), true);
+  assert.equal(parseTaskStartRequest({ ...base, fast: true })?.fast, true);
+  assert.equal(parseTaskStartRequest({ ...base, fast: false })?.fast, false);
+  assert.equal(parseTaskStartRequest({ ...base, fast: "true" }), undefined);
+  assert.equal(parseTaskControlRequest({
+    operation: "status",
+    task_id: "task-1",
+    fast: true,
+  }), undefined);
+});
+
 test("reviewer starts require structured parent context and proposed semantics", () => {
   const base = {
     agent_type: "reviewer",

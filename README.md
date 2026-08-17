@@ -16,7 +16,8 @@ For the full high-quality 89s @ 56 fps version, [download the MP4](https://githu
 - Background tasks: parent continues, task widget shows progress, completion arrives as a follow-up.
 - Tmux backend for observable subagent panes.
 - HerdR and tmux terminal backends, with SDK fallback when neither is available.
-- Agent frontmatter support: `model`, `thinking`, `skills`, `tools`, `disallowed_tools`.
+- Agent frontmatter support: `model`, `thinking`, `fast`, `skills`, `tools`, `disallowed_tools`.
+- Task-local OpenAI/OpenAI-Codex Fast Mode: apply priority service tier to configured models without changing model, thinking level, or shared configuration.
 - Built-in starter agents: `scout`, `explore`, `general`, `reviewer`.
 - Project/user agent overrides via `.pi/agents/*.md` or `~/.pi/agent/agents/*.md`.
 
@@ -45,6 +46,21 @@ Prompt contract for every non-trivial task:
 - write/read policy: whether the child may edit or must stay read-only
 - acceptance criteria and stop condition: observable conditions that must be true before stopping
 - verification recipe: checks to run or evidence to gather
+
+Task-local Fast Mode is optional. Set `fast: true` or `fast: false` on a start/resume request; when omitted, the selected agent's optional `fast:` frontmatter value applies, then behavior defaults to `false`.
+
+```json
+{
+  "operation": "start",
+  "agent_type": "general",
+  "description": "Implement focused fix",
+  "fast": true,
+  "background": false,
+  "prompt": "Goal: implement the bounded fix. Non-goals: do not change the model or thinking level. Write/read policy: edit only the requested files. Acceptance criteria: tests pass. Stop condition: the fix is verified. Verification: run the focused tests."
+}
+```
+
+When effective Fast Mode is enabled, a configured OpenAI or OpenAI-Codex child uses `serviceTier: "priority"` when its model is listed in `pi-codex-fast.json` under the Pi agent directory. The config's `enabled` value is not consulted, and pi-task never writes the file. Unsupported or unlisted models use their normal streamer. Terminal children use an isolated provider bridge; SDK children inject the same bridge while keeping normal extension discovery disabled.
 
 A reviewer request with missing parent_context or proposed_changes is rejected. If there are no design changes, pass an explicit item such as “No proposed design changes; assess the implementation against the stated goal.”
 

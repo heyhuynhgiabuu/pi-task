@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 import {
   enrichSubagentFailureMessage,
@@ -9,7 +10,7 @@ describe("failure diagnostics", () => {
   it("builds task-scoped session paths", () => {
     assert.equal(
       sessionDirForTask("/tmp/artifacts", "task-123"),
-      "/tmp/artifacts/sessions/task-123",
+      join("/tmp/artifacts", "sessions", "task-123"),
     );
   });
 
@@ -24,7 +25,7 @@ describe("failure diagnostics", () => {
 
     assert.match(result, /Subagent pane exited/);
     assert.match(result, /Session dir:/);
-    assert.match(result, /sessions\/task-99/);
+    assert.match(result, /sessions[\\/]task-99/);
     assert.match(result, /Session JSONL: missing/);
     assert.match(result, /PI_TASK_CHILD_NO_EXTENSIONS/);
   });

@@ -30,6 +30,7 @@ export interface TaskStartRequest {
   cwd?: string;
   task_id?: string;
   conversation_id?: string;
+  fast?: boolean;
   background?: boolean;
 }
 
@@ -162,6 +163,9 @@ export function parseTaskStartRequest(value: unknown): TaskStartRequest | undefi
   )) {
     return undefined;
   }
+  if (candidate.fast !== undefined && typeof candidate.fast !== "boolean") {
+    return undefined;
+  }
   if (candidate.background !== undefined && typeof candidate.background !== "boolean") {
     return undefined;
   }
@@ -202,6 +206,7 @@ export function parseTaskStartRequest(value: unknown): TaskStartRequest | undefi
     ...(typeof candidate.cwd === "string" ? { cwd: candidate.cwd } : {}),
     ...(typeof candidate.task_id === "string" ? { task_id: candidate.task_id } : {}),
     ...(typeof candidate.conversation_id === "string" ? { conversation_id: candidate.conversation_id } : {}),
+    ...(typeof candidate.fast === "boolean" ? { fast: candidate.fast } : {}),
     ...(typeof candidate.background === "boolean" ? { background: candidate.background } : {}),
   };
 }

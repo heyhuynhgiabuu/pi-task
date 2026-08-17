@@ -88,6 +88,7 @@ process.on("exit", () => {
       if (event === "session_shutdown") shutdown = handler;
     },
     registerMessageRenderer() {},
+      registerFlag() {},
     registerTool(value: typeof tool) {
       tool = value;
     },
@@ -195,6 +196,7 @@ if (process.platform !== "win32") {
         if (event === "session_shutdown") shutdown = handler;
       },
       registerMessageRenderer() {},
+      registerFlag() {},
       registerTool(value: typeof tool) {
         tool = value;
       },
@@ -259,6 +261,7 @@ if (process.platform !== "win32") {
         if (event === "session_shutdown") shutdown = handler;
       },
       registerMessageRenderer() {},
+      registerFlag() {},
       registerTool(value: typeof tool) {
         tool = value;
       },

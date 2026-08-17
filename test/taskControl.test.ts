@@ -158,6 +158,7 @@ test("task tool explains malformed control payloads instead of reporting a gener
       if (event === "session_shutdown") shutdown = handler;
     },
     registerMessageRenderer() {},
+      registerFlag() {},
     registerTool(definition: CapturedTaskTool) {
       tool = definition;
     },

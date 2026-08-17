@@ -58,7 +58,7 @@ export function taskParametersSchema() {
     fast: Type.Optional(
       Type.Boolean({
         description:
-          "Use OpenAI/OpenAI-Codex priority service tier for this child when its model is listed in pi-codex-fast configuration. When omitted, the agent frontmatter fast value applies; otherwise behavior defaults to false. Does not change model or thinking level.",
+          "Use OpenAI/OpenAI-Codex priority service tier for this child when its model is listed in pi-codex-fast configuration; a missing or invalid config falls back to the built-in gpt-5.4/gpt-5.5 model list. When omitted, the agent frontmatter fast value applies; otherwise behavior defaults to false. Does not change model or thinking level.",
       }),
     ),
     background: Type.Optional(

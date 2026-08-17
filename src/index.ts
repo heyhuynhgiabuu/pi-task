@@ -122,14 +122,17 @@ const BUNDLED_AGENT_DIR = join(
 // ─── Extension Entry Point ──────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
+  // Register in both branches so a manual `pi -e pi-task --fast` in a normal
+  // session is accepted instead of dying as "Unknown option: --fast". The
+  // bridge is only installed in the disabled recursive-child branch below.
+  pi.registerFlag("fast", {
+    description: "Use priority service tier for this delegated child",
+    type: "boolean",
+    default: false,
+  });
   // Recursive children never register task. An explicitly fast terminal child
   // loads this same extension path only to install its isolated provider bridge.
   if (process.env.PI_TASK_TOOL_DISABLED === "1") {
-    pi.registerFlag("fast", {
-      description: "Use priority service tier for this delegated child",
-      type: "boolean",
-      default: false,
-    });
     let fastModeBridgeInstalled = false;
     pi.on("session_start", () => {
       if (fastModeBridgeInstalled || pi.getFlag("fast") !== true) return;

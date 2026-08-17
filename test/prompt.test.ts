@@ -88,6 +88,7 @@ process.on("exit", () => {
       if (event === "session_shutdown") shutdown = handler;
     },
     registerMessageRenderer() {},
+      registerFlag() {},
     registerTool(value: typeof tool) {
       tool = value;
     },
@@ -137,7 +138,7 @@ process.on("exit", () => {
   }
 }
 
-{
+if (process.platform !== "win32") {
   const t = "active durable conversations reject foreground relaunch";
   const root = mkdtempSync(join(tmpdir(), "pi-task-active-cwd-"));
   const piDir = join(root, ".pi");
@@ -195,6 +196,7 @@ process.on("exit", () => {
         if (event === "session_shutdown") shutdown = handler;
       },
       registerMessageRenderer() {},
+      registerFlag() {},
       registerTool(value: typeof tool) {
         tool = value;
       },
@@ -234,7 +236,7 @@ process.on("exit", () => {
   }
 }
 
-{
+if (process.platform !== "win32") {
   const t = "concurrent durable launches create one child";
   const root = mkdtempSync(join(tmpdir(), "pi-task-concurrent-cwd-"));
   const piDir = join(root, ".pi");
@@ -259,6 +261,7 @@ process.on("exit", () => {
         if (event === "session_shutdown") shutdown = handler;
       },
       registerMessageRenderer() {},
+      registerFlag() {},
       registerTool(value: typeof tool) {
         tool = value;
       },

@@ -1,4 +1,5 @@
 import type { ExtensionContext, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { createTaskFastModeInlineExtension } from "../fast-mode.js";
 import type { AgentConfig } from "../helpers.js";
 
 export interface RunSdkSubagentOptions {
@@ -12,6 +13,7 @@ export interface RunSdkSubagentOptions {
   excludeTools?: string[];
   systemPrompt?: string;
   skillPaths?: string[];
+  fast?: boolean;
   /**
    * Called with the AgentSession after creation but before prompt().
    * Return an unsubscribe function that will be called on cleanup.
@@ -25,6 +27,7 @@ export function buildSdkResourceLoaderOptions(options: {
   settingsManager: SettingsManager;
   systemPrompt?: string;
   skillPaths?: string[];
+  fast?: boolean;
 }) {
   return {
     cwd: options.cwd,
@@ -33,6 +36,9 @@ export function buildSdkResourceLoaderOptions(options: {
     systemPromptOverride: () => options.systemPrompt,
     additionalSkillPaths: options.skillPaths,
     noExtensions: true,
+    extensionFactories: options.fast
+      ? [createTaskFastModeInlineExtension(options.agentDir)]
+      : [],
   };
 }
 
@@ -96,6 +102,7 @@ export async function runSdkSubagent(options: RunSdkSubagentOptions): Promise<{
         settingsManager,
         systemPrompt: options.systemPrompt,
         skillPaths: options.skillPaths,
+        fast: options.fast,
       }) as any,
     );
 

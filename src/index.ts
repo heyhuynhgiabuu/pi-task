@@ -29,6 +29,9 @@ import {
   MAX_POLL_ERRORS,
   TASK_TIMEOUT_MS,
 } from "./constants.js";
+import { registerTaskFastModeBridge } from "./fast-mode.js";
+export { createTaskFastModeStream, registerTaskFastModeBridge } from "./fast-mode.js";
+export type { TaskToolParameters } from "./tool/schema.js";
 import {
   findJsonlSessionByName,
   normalizeConversationId,
@@ -47,6 +50,7 @@ import {
       discoverAgents,
       subscribeToolEvents,
   resolveTaskAgentPreflight,
+  resolveTaskFastMode,
   assessTaskResult,
   buildTaskEnvelope,
   completionDeliveryOptions,
@@ -107,8 +111,9 @@ import {
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
+const TASK_EXTENSION_PATH = fileURLToPath(import.meta.url);
 const BUNDLED_AGENT_DIR = join(
-  dirname(fileURLToPath(import.meta.url)),
+  dirname(TASK_EXTENSION_PATH),
   "..",
   "agents",
 );
@@ -117,8 +122,25 @@ const BUNDLED_AGENT_DIR = join(
 // ─── Extension Entry Point ──────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
-  // Prevent recursive loading
-  if (process.env.PI_TASK_TOOL_DISABLED === "1") return;
+  // Register in both branches so a manual `pi -e pi-task --fast` in a normal
+  // session is accepted instead of dying as "Unknown option: --fast". The
+  // bridge is only installed in the disabled recursive-child branch below.
+  pi.registerFlag("fast", {
+    description: "Use priority service tier for this delegated child",
+    type: "boolean",
+    default: false,
+  });
+  // Recursive children never register task. An explicitly fast terminal child
+  // loads this same extension path only to install its isolated provider bridge.
+  if (process.env.PI_TASK_TOOL_DISABLED === "1") {
+    let fastModeBridgeInstalled = false;
+    pi.on("session_start", () => {
+      if (fastModeBridgeInstalled || pi.getFlag("fast") !== true) return;
+      fastModeBridgeInstalled = true;
+      registerTaskFastModeBridge(pi);
+    });
+    return;
+  }
 
   const taskToolName = process.env.PI_TASK_TOOL_NAME?.trim() || "task";
   if (!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(taskToolName)) {
@@ -713,6 +735,7 @@ export default function (pi: ExtensionAPI) {
           details: { phase: "failed" as const, error },
         };
       }
+      const effectiveFast = resolveTaskFastMode(taskParams.fast, agent.fast);
       let promptLaunch:
         | { systemPromptPath: string; deferTaskPrompt: boolean }
         | undefined;
@@ -734,6 +757,8 @@ export default function (pi: ExtensionAPI) {
         resumeSessionRef,
         promptLaunch,
         skillPaths,
+        effectiveFast,
+        TASK_EXTENSION_PATH,
       );
       const useSdkBackend = selectedBackend === "sdk";
 
@@ -761,6 +786,7 @@ export default function (pi: ExtensionAPI) {
               excludeTools: toolSelection.excludeTools,
               systemPrompt: agent.body,
               skillPaths,
+              fast: effectiveFast,
             });
 
       const foregroundTask: BackgroundTask | undefined = isBackground

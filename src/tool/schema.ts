@@ -1,4 +1,4 @@
-import { Type } from "typebox";
+import { Type, type Static } from "typebox";
 
 export function taskParametersSchema() {
   // Keep a single object at the schema root. Pi's Anthropic adapter reads
@@ -55,6 +55,12 @@ export function taskParametersSchema() {
     cwd: Type.Optional(Type.String({
       description: "Absolute existing directory where a newly launched child runs. Use a parent-created Git worktree for writer isolation. Defaults to the caller cwd; resumed launches reuse their stored cwd. pi-task does not create, merge, or remove the worktree.",
     })),
+    fast: Type.Optional(
+      Type.Boolean({
+        description:
+          "Use OpenAI/OpenAI-Codex priority service tier for this child when its model is listed in pi-codex-fast configuration; a missing or invalid config falls back to the built-in gpt-5.4/gpt-5.5 model list. When omitted, the agent frontmatter fast value applies; otherwise behavior defaults to false. Does not change model or thinking level.",
+      }),
+    ),
     background: Type.Optional(
       Type.Boolean({
         description:
@@ -64,3 +70,5 @@ export function taskParametersSchema() {
     ),
   });
 }
+
+export type TaskToolParameters = Static<ReturnType<typeof taskParametersSchema>>;

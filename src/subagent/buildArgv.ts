@@ -22,6 +22,8 @@ export interface BuildPiArgvOptions {
   promptLaunch?: PiPromptLaunchOptions;
   /** Absolute skill paths passed to Pi's repeatable --skill option. */
   skillPaths?: string[];
+  fast?: boolean;
+  fastExtensionPath?: string;
 }
 
 export function buildPiArgv(opts: BuildPiArgvOptions): string[] {
@@ -35,8 +37,14 @@ export function buildPiArgv(opts: BuildPiArgvOptions): string[] {
   });
 
   const args: string[] = [];
-  if (process.env.PI_TASK_CHILD_NO_EXTENSIONS === "1") {
+  if (opts.fast || process.env.PI_TASK_CHILD_NO_EXTENSIONS === "1") {
     args.push("--no-extensions");
+  }
+  if (opts.fast) {
+    if (!opts.fastExtensionPath) {
+      throw new Error("Fast task launch requires the pi-task extension path");
+    }
+    args.push("--extension", opts.fastExtensionPath, "--fast");
   }
   if (agent.model) args.push("--model", agent.model);
   if (agent.thinking) args.push("--thinking", agent.thinking);

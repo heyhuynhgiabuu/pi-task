@@ -7,7 +7,7 @@
 import { strict as assert } from "node:assert";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, parse } from "node:path";
 import { resolveAgentToolAllowlist } from "../src/agent-tools.js";
 import {
   parseResultXml,
@@ -721,12 +721,9 @@ import {
 
 {
   const t = "findPiDir returns null when no .pi exists";
-  const root = mkdtempSync(join(tmpdir(), "task-test-findpi-null-"));
-  try {
-    assert.equal(findPiDir(join(root, "a", "b")), null, t);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
+  const filesystemRoot = parse(process.cwd()).root;
+  const missing = join(filesystemRoot, `task-test-findpi-null-${process.pid}`, "a", "b");
+  assert.equal(findPiDir(missing), null, t);
 }
 
 {

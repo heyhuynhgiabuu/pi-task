@@ -21,6 +21,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+const PI_COMMAND = process.platform === "win32" ? "pi.cmd" : "pi";
+
 function assertPiMeetsPeerDependency(): void {
   const pkgPath = join(
     fileURLToPath(new URL("..", import.meta.url)),
@@ -31,7 +33,8 @@ function assertPiMeetsPeerDependency(): void {
   ] as string;
   let piVersion = "";
   try {
-    piVersion = execFileSync("pi", ["--version"], {
+    piVersion = execFileSync(PI_COMMAND, ["--version"], {
+      shell: process.platform === "win32",
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
@@ -241,7 +244,8 @@ try {
   const { execFileSync } = await import("node:child_process");
   // First, verify pi is available
   console.log("  pi version:");
-  const versionOut = execFileSync("pi", ["--version"], {
+  const versionOut = execFileSync(PI_COMMAND, ["--version"], {
+    shell: process.platform === "win32",
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "pipe"],
   }).trim();
@@ -254,7 +258,8 @@ try {
     string,
     string
   >;
-  const piVersionOut = execFileSync("pi", ["--version"], {
+  const piVersionOut = execFileSync(PI_COMMAND, ["--version"], {
+    shell: process.platform === "win32",
     env,
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "pipe"],

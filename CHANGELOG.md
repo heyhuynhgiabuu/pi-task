@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Optional task-local `fast` mode for configured OpenAI/OpenAI-Codex children. Fast mode applies the priority service tier without changing the selected model or thinking level, writing shared configuration, or affecting unsupported models.
+
 ## [0.4.3] - 2026-08-17
 
 ### Added

@@ -55,6 +55,9 @@ export type CancellationDecision =
   | { kind: "unsupported"; reason: "sdk_backend" }
   | { kind: "terminal"; status: Exclude<TaskLifecycleStatus, "running"> };
 
+const INVALID_TASK_CONTROL_REQUEST =
+  "Invalid task control request: status/cancel require only operation and task_id; omit operation for start/resume.";
+
 function inferBackend(
   backend: ExecutionBackend | undefined,
   handle: RegistryEntry["handle"] | BackgroundTask["handle"],
@@ -141,7 +144,7 @@ export function parseTaskStartRequest(value: unknown): TaskStartRequest | undefi
   if (!value || typeof value !== "object") return undefined;
   const candidate = value as Record<string, unknown>;
   if (
-    candidate.operation !== undefined ||
+    (candidate.operation !== undefined && candidate.operation !== "start") ||
     typeof candidate.agent_type !== "string" ||
     typeof candidate.prompt !== "string" ||
     typeof candidate.description !== "string"
@@ -203,19 +206,30 @@ export function parseTaskStartRequest(value: unknown): TaskStartRequest | undefi
   };
 }
 
+export function taskControlRequestError(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const candidate = value as Record<string, unknown>;
+  const operation = candidate.operation;
+  if (operation !== "status" && operation !== "cancel") return undefined;
+
+  const taskId = candidate.task_id;
+  const hasNonControlFields = Object.keys(candidate).some(
+    (field) => field !== "operation" && field !== "task_id",
+  );
+  if (typeof taskId !== "string" || taskId.trim().length === 0 || hasNonControlFields) {
+    return INVALID_TASK_CONTROL_REQUEST;
+  }
+  return undefined;
+}
+
 export function parseTaskControlRequest(value: unknown): TaskControlRequest | undefined {
   if (!value || typeof value !== "object") return undefined;
   const candidate = value as Record<string, unknown>;
   const operation = candidate.operation;
-  const taskId = candidate.task_id;
-  if (
-    (operation !== "status" && operation !== "cancel") ||
-    typeof taskId !== "string" ||
-    taskId.trim().length === 0
-  ) {
-    return undefined;
-  }
-  return { operation, taskId: taskId.trim() };
+  if (operation !== "status" && operation !== "cancel") return undefined;
+  // taskControlRequestError guarantees a non-empty string task id when it returns undefined.
+  if (taskControlRequestError(value) !== undefined) return undefined;
+  return { operation, taskId: (candidate.task_id as string).trim() };
 }
 
 function matches(record: TaskControlRecord, reference: string): boolean {

@@ -99,7 +99,11 @@ import { ignoreStaleExtensionCtx } from "./stale-ctx.js";
 import { resolveTaskCwd } from "./task-cwd.js";
 import { serializeTaskAdmission } from "./task-admission.js";
 import { handleTaskControl } from "./task-control-api.js";
-import { parseTaskControlRequest, parseTaskStartRequest } from "./task-control.js";
+import {
+  parseTaskControlRequest,
+  parseTaskStartRequest,
+  taskControlRequestError,
+} from "./task-control.js";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -251,6 +255,14 @@ export default function (pi: ExtensionAPI) {
         parameters: taskParametersSchema(),
 
         async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      const controlError = taskControlRequestError(params);
+      if (controlError) {
+        return {
+          content: [{ type: "text" as const, text: controlError }],
+          details: { phase: "failed" as const, error: "invalid_task_control_request" },
+          isError: true,
+        };
+      }
       const controlRequest = parseTaskControlRequest(params);
       if (controlRequest) return controlTask(controlRequest);
       const parsedTaskParams = parseTaskStartRequest(params);

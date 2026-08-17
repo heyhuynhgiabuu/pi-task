@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { Value } from "typebox/value";
 import { readRegistry, upsertTaskSessionHistory, writeRegistry } from "../src/conversation.js";
+import registerTaskExtension from "../src/index.js";
 import { completeTask as persistCompletedTask } from "../src/lifecycle/completion.js";
 import { handleTaskControl } from "../src/task-control-api.js";
 import { taskParametersSchema } from "../src/tool/schema.js";
@@ -17,6 +18,14 @@ import {
   fromRegistryEntry,
   type TaskControlRecord,
 } from "../src/task-control.js";
+
+// Delegated pi-task children disable recursive registration; this file registers the host extension.
+const inheritedTaskToolDisabled = process.env.PI_TASK_TOOL_DISABLED;
+delete process.env.PI_TASK_TOOL_DISABLED;
+process.on("exit", () => {
+  if (inheritedTaskToolDisabled === undefined) delete process.env.PI_TASK_TOOL_DISABLED;
+  else process.env.PI_TASK_TOOL_DISABLED = inheritedTaskToolDisabled;
+});
 
 test("task control requests accept status and cancel without start fields", () => {
   const schema = taskParametersSchema();
@@ -41,10 +50,25 @@ test("task start requests remain valid when operation is omitted", () => {
     }),
     true,
   );
+  assert.equal(
+    Value.Check(schema, {
+      operation: "start",
+      agent_type: "explore",
+      description: "Inspect the repository",
+      prompt: "Map the repository and return evidence.",
+    }),
+    true,
+  );
 });
 
 test("task start parsing supplies runtime validation for the flat provider schema", () => {
   assert.equal(parseTaskStartRequest({
+    agent_type: "explore",
+    description: "Inspect the repository",
+    prompt: "Map the repository.",
+  })?.agent_type, "explore");
+  assert.equal(parseTaskStartRequest({
+    operation: "start",
     agent_type: "explore",
     description: "Inspect the repository",
     prompt: "Map the repository.",
@@ -91,6 +115,71 @@ test("task control parsing trims references and rejects malformed requests", () 
   });
   assert.equal(parseTaskControlRequest({ operation: "cancel", task_id: "   " }), undefined);
   assert.equal(parseTaskControlRequest({ operation: "start", task_id: "task-1" }), undefined);
+});
+
+test("task control parsing rejects control requests mixed with start fields", () => {
+  assert.equal(parseTaskControlRequest({
+    operation: "status",
+    task_id: "none",
+    agent_type: "reviewer",
+    prompt: "Review the current working tree.",
+    description: "Review source changes",
+  }), undefined);
+});
+
+test("task tool explains malformed control payloads instead of reporting a generic start error", async () => {
+  type CapturedTaskTool = {
+    execute: (...args: unknown[]) => Promise<{ content: Array<{ text?: string }>; details?: { error?: string } }>;
+  };
+  let tool: CapturedTaskTool | undefined;
+  let shutdown: (() => void) | undefined;
+  const pi = {
+    on(event: string, handler: () => void) {
+      if (event === "session_shutdown") shutdown = handler;
+    },
+    registerMessageRenderer() {},
+    registerTool(definition: CapturedTaskTool) {
+      tool = definition;
+    },
+    registerCommand() {},
+    getAllTools() { return []; },
+  };
+
+  // Register against an empty tmpdir so the extension's restore path cannot
+  // touch the repo's real .pi registry or close live HerdR panes.
+  const originalCwd = process.cwd();
+  const isolatedCwd = mkdtempSync(join(tmpdir(), "pi-task-registration-"));
+  process.chdir(isolatedCwd);
+  try {
+    registerTaskExtension(pi as never);
+    assert.ok(tool);
+
+    const malformed = await tool.execute("call-1", {
+      operation: "status",
+      task_id: "none",
+      agent_type: "reviewer",
+      prompt: "Review the current working tree.",
+      description: "Review source changes",
+    }, new AbortController().signal, undefined, { cwd: isolatedCwd });
+    assert.equal(malformed.content[0]?.text, "Invalid task control request: status/cancel require only operation and task_id; omit operation for start/resume.");
+    assert.equal(malformed.details?.error, "invalid_task_control_request");
+
+    const missingId = await tool.execute("call-2", {
+      operation: "status",
+    }, new AbortController().signal, undefined, { cwd: isolatedCwd });
+    assert.equal(missingId.content[0]?.text, "Invalid task control request: status/cancel require only operation and task_id; omit operation for start/resume.");
+    assert.equal(missingId.details?.error, "invalid_task_control_request");
+
+    const invalidStart = await tool.execute("call-3", {
+      operation: "start",
+    }, new AbortController().signal, undefined, { cwd: isolatedCwd });
+    assert.equal(invalidStart.content[0]?.text, "Invalid task request: expected a start/resume request.");
+    assert.equal(invalidStart.details?.error, "invalid_task_request");
+  } finally {
+    process.chdir(originalCwd);
+    rmSync(isolatedCwd, { recursive: true, force: true });
+    shutdown?.();
+  }
 });
 
 test("task records resolve by id, session name, or conversation id", () => {

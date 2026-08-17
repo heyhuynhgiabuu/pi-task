@@ -196,6 +196,8 @@ Background mode (background: true):
 Task control:
 - Use operation: "status" with task_id to inspect a running or completed task without relaunching it.
 - Use operation: "cancel" with task_id to cancel a live tmux or strongly-identified HerdR background task. If cleanup fails, the result reports cleanup_pending and keeps a durable retry receipt. SDK background cancellation is reported as unsupported rather than guessed.
+- For a new start/resume request, omit operation for compatibility or use operation: "start" when the provider requires an explicit mode.
+- Never use operation: "status" or "cancel" together with start/resume fields.
 - Omit operation for the normal start/resume API described above`;
 
 /** @deprecated Import from ./agent-tools.js */

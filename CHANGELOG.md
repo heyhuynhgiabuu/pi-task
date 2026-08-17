@@ -6,6 +6,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-08-17
+
+### Added
+
+- Added explicit `operation: "start"` mode for the `task` tool for providers that require an operation discriminator; start/resume requests may still omit `operation`.
+
+### Fixed
+
+- Malformed `status`/`cancel` control requests (missing task id or mixed with start/resume fields) now return a specific `invalid_task_control_request` diagnostic instead of falling through to a generic start error.
+
 ## [0.4.2] - 2026-08-12
 
 ### Added

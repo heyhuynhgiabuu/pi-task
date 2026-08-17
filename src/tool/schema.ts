@@ -6,10 +6,11 @@ export function taskParametersSchema() {
   return Type.Object({
     operation: Type.Optional(
       Type.Union([
+        Type.Literal("start"),
         Type.Literal("status"),
         Type.Literal("cancel"),
       ], {
-        description: "For control requests only: inspect or cancel an existing task without starting a new subagent",
+        description: "Optional mode: use start for an explicit start/resume request; status/cancel control an existing task",
       }),
     ),
     task_id: Type.Optional(

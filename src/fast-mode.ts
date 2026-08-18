@@ -2,6 +2,10 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   clampThinkingLevel,
+  streamOpenAICodexResponses,
+  streamSimpleOpenAICodexResponses,
+  streamOpenAIResponses,
+  streamSimpleOpenAIResponses,
   type Api,
   type AssistantMessageEventStream,
   type Context,
@@ -10,16 +14,7 @@ import {
   type OpenAIResponsesOptions,
   type SimpleStreamOptions,
   type ThinkingLevel,
-} from "@earendil-works/pi-ai";
-import {
-  stream as streamOpenAICodexResponses,
-  streamSimple as streamSimpleOpenAICodexResponses,
-} from "@earendil-works/pi-ai/api/openai-codex-responses";
-import { buildBaseOptions } from "@earendil-works/pi-ai/api/simple-options";
-import {
-  stream as streamOpenAIResponses,
-  streamSimple as streamSimpleOpenAIResponses,
-} from "@earendil-works/pi-ai/api/openai-responses";
+} from "@earendil-works/pi-ai/compat";
 import {
   getAgentDir,
   type ExtensionAPI,
@@ -29,6 +24,11 @@ import {
 /**
  * Task-local adaptation of pi-codex-fast v1.1.0's provider bridge.
  * It deliberately omits that extension's command, status UI, and config writes.
+ *
+ * All pi-ai imports go through the `@earendil-works/pi-ai/compat` entry. Pi's
+ * extension loader aliases the pi-ai package root to its bundled `compat.js`
+ * entrypoint, so deep subpath imports (e.g. `/api/openai-codex-responses`) do
+ * not resolve at runtime.
  */
 const DEFAULT_FAST_MODELS = [
   "openai/gpt-5.4",
@@ -75,6 +75,49 @@ const DEFAULT_STREAMERS: TaskFastModeStreamers = {
   streamOpenAICodexResponses,
   streamSimpleOpenAICodexResponses,
 };
+
+/**
+ * Mirror of pi-ai's `buildBaseOptions` (api/simple-options) that only relies
+ * on the compat-exported surface. pi-codex-fast's bridge uses the same
+ * construction: forward all native options, then add the priority service tier.
+ * maxTokens is clamped to the model context window as an upper bound (the
+ * native implementation subtracts estimated context usage; we use the window
+ * to avoid importing pi-ai's internal token estimator).
+ */
+function buildFastBaseOptions(
+  model: Model<Api>,
+  options: SimpleStreamOptions | undefined,
+  apiKey: string | undefined,
+): OpenAIResponsesOptions & OpenAICodexResponsesOptions {
+  const samplingParams = model.samplingParams || options?.samplingParams
+    ? { ...model.samplingParams, ...options?.samplingParams }
+    : undefined;
+  const requestedMaxTokens = options?.maxTokens ?? model.maxTokens;
+  const maxTokens = model.contextWindow > 0
+    ? Math.min(requestedMaxTokens, model.contextWindow)
+    : requestedMaxTokens;
+  return {
+    temperature: options?.temperature,
+    samplingParams,
+    maxTokens,
+    signal: options?.signal,
+    telemetryContext: options?.telemetryContext,
+    apiKey: apiKey ?? options?.apiKey,
+    fetch: options?.fetch,
+    transport: options?.transport,
+    cacheRetention: options?.cacheRetention,
+    sessionId: options?.sessionId,
+    headers: options?.headers,
+    onPayload: options?.onPayload,
+    onResponse: options?.onResponse,
+    timeoutMs: options?.timeoutMs,
+    websocketConnectTimeoutMs: options?.websocketConnectTimeoutMs,
+    maxRetries: options?.maxRetries,
+    maxRetryDelayMs: options?.maxRetryDelayMs,
+    metadata: options?.metadata,
+    env: options?.env,
+  };
+}
 
 function normalizeModels(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
@@ -140,7 +183,7 @@ export function createTaskFastModeStream(
         return streamers.streamSimpleOpenAIResponses(openAIModel, context, options);
       }
       return streamers.streamOpenAIResponses(openAIModel, context, {
-        ...buildBaseOptions(model, context, options, options?.apiKey),
+        ...buildFastBaseOptions(model, options, options?.apiKey),
         reasoningEffort: mapReasoningEffort(model, options?.reasoning),
         serviceTier: "priority",
       });
@@ -152,7 +195,7 @@ export function createTaskFastModeStream(
         return streamers.streamSimpleOpenAICodexResponses(codexModel, context, options);
       }
       return streamers.streamOpenAICodexResponses(codexModel, context, {
-        ...buildBaseOptions(model, context, options, options?.apiKey),
+        ...buildFastBaseOptions(model, options, options?.apiKey),
         reasoningEffort: mapReasoningEffort(model, options?.reasoning),
         serviceTier: "priority",
       });

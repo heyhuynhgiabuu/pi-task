@@ -338,3 +338,20 @@ test("fast mode ignores config enabled and never writes config", () => {
     rmSync(agentDir, { recursive: true, force: true });
   }
 });
+
+test("fast mode imports resolve through the pi-ai compat entry (pi 0.84.2 loader)", async () => {
+  // Pi's extension loader aliases the pi-ai package root to the bundled
+  // dist/compat.js entry; deep subpath imports (e.g. api/openai-codex-responses)
+  // do not resolve at runtime in pi 0.84.2. Assert the names the bridge relies
+  // on are exported from the compat entry.
+  const compat = await import("@earendil-works/pi-ai/compat");
+  for (const name of [
+    "clampThinkingLevel",
+    "streamOpenAIResponses",
+    "streamSimpleOpenAIResponses",
+    "streamOpenAICodexResponses",
+    "streamSimpleOpenAICodexResponses",
+  ]) {
+    assert.equal(typeof (compat as Record<string, unknown>)[name], "function", `${name} from pi-ai/compat`);
+  }
+});

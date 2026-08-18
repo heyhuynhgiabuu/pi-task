@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-08-18
+
+### Fixed
+
+- Fixed a load failure of the packaged extension on Pi 0.84.2 runtimes (`Failed to load extension ... Cannot find module .../pi-ai/dist/compat.js/api/openai-codex-responses`). The fast-mode bridge imported pi-ai through deep subpaths (`api/openai-codex-responses`, `api/simple-options`) that the Pi extension loader cannot resolve because it aliases the pi-ai root to the bundled `compat.js` entry. All pi-ai imports now go through `@earendil-works/pi-ai/compat`, and the base stream options are built by a small local mirror instead of importing pi-ai's internal `buildBaseOptions` helper.
+
 ## [0.4.4] - 2026-08-17
 
 ### Added

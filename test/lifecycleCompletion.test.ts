@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -211,4 +211,95 @@ test("completion notification defers to the next user turn when configured", () 
     else process.env.PI_TASK_COMPLETION_DELIVERY = previous;
   }
   assert.deepEqual(options, { triggerTurn: true, deliverAs: "nextTurn" });
+});
+
+test("completeTask records the terminal phase on the live task object", () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-completion-phase-"));
+  const task: BackgroundTask = {
+    dir: join(piDir, "artifacts", "tasks", "task-3"),
+    agentType: "general",
+    sessionName: "task-task-3",
+    originalPane: null,
+    description: "phase plumbing",
+    startedAt: Date.now() - 1000,
+    toolUses: 0,
+    turns: 0,
+  };
+  completeTask(
+    { sendMessage: () => {} } as never,
+    "task-3",
+    task,
+    "<status>failure</status>",
+    "failed",
+    piDir,
+  );
+  assert.equal(task.status, "failed", "panel rows must see the terminal phase");
+});
+
+test("completeTask is idempotent per task id: a second call never re-delivers", () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-completion-idempotent-"));
+  const task: BackgroundTask = {
+    dir: join(piDir, "artifacts", "tasks", "task-4"),
+    agentType: "general",
+    sessionName: "task-task-4",
+    originalPane: null,
+    description: "idempotency",
+    startedAt: Date.now() - 1000,
+    toolUses: 0,
+    turns: 0,
+  };
+  let deliveries = 0;
+  let resourceCloses = 0;
+  const pi: any = { sendMessage: () => { deliveries++; } };
+  const closer = () => { resourceCloses++; };
+  completeTask(pi, "task-4", task, "first", "done", piDir, closer);
+  completeTask(pi, "task-4", task, "second", "cancelled", piDir, closer);
+  assert.equal(deliveries, 1, "a second completeTask for the same id must not re-deliver");
+  assert.equal(resourceCloses, 1, "a second completeTask must not re-close the resource");
+});
+
+test("completeTask still allows distinct task ids to complete independently", () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-completion-distinct-"));
+  const mk = (id: string): BackgroundTask => ({
+    dir: join(piDir, "artifacts", "tasks", id),
+    agentType: "general",
+    sessionName: `task-${id}`,
+    originalPane: null,
+    description: "distinct",
+    startedAt: Date.now() - 1000,
+    toolUses: 0,
+    turns: 0,
+  });
+  let deliveries = 0;
+  const pi: any = { sendMessage: () => { deliveries++; } };
+  completeTask(pi, "a", mk("a"), "r1", "done", piDir);
+  completeTask(pi, "b", mk("b"), "r2", "done", piDir);
+  assert.equal(deliveries, 2, "distinct task ids must each deliver once");
+});
+
+test("a completeTask that throws mid-writes does not poison the idempotency guard", () => {
+  const base = mkdtempSync(join(tmpdir(), "pi-task-completion-poison-"));
+  // piDir pointing at an existing FILE makes the durable writes throw.
+  const badPiDir = join(base, "not-a-dir");
+  writeFileSync(badPiDir, "");
+  const mk = (): BackgroundTask => ({
+    dir: join(base, "artifacts", "tasks", "t-p"),
+    agentType: "general",
+    sessionName: "task-t-p",
+    originalPane: null,
+    description: "poison",
+    startedAt: Date.now() - 1000,
+    toolUses: 0,
+    turns: 0,
+  });
+  let deliveries = 0;
+  const pi: any = { sendMessage: () => { deliveries++; } };
+
+  assert.throws(() => completeTask(pi, "t-p", mk(), "x", "done", badPiDir));
+
+  // A retry with a valid piDir must still complete and deliver exactly once:
+  // the earlier throw must not have poisoned the id.
+  const goodPiDir = mkdtempSync(join(tmpdir(), "pi-task-completion-good-"));
+  completeTask(pi, "t-p", mk(), "x", "done", goodPiDir);
+  assert.equal(deliveries, 1, "retry after a mid-write throw must still deliver");
 });

@@ -4,7 +4,19 @@ All notable changes to `@heyhuynhgiabuu/pi-task` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.5.0] - 2026-08-19
+
+### Added
+
+- Interactive task panel below the editor: press `↓` on an empty prompt to enter the task rows, `↑/↓` to navigate, `Enter` to open a task's live transcript view, `x` to stop or dismiss, `Esc` to return to typing. The editor wrapper steps aside when another extension owns a custom editor (panel stays display-only).
+- Live transcript view with steering: `Enter` on a task row replaces the main view with the task's running transcript rendered with pi's native message/tool components; typing + `Enter` steers a running tmux/HerdR task, `PageUp`/`PageDown` scroll back through the tail, `Esc` returns. SDK children show live tool activity (no session JSONL) and cannot be steered from the panel.
+- Delivery guards: a background result is never delivered into a different conversation or onto a `/tree` branch that no longer contains the spawn point; it stays recoverable in task-session history and the child session file.
+- Background completion is now idempotent per task id: a duplicate `completeTask` call never re-delivers the result notification or re-closes the terminal resource.
+- Finished tasks linger in the widget with status icons (`✓` done, `■` cancelled/aborted, `✗` failed/timeout) — done rows for ~5s, others ~30s — and stay listed while the panel is focused.
+
+### Changed
+
+- The task widget now renders below the editor (was above) so `↓` on an empty prompt can enter the panel; transcript JSONL is re-parsed only when the session file actually grows (signature-cached) instead of on every TUI repaint.
 
 ## [0.4.5] - 2026-08-18
 

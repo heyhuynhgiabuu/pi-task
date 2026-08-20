@@ -21,6 +21,10 @@ export interface BackgroundPollingDeps {
       killAgentPane: (paneId: string, originalPane: string | null) => void;
   clearTaskWidgetIfIdle: () => void;
   completeTask: typeof completeTask;
+  /** Optional per-task delivery guard consulted before delivering a result. */
+  deliveryGuard?: (taskId: string) => boolean;
+  /** Notified with the completed task so the panel can keep a lingering row. */
+  onTaskFinished?: (id: string, task: BackgroundTask) => void;
   TASK_TIMEOUT_MS: number;
   MAX_POLL_ERRORS: number;
   piDir: string;
@@ -53,7 +57,10 @@ export function startBackgroundPolling(
               `Task timed out after ${Math.round(deps.TASK_TIMEOUT_MS / 1000)}s without producing a result.`,
               "timeout",
               deps.piDir,
+              undefined,
+              deps.deliveryGuard ? () => deps.deliveryGuard!(id) : undefined,
             );
+            deps.onTaskFinished?.(id, task);
             deps.backgroundTasks.delete(id);
             deps.clearTaskWidgetIfIdle();
             continue;
@@ -74,7 +81,8 @@ export function startBackgroundPolling(
 
           if (snapshot.status === "completed") {
             if (deps.backgroundTasks.get(id) !== task) continue;
-            deps.completeTask(deps.pi, id, task, snapshot.content, "done", deps.piDir);
+            deps.completeTask(deps.pi, id, task, snapshot.content, "done", deps.piDir, undefined, deps.deliveryGuard ? () => deps.deliveryGuard!(id) : undefined);
+            deps.onTaskFinished?.(id, task);
             deps.backgroundTasks.delete(id);
             deps.clearTaskWidgetIfIdle();
             pollErrors.delete(id);
@@ -87,7 +95,10 @@ export function startBackgroundPolling(
               snapshot.content,
               snapshot.status === "timeout" ? "timeout" : "failed",
               deps.piDir,
+              undefined,
+              deps.deliveryGuard ? () => deps.deliveryGuard!(id) : undefined,
             );
+            deps.onTaskFinished?.(id, task);
             deps.backgroundTasks.delete(id);
             deps.clearTaskWidgetIfIdle();
             pollErrors.delete(id);
@@ -107,7 +118,10 @@ export function startBackgroundPolling(
               `Background task polling failed: ${error instanceof Error ? error.message : String(error)}`,
               "failed",
               deps.piDir,
+              undefined,
+              deps.deliveryGuard ? () => deps.deliveryGuard!(id) : undefined,
             );
+            deps.onTaskFinished?.(id, task);
             deps.backgroundTasks.delete(id);
             deps.clearTaskWidgetIfIdle();
             pollErrors.delete(id);

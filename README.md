@@ -14,6 +14,9 @@ For the full high-quality 89s @ 56 fps version, [download the MP4](https://githu
 
 - Foreground tasks: parent waits and receives the subagent result directly.
 - Background tasks: parent continues, task widget shows progress, completion arrives as a follow-up.
+- Interactive task panel below the editor: press `↓` on an empty prompt to enter the task rows, `↑/↓` to navigate, `Enter` to open a task's live transcript view, `x` to stop or dismiss, `Esc` to return to typing. Steps aside if another extension owns a custom editor.
+- Live transcript view with steering: `Enter` on a task row replaces the main view with the task's running transcript (pi's native message/tool components); typing + `Enter` steers a running tmux/HerdR task, `PageUp`/`PageDown` scroll, `Esc` returns. SDK children show live tool activity (no session JSONL) and cannot be steered from the panel.
+- Delivery guards: a background result is never delivered into a different conversation or `/tree` branch; it stays recoverable in task-session history and the child session file.
 - Tmux backend for observable subagent panes.
 - HerdR and tmux terminal backends, with SDK fallback when neither is available.
 - Agent frontmatter support: `model`, `thinking`, `fast`, `skills`, `tools`, `disallowed_tools`.

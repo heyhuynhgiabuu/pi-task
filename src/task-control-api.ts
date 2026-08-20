@@ -30,6 +30,8 @@ export interface TaskControlDependencies {
   registryEntryStatus(entry: RegistryEntry): TaskResourceStatus;
   clearTaskWidgetIfIdle(): void;
   completeTask?: typeof persistCompletedTask;
+  /** Keep the cancelled task's row visible in the panel for its linger. */
+  noteTaskFinished?: (id: string, task: BackgroundTask) => void;
 }
 
 function taskControlRecords(deps: TaskControlDependencies): TaskControlRecord[] {
@@ -169,6 +171,7 @@ export function handleTaskControl(
     "cancelled",
     deps.piDir,
   );
+  deps.noteTaskFinished?.(record.id, task);
   deps.backgroundTasks.delete(record.id);
   deps.clearTaskWidgetIfIdle();
   if (!completion.cleanupSucceeded) {

@@ -24,6 +24,15 @@ function closeTaskResource(task: BackgroundTask): void {
   }
 }
 
+/**
+ * Per-process idempotency guard: a task id completes at most once. Without it,
+ * a second completeTask call for the same id would re-deliver the task-complete
+ * notification and re-close the terminal resource. The only callers (polling,
+ * cancel) already guard via the live-map identity check, but this makes the
+ * latent double-delivery footgun a no-op for any future caller.
+ */
+const completedTaskIds = new Set<string>();
+
 export function completeTask(
   pi: ExtensionAPI,
   id: string,
@@ -32,10 +41,19 @@ export function completeTask(
   phase: "done" | "cancelled" | "timeout" | "failed",
   piDir: string,
   resourceCloser: (task: BackgroundTask) => void = closeTaskResource,
+  deliveryGuard?: () => boolean,
 ): { cleanupSucceeded: boolean } {
+  if (completedTaskIds.has(id)) {
+    // Already fully processed in this process: never re-deliver or re-close.
+    return { cleanupSucceeded: true };
+  }
   const parsed = parseResultXml(content);
   const assessment = assessTaskResult(parsed);
   const durationMs = Date.now() - task.startedAt;
+  // Record the terminal phase on the live task so panel rows (and the
+  // finished-linger) render the correct status/icon instead of defaulting
+  // failed/timeout/cancelled to a green "done".
+  task.status = phase;
   const completedSessionRef = findJsonlSessionByName(
     piDir,
     task.sessionName,
@@ -92,9 +110,22 @@ export function completeTask(
   }
   if (cleanupSucceeded) writeRegistry(piDir, entries);
 
+  // Record the id only after the durable writes and resource close have run:
+  // if a write threw earlier, the id must not be poisoned so a retry (e.g.
+  // polling's same-id retry path) can still complete and deliver.
+  completedTaskIds.add(id);
+
   const summaryText = parsed.summary?.trim()
     ? parsed.summary.trim()
     : content.replace(/\s+/g, " ").trim().slice(0, 240);
+
+  // pi-subtask delivery-guard pattern: skip the in-conversation result
+  // when the conversation that spawned the task is no longer the one we
+  // are in. The result stays durable in task-session history and the
+  // child session file either way.
+  if (deliveryGuard && !deliveryGuard()) {
+    return { cleanupSucceeded };
+  }
 
   ignoreStaleExtensionCtx(() =>
     pi.sendMessage(

@@ -1,6 +1,6 @@
 {
   "name": "@heyhuynhgiabuu/pi-task",
-  "version": "0.4.5",
+  "version": "0.5.0",
   "description": "Delegating task/subagent extension for Pi: foreground/background subagents, widgets, tmux observability, SDK fallback.",
   "type": "module",
   "main": "dist/index.js",
@@ -25,7 +25,7 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test test/helpers.test.ts test/prompt.test.ts test/frontmatter.test.ts test/renderHint.test.ts test/polling.test.ts test/taskWidget.test.ts test/sdkWidgetEvents.test.ts test/sdkBackground.test.ts test/sdkPolling.test.ts test/widgetLifecycle.test.ts test/handles.test.ts test/terminalBackend.test.ts test/herdrBackend.test.ts test/exitSentinel.test.ts test/waitCompletion.test.ts test/restore.test.ts test/lifecycleCompletion.test.ts test/failure-diagnostics.test.ts test/taskTitle.test.ts test/modelSelection.test.ts test/taskAdmission.test.ts test/taskControl.test.ts test/fastMode.test.ts",
+    "test": "tsx --test test/helpers.test.ts test/prompt.test.ts test/frontmatter.test.ts test/renderHint.test.ts test/polling.test.ts test/taskWidget.test.ts test/sdkWidgetEvents.test.ts test/sdkBackground.test.ts test/sdkPolling.test.ts test/widgetLifecycle.test.ts test/handles.test.ts test/terminalBackend.test.ts test/herdrBackend.test.ts test/exitSentinel.test.ts test/waitCompletion.test.ts test/restore.test.ts test/lifecycleCompletion.test.ts test/failure-diagnostics.test.ts test/taskTitle.test.ts test/modelSelection.test.ts test/taskAdmission.test.ts test/taskControl.test.ts test/fastMode.test.ts test/panelCore.test.ts test/transcript.test.ts test/deliveryGuard.test.ts test/panelWidget.test.ts",
     "smoke": "tsx test/smoke.ts",
     "prepack": "npm run build",
     "postversion": "git push --follow-tags"

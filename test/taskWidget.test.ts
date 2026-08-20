@@ -126,3 +126,130 @@ test("foreground widget renders a single tree connector for the latest tool call
   assert.equal(lines.filter((line) => line.includes("└─")).length, 1, "renders only one connector line");
   assert.match(lines[1] ?? "", /└─ .*edit  b\.ts \(\+2 more\)$/, "shows latest call and collapses older ones");
 });
+
+import { visibleWidth } from "@earendil-works/pi-tui";
+import { renderTaskPanel } from "../src/task-widget.js";
+
+test("renderTaskPanel shows the main row and task rows with identity-tracked selection", () => {
+  const lines = renderTaskPanel({
+    rows: [
+      {
+        id: "t1",
+        agentType: "general",
+        description: "implement fix",
+        status: "running",
+        startedAt: 1000,
+        activity: "$ git status",
+      },
+      {
+        id: "t2",
+        agentType: "reviewer",
+        description: "audit diff",
+        status: "done",
+        startedAt: 2000,
+        finishedAt: 9000,
+      },
+    ],
+    selection: { taskId: "t1" },
+    viewTaskId: null,
+    now: 10_000,
+    width: 120,
+  });
+  assert.equal(lines.length, 4);
+  assert.match(lines[0] ?? "", /tasks \(2\)/);
+  assert.match(lines[1] ?? "", /^   main$/);
+  assert.match(lines[2] ?? "", /^❯ ✻ general/);
+  assert.match(lines[2] ?? "", /\$ git status/);
+  assert.match(lines[3] ?? "", /^  ✓ reviewer/);
+});
+
+test("renderTaskPanel view mode labels typing destination and marks the viewed row", () => {
+  const lines = renderTaskPanel({
+    rows: [
+      {
+        id: "t1",
+        agentType: "general",
+        description: "implement fix",
+        status: "running",
+        startedAt: 1000,
+      },
+    ],
+    selection: { taskId: "t1" },
+    viewTaskId: "t1",
+    now: 5000,
+    width: 120,
+  });
+  assert.match(lines[0] ?? "", /viewing @t1/);
+  assert.match(lines[0] ?? "", /typing goes to the task/);
+  assert.match(lines[2] ?? "", /^❯ ✻ general/);
+});
+
+test("renderTaskPanel selection of main shows marker on the main row", () => {
+  const lines = renderTaskPanel({
+    rows: [
+      {
+        id: "t1",
+        agentType: "general",
+        description: "implement fix",
+        status: "running",
+        startedAt: 1000,
+      },
+    ],
+    selection: "main",
+    viewTaskId: null,
+    now: 5000,
+    width: 120,
+  });
+  assert.match(lines[1] ?? "", /^❯  main$/);
+  assert.match(lines[2] ?? "", /^  ✻ general/);
+});
+
+test("renderTaskPanel truncates rows to the terminal width", () => {
+  const lines = renderTaskPanel({
+    rows: [
+      {
+        id: "t1",
+        agentType: "general",
+        description: "x".repeat(500),
+        status: "running",
+        startedAt: 1000,
+      },
+    ],
+    selection: null,
+    viewTaskId: null,
+    now: 5000,
+    width: 40,
+  });
+  for (const line of lines) {
+    assert.ok(visibleWidth(line) <= 40, `line too wide: ${visibleWidth(line)}`);
+  }
+});
+
+test("finished section renders failure/abort icons instead of a green check", () => {
+  const failedLines = renderTaskWidget({
+    foregroundTasks: [],
+    backgroundTasks: [],
+    foregroundCount: 0,
+    backgroundCount: 0,
+    width: 120,
+    now: 0,
+    finishedTasks: [
+      ["t-failed", { agentType: "general", description: "boom", startedAt: 0, toolUses: 0, status: "failed" }],
+    ],
+  });
+  assert.match(failedLines[0] ?? "", /✗/, "failed tasks show an error icon");
+  assert.doesNotMatch(failedLines[0] ?? "", /✓/, "failed tasks must not show a green check");
+
+  const abortedLines = renderTaskWidget({
+    foregroundTasks: [],
+    backgroundTasks: [],
+    foregroundCount: 0,
+    backgroundCount: 0,
+    width: 120,
+    now: 0,
+    finishedTasks: [
+      ["t-abort", { agentType: "general", description: "halt", startedAt: 0, toolUses: 0, status: "aborted" }],
+    ],
+  });
+  assert.match(abortedLines[0] ?? "", /■/, "aborted tasks show a stop icon");
+});

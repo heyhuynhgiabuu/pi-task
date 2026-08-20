@@ -1,4 +1,5 @@
 import { truncateToWidth } from "@earendil-works/pi-tui";
+import type { PanelSelection, TaskPanelRow, TaskRowStatus } from "./panel/panel-core.js";
 import type { ToolCallRecord } from "./helpers.js";
 import { formatMs } from "./helpers.js";
 
@@ -8,6 +9,8 @@ export interface WidgetTask {
   startedAt: number;
   toolUses: number;
   recentCalls?: ToolCallRecord[];
+  /** Terminal status used by the finished section to pick the icon/color. */
+  status?: string;
 }
 
 export interface ThemeLike {
@@ -167,6 +170,8 @@ export function renderTaskWidget(params: {
   width: number;
   theme?: ThemeLike | null;
   now?: number;
+  /** Just-finished tasks shown with a ✓ marker while they linger. */
+  finishedTasks?: Iterable<[string, WidgetTask]>;
 }): string[] {
   const {
     foregroundTasks,
@@ -175,8 +180,9 @@ export function renderTaskWidget(params: {
     backgroundCount,
     width,
     theme,
+    finishedTasks,
   } = params;
-  if (foregroundCount === 0 && backgroundCount === 0) return [];
+  if (foregroundCount === 0 && backgroundCount === 0 && !finishedTasks) return [];
 
   const now = params.now ?? Date.now();
   const maxWidth = Math.min(width, MAX_WIDTH);
@@ -209,8 +215,102 @@ export function renderTaskWidget(params: {
     );
   }
 
+  if (finishedTasks) {
+    for (const [, task] of finishedTasks) {
+      const status = task.status ?? "done";
+      const icon =
+        status === "done"
+          ? "✓"
+          : status === "cancelled" || status === "aborted"
+            ? "■"
+            : "✗";
+      const colorToken =
+        status === "done"
+          ? "success"
+          : status === "cancelled" || status === "aborted"
+            ? "warning"
+            : "error";
+      lines.push(
+        truncateToWidth(
+          color(theme, colorToken, icon) +
+            color(theme, "dim", ` ${task.agentType} — ${task.description ?? ""}`),
+          maxWidth,
+        ),
+      );
+    }
+  }
+
   // Keep a little breathing room above the editor.
   lines.push("");
 
+  return lines;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Focused panel rendering (keyboard-navigable task rows). Adapted from
+// pi-subtask's widgetLines: a "main" row at index 0 followed by task rows,
+// identity-tracked ❯ selection, and a per-task status icon. Truncation is a
+// hard guard because pi's renderer throws on over-width lines.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function panelStatusIcon(status: TaskRowStatus): string {
+  switch (status) {
+    case "running":
+      return "✻";
+    case "starting":
+      return "○";
+    case "done":
+      return "✓";
+    case "cancelled":
+    case "aborted":
+      return "■";
+    case "failed":
+    case "timeout":
+      return "✗";
+  }
+}
+
+function formatElapsed(startedAt: number, finishedAt: number | undefined, now: number): string {
+  const end = finishedAt ?? now;
+  const secs = Math.max(0, Math.round((end - startedAt) / 1000));
+  return `${secs}s`;
+}
+
+export function renderTaskPanel(params: {
+  rows: TaskPanelRow[];
+  selection: PanelSelection;
+  viewTaskId: string | null;
+  now: number;
+  width: number;
+  theme?: ThemeLike | null;
+}): string[] {
+  const { rows, selection, viewTaskId, now, width, theme } = params;
+  const maxWidth = Math.min(width, MAX_WIDTH);
+  const selIdx =
+    selection !== null && selection !== "main"
+      ? rows.findIndex((r) => r.id === selection.taskId)
+      : -1;
+  const inView = viewTaskId !== null;
+  const hint = inView
+    ? `viewing @${viewTaskId} — typing goes to the task · ↓ switch · esc back to main`
+    : `tasks (${rows.length}) — ↓ to select · enter to view · x to stop/dismiss · esc back`;
+
+  const lines = [truncateToWidth(color(theme, "dim", hint), maxWidth, "…")];
+  lines.push(
+    truncateToWidth(
+      color(theme, "dim", `${selection === "main" ? "❯" : " "}  main`),
+      maxWidth,
+      "…",
+    ),
+  );
+  rows.forEach((row, i) => {
+    const marker = selIdx === i ? "❯" : " ";
+    const icon = color(theme, "accent", panelStatusIcon(row.status));
+    const elapsed = formatElapsed(row.startedAt, row.finishedAt, now);
+    const activity = row.activity ? ` · ${row.activity}` : "";
+    const text =
+      `${marker} ${icon} ${color(theme, "toolTitle", row.agentType)} — ${row.description}${activity} · ${elapsed}`;
+    lines.push(truncateToWidth(text, maxWidth, "…"));
+  });
   return lines;
 }

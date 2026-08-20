@@ -65,6 +65,7 @@ import {
   startBackgroundPolling,
   startToolStatsPolling,
 } from "./lifecycle/index.js";
+import { DeliveryGuard, sessionViewOf } from "./panel/delivery.js";
 import { formatSdkBackgroundReceipt, startSdkBackgroundTask } from "./subagent/sdkBackground.js";
 import { runSdkSubagent } from "./subagent/runSdk.js";
 import { resolveAgentSkillPaths } from "./subagent/skills.js";
@@ -150,8 +151,34 @@ export default function (pi: ExtensionAPI) {
       const { piDir } = discoverAgents(process.cwd(), BUNDLED_AGENT_DIR);
       const backgroundTasks = new Map<string, BackgroundTask>();
       const foregroundTasks = new Map<string, BackgroundTask>();
-  const taskWidget = createTaskWidgetController(foregroundTasks, backgroundTasks);
+  const taskWidget = createTaskWidgetController(foregroundTasks, backgroundTasks, {
+    steerTask: (task, text) => {
+      const result = steerRunningBackgroundTask(task.paneId, text, task.handle);
+      return result.ok ? null : result.reason;
+    },
+    stopTask: (task) => {
+      if (task.backend === "sdk") {
+        return "SDK tasks cannot be stopped from the panel yet.";
+      }
+      try {
+        if (task.handle?.backend === "herdr") {
+          if (task.handle.foregroundProcessGroupId === undefined) {
+            return "HerdR cleanup requires persisted agent identity";
+          }
+          createSyncHerdrControl().close(task.handle);
+        } else if (task.paneId) {
+          killAgentPaneStrict(task.paneId, task.originalPane);
+        }
+        return null;
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    },
+  });
   const { ensureTaskWidget, clearTaskWidgetIfIdle } = taskWidget;
+  // Records which conversation spawned each background task so a result is
+  // never delivered into a different conversation or branch.
+  const deliveryGuard = new DeliveryGuard();
 
   // ── Restore active tasks from registry on load ──────────────────────────
 
@@ -227,6 +254,11 @@ export default function (pi: ExtensionAPI) {
       },
       clearTaskWidgetIfIdle,
       completeTask,
+      onTaskFinished: (id, task) => taskWidget.noteTaskFinished(id, task),
+      deliveryGuard: (id) => {
+        const ctx = taskWidget.getContext();
+        return ctx ? deliveryGuard.allows(sessionViewOf(ctx), id) : true;
+      },
       TASK_TIMEOUT_MS,
       MAX_POLL_ERRORS,
       piDir,
@@ -242,7 +274,14 @@ export default function (pi: ExtensionAPI) {
       backgroundTasks,
       registryEntryStatus: registryEntryCancellationStatus,
       clearTaskWidgetIfIdle,
+      noteTaskFinished: (id, task) => taskWidget.noteTaskFinished(id, task),
     });
+
+  // ── Panel ready at session start ───────────────────────────────────────
+
+  pi.on("session_start", (_event, ctx) => {
+    ignoreStaleExtensionCtx(() => taskWidget.ensurePanelEditor(ctx));
+  });
 
   // ── Cleanup on shutdown ────────────────────────────────────────────────
 
@@ -443,6 +482,7 @@ export default function (pi: ExtensionAPI) {
             recentCalls: [],
           };
                     backgroundTasks.set(id, bgtask);
+                    deliveryGuard.track(id, sessionViewOf(ctx));
           const steerResult = steerRunningBackgroundTask(
             bgtask.paneId,
             buildTaskFollowUpPrompt({
@@ -574,6 +614,7 @@ export default function (pi: ExtensionAPI) {
             recentCalls: [],
           };
           backgroundTasks.set(id, bgtask);
+          deliveryGuard.track(id, sessionViewOf(ctx));
           const steerResult = steerRunningBackgroundTask(
             bgtask.paneId,
             buildTaskFollowUpPrompt({
@@ -832,6 +873,7 @@ export default function (pi: ExtensionAPI) {
                 recentCalls: [],
               };
               backgroundTasks.set(id, backgroundTask);
+              deliveryGuard.track(id, sessionViewOf(ctx));
               ignoreStaleExtensionCtx(() => ensureTaskWidget(ctx));
               const bgOnSession = (session: any) =>
                 subscribeToolEvents(session, backgroundTask, 10, taskWidget.requestRender);
@@ -848,6 +890,8 @@ export default function (pi: ExtensionAPI) {
                 conversationId,
                 run: async () => runSdkFallback(undefined, bgOnSession),
                 onComplete: (result) => {
+                  if (!deliveryGuard.allows(sessionViewOf(ctx), id)) return;
+                  backgroundTask.status = "done";
                   const parsed = parseResultXml(result.output);
                   const assessment = assessTaskResult(parsed);
                   const summary = parsed.summary || "SDK subagent completed without assistant text.";
@@ -887,6 +931,8 @@ export default function (pi: ExtensionAPI) {
                   );
                 },
                 onFailed: (error) => {
+                  if (!deliveryGuard.allows(sessionViewOf(ctx), id)) return;
+                  backgroundTask.status = "failed";
                   const message = error instanceof Error ? error.message : String(error);
                   ignoreStaleExtensionCtx(() =>
                     pi.sendMessage(
@@ -915,6 +961,7 @@ export default function (pi: ExtensionAPI) {
                   );
                 },
                 onSettled: () => {
+                  taskWidget.noteTaskFinished(id, backgroundTasks.get(id) ?? backgroundTask);
                   backgroundTasks.delete(id);
                   ignoreStaleExtensionCtx(() => clearTaskWidgetIfIdle());
                 },
@@ -1178,6 +1225,8 @@ export default function (pi: ExtensionAPI) {
       };
 
       backgroundTasks.set(id, bgtask);
+
+      deliveryGuard.track(id, sessionViewOf(ctx));
 
       // ── P0: Persistent registry ────────────────────────────────────────
       const entry: RegistryEntry = {

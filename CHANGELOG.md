@@ -4,6 +4,14 @@ All notable changes to `@heyhuynhgiabuu/pi-task` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.2] - 2026-08-25
+
+### Fixed
+
+- Rejected start/resume requests no longer return one generic `Invalid task request: expected a start/resume request.` message. The tool now names each problem it found — unknown operation values, missing/mistyped fields, blank `parent_context`, malformed `proposed_changes`, or reviewer tasks missing their structured inputs — in both the tool-result text and `details.reason`, so a model can repair its next call without guessing.
+- Providing `parent_context` that is empty after trimming now rejects the start/resume request for every agent type; v0.5.1 accepted it and passed an empty string through for non-reviewer tasks. Reviewer tasks already required a non-empty value.
+- `operation: "resume"` is now accepted as an explicit alias of `operation: "start"`. Previously any value other than exactly `"start"` (including the intuitive `"resume"`) was rejected even though resume is expressed through `task_id`/`conversation_id`; the schema union, parser, and tool description all accept both spellings now.
+
 ## [0.5.1] - 2026-08-25
 
 ### Fixed

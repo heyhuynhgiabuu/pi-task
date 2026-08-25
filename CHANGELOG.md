@@ -4,6 +4,17 @@ All notable changes to `@heyhuynhgiabuu/pi-task` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.1] - 2026-08-25
+
+### Fixed
+
+- The child's literal status word now reaches the parent when it falls outside the canonical `success | failure | blocked | partial` vocabulary. Previously a child reporting `<status>stalled</status>` was silently normalized to `unknown`; the word never appeared in the parent-visible result text. The parser still normalizes for the status field, but the raw word is now surfaced as a warning line in the tool-result content and background `task-complete` notification, and persisted as `raw_status` in details and `rawStatus` in task-session history.
+- `structured_result` in tool-result details now carries `{ status, raw_status, valid }` instead of a bare boolean (the name promised an object). Legacy boolean values from older records still render; a structured envelope with a non-canonical status now renders its findings/evidence sections in the TUI instead of collapsing to plain text.
+
+### Changed
+
+- Peer and dev dependencies bumped from `^0.84.1` to `^0.84.3` (no API changes consumed; `clampThinkingLevel` and the compat entry are unchanged).
+
 ## [0.5.0] - 2026-08-19
 
 ### Added

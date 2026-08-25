@@ -5,7 +5,13 @@ import {
   upsertTaskSessionHistory,
   writeRegistry,
 } from "../conversation.js";
-import { assessTaskResult, completionDeliveryOptions, parseResultXml } from "../helpers.js";
+import {
+  assessTaskResult,
+  completionDeliveryOptions,
+  parseResultXml,
+  structuredResultPayload,
+  unrecognizedStatusWarning,
+} from "../helpers.js";
 import { createSyncHerdrControl } from "../subagent/herdr.js";
 import { killAgentPaneStrict } from "../subagent/tmux.js";
 import { ignoreStaleExtensionCtx } from "../stale-ctx.js";
@@ -75,6 +81,7 @@ export function completeTask(
     sessionRef: completedSessionRef,
     status: phase,
     reportedStatus: assessment.reportedStatus,
+    rawStatus: assessment.rawStatus,
     resultValid: assessment.valid,
     completedAt: Date.now(),
     background: true,
@@ -118,6 +125,7 @@ export function completeTask(
   const summaryText = parsed.summary?.trim()
     ? parsed.summary.trim()
     : content.replace(/\s+/g, " ").trim().slice(0, 240);
+  const warning = unrecognizedStatusWarning(assessment);
 
   // pi-subtask delivery-guard pattern: skip the in-conversation result
   // when the conversation that spawned the task is no longer the one we
@@ -131,7 +139,7 @@ export function completeTask(
     pi.sendMessage(
       {
         customType: "task-complete",
-        content: `Background task ${id} (${task.agentType}) ${phase}.\n\n${summaryText}`,
+        content: `Background task ${id} (${task.agentType}) ${phase}.\n\n${warning ? warning + "\n\n" : ""}${summaryText}`,
         display: true,
         details: {
           task_id: id,
@@ -141,6 +149,7 @@ export function completeTask(
           execution_phase: phase,
           status: assessment.reportedStatus,
           reported_status: assessment.reportedStatus,
+          raw_status: assessment.rawStatus,
           result_valid: assessment.valid,
           result: content,
           summary: parsed.summary,
@@ -154,7 +163,7 @@ export function completeTask(
           tool_uses: task.toolUses,
           turn_count: task.turns,
           background: true,
-          structured_result: assessment.valid,
+          structured_result: structuredResultPayload(assessment),
           full_output: parsed.raw.trim() || content.trim(),
         },
       },

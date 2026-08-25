@@ -88,6 +88,8 @@ export type TaskReportedStatus =
 
 export interface TaskResultAssessment {
   reportedStatus: TaskReportedStatus;
+  /** The child's literal status word ("stalled", "done", ...) before normalization. */
+  rawStatus: string;
   valid: boolean;
 }
 
@@ -97,7 +99,40 @@ export function assessTaskResult(result: ParsedResult): TaskResultAssessment {
     : "unknown";
   return {
     reportedStatus,
+    rawStatus: result.status || "unknown",
     valid: reportedStatus !== "unknown" && result.summary.length > 0,
+  };
+}
+
+/** Warning line shown to the parent when the child used a status word outside
+ * the canonical vocabulary; empty when nothing was misreported. */
+export function unrecognizedStatusWarning(assessment: TaskResultAssessment): string {
+  if (assessment.reportedStatus !== "unknown" || assessment.rawStatus === "unknown") {
+    return "";
+  }
+  return `Child reported status "${assessment.rawStatus}" (expected success | failure | blocked | partial); result treated as unstructured.`;
+}
+
+/** Model-visible result text: the parsed summary, prefixed with the
+ * unrecognized-status warning so the child's own words reach the parent. */
+export function taskResultContentText(
+  parsed: ParsedResult,
+  assessment: TaskResultAssessment,
+): string {
+  const warning = unrecognizedStatusWarning(assessment);
+  return warning ? `${warning}\n\n${parsed.summary}` : parsed.summary;
+}
+
+/** Structured envelope summary for tool-result details. */
+export function structuredResultPayload(assessment: TaskResultAssessment): {
+  status: TaskReportedStatus;
+  raw_status: string;
+  valid: boolean;
+} {
+  return {
+    status: assessment.reportedStatus,
+    raw_status: assessment.rawStatus,
+    valid: assessment.valid,
   };
 }
 
@@ -316,7 +351,7 @@ export function buildTaskEnvelope(
 ): { content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> } {
   const assessment = assessTaskResult(parsed);
   return {
-    content: [{ type: "text", text: parsed.summary }],
+    content: [{ type: "text", text: taskResultContentText(parsed, assessment) }],
     details: {
       agent_type: meta.agent_type,
       description: meta.description,
@@ -324,6 +359,7 @@ export function buildTaskEnvelope(
       duration_ms: meta.duration_ms,
       background: meta.background,
       status: assessment.reportedStatus,
+      raw_status: assessment.rawStatus,
       result_valid: assessment.valid,
       summary: parsed.summary,
       findings: parsed.findings,
@@ -331,7 +367,7 @@ export function buildTaskEnvelope(
       files: parsed.files,
       caveats: parsed.caveats,
       next_steps: parsed.next_steps,
-      structured_result: assessment.valid,
+      structured_result: structuredResultPayload(assessment),
     },
   };
 }

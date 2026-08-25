@@ -53,6 +53,8 @@ import {
   resolveTaskFastMode,
   assessTaskResult,
   buildTaskEnvelope,
+  structuredResultPayload,
+  taskResultContentText,
   completionDeliveryOptions,
   formatBackgroundReceipt,
   parseResultXml,
@@ -894,7 +896,9 @@ export default function (pi: ExtensionAPI) {
                   backgroundTask.status = "done";
                   const parsed = parseResultXml(result.output);
                   const assessment = assessTaskResult(parsed);
-                  const summary = parsed.summary || "SDK subagent completed without assistant text.";
+                  const summary =
+                    taskResultContentText(parsed, assessment) ||
+                    "SDK subagent completed without assistant text.";
                   ignoreStaleExtensionCtx(() =>
                     pi.sendMessage(
                       {
@@ -909,6 +913,7 @@ export default function (pi: ExtensionAPI) {
                           execution_phase: "done",
                           status: assessment.reportedStatus,
                           reported_status: assessment.reportedStatus,
+                          raw_status: assessment.rawStatus,
                           result_valid: assessment.valid,
                           result: result.output,
                           summary: parsed.summary,
@@ -922,7 +927,7 @@ export default function (pi: ExtensionAPI) {
                           tool_uses: backgroundTask.toolUses,
                           turn_count: backgroundTask.turns,
                           background: true,
-                          structured_result: assessment.valid,
+                          structured_result: structuredResultPayload(assessment),
                           full_output: parsed.raw.trim() || result.output.trim(),
                         },
                       },
@@ -1001,6 +1006,7 @@ export default function (pi: ExtensionAPI) {
                   phase: "done" as const,
                   execution_phase: "done" as const,
                   reported_status: assessment.reportedStatus,
+                  raw_status: assessment.rawStatus,
                   result_valid: assessment.valid,
                   backend: "sdk" as const,
                   session_path: sessionPath,
@@ -1155,6 +1161,7 @@ export default function (pi: ExtensionAPI) {
           sessionRef: completedSessionRef,
           status: phase,
           reportedStatus: assessment.reportedStatus,
+          rawStatus: assessment.rawStatus,
           resultValid: assessment.valid,
           completedAt: Date.now(),
           background: false,
@@ -1196,6 +1203,7 @@ export default function (pi: ExtensionAPI) {
             phase,
             execution_phase: phase,
             reported_status: assessment.reportedStatus,
+            raw_status: assessment.rawStatus,
             result_valid: assessment.valid,
             confidence: parsed.confidence || "",
             turn_count: turns,

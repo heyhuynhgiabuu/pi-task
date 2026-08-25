@@ -58,6 +58,8 @@ export interface RegistryEntry {
 export interface TaskSessionHistoryEntry extends RegistryEntry {
   status: "running" | "done" | "cancelled" | "aborted" | "failed" | "timeout";
   reportedStatus?: TaskReportedStatus;
+  /** The child's literal status word before normalization ("stalled", ...). */
+  rawStatus?: string;
   resultValid?: boolean;
   completedAt?: number;
   background: boolean;

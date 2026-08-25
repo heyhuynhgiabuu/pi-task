@@ -1281,3 +1281,56 @@ console.log("ALL TASK HELPER TESTS PASSED");
     t + " nextTurn",
   );
 }
+
+{
+  const { parseResultXml, assessTaskResult } = await import("../src/helpers.js");
+  const t = "assessTaskResult preserves the child's literal status word";
+  const stalled = assessTaskResult(
+    parseResultXml("<status>stalled</status>\n<summary>waiting on quota</summary>"),
+  );
+  assert.equal(stalled.rawStatus, "stalled", t + " (raw word kept)");
+  assert.equal(stalled.reportedStatus, "unknown", t + " (normalized)");
+  assert.equal(stalled.valid, false, t + " (invalid)");
+  const ok = assessTaskResult(
+    parseResultXml("<status>success</status>\n<summary>done</summary>"),
+  );
+  assert.equal(ok.rawStatus, "success", t + " (canonical passthrough)");
+  const plain = assessTaskResult(parseResultXml("no envelope at all"));
+  assert.equal(plain.rawStatus, "unknown", t + " (absent stays unknown)");
+}
+
+{
+  const { parseResultXml, assessTaskResult, taskResultContentText } =
+    await import("../src/helpers.js");
+  const t = "taskResultContentText surfaces unrecognized status to the parent model";
+  const stalledRaw = "<status>stalled</status>\n<summary>waiting on quota</summary>";
+  const text = taskResultContentText(parseResultXml(stalledRaw), assessTaskResult(parseResultXml(stalledRaw)));
+  assert.match(text, /"stalled"/, t + " (warning mentions the word)");
+  assert.match(text, /waiting on quota/, t + " (summary retained)");
+  const okRaw = "<status>success</status>\n<summary>done</summary>";
+  const okText = taskResultContentText(parseResultXml(okRaw), assessTaskResult(parseResultXml(okRaw)));
+  assert.equal(okText, "done", t + " (canonical: exact passthrough, no warning)");
+}
+
+{
+  const { parseResultXml, buildTaskEnvelope } = await import("../src/helpers.js");
+  const t = "buildTaskEnvelope reports structured_result as an object and warns on bad status";
+  const parsed = parseResultXml("<status>stalled</status>\n<summary>waiting</summary>");
+  const envelope = buildTaskEnvelope(parsed, {
+    agent_type: "general",
+    description: "d",
+    tool_uses: 1,
+    duration_ms: 10,
+    background: false,
+  });
+  assert.match(
+    envelope.content[0]?.text ?? "",
+    /"stalled"/,
+    t + " (content carries the word)",
+  );
+  const structured = envelope.details.structured_result as Record<string, unknown>;
+  assert.equal(typeof structured, "object", t + " (object not boolean)");
+  assert.equal(structured.raw_status, "stalled", t + " (raw_status field)");
+  assert.equal(structured.valid, false, t + " (valid field)");
+  assert.equal(envelope.details.raw_status, "stalled", t + " (details raw_status)");
+}

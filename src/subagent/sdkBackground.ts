@@ -57,6 +57,7 @@ export function startSdkBackgroundTask(input: SdkBackgroundTaskInput): void {
         sessionRef: result.sessionPath ?? undefined,
         status: "done",
         reportedStatus: assessment.reportedStatus,
+        rawStatus: assessment.rawStatus,
         resultValid: assessment.valid,
         completedAt: now(),
         background: true,

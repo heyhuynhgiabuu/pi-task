@@ -16,7 +16,9 @@ export type TaskResultDetails = {
   files?: string;
   caveats?: string;
   next_steps?: string;
-  structured_result?: boolean;
+  structured_result?:
+    | boolean
+    | { status?: string; raw_status?: string; valid?: boolean };
   full_output?: string;
 };
 

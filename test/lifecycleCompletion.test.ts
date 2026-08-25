@@ -303,3 +303,43 @@ test("a completeTask that throws mid-writes does not poison the idempotency guar
   completeTask(pi, "t-p", mk(), "x", "done", goodPiDir);
   assert.equal(deliveries, 1, "retry after a mid-write throw must still deliver");
 });
+
+test("completion surfaces an unrecognized child status word to the parent", () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-completion-raw-status-"));
+  const task: BackgroundTask = {
+    dir: join(piDir, "artifacts", "tasks", "task-stalled"),
+    agentType: "general",
+    sessionName: "task-task-stalled",
+    originalPane: null,
+    description: "raw status word",
+    startedAt: Date.now() - 1000,
+    toolUses: 0,
+    turns: 0,
+  };
+  let captured: { content: string; details: Record<string, unknown> } | undefined;
+
+  completeTask(
+    {
+      sendMessage: (message: { content: string; details: Record<string, unknown> }) => {
+        captured = message;
+      },
+    } as never,
+    "task-stalled",
+    task,
+    "<status>stalled</status>\n<summary>waiting on external quota</summary>",
+    "done",
+    piDir,
+  );
+
+  assert.ok(captured, "notification delivered");
+  assert.match(captured!.content, /"stalled"/, "raw status word reaches parent content");
+  assert.match(captured!.content, /waiting on external quota/, "summary retained");
+  assert.equal(captured!.details.status, "unknown", "normalized status in details");
+  assert.equal(captured!.details.raw_status, "stalled", "raw status in details");
+  const structured = captured!.details.structured_result as Record<string, unknown>;
+  assert.equal(typeof structured, "object", "structured_result is an object");
+  assert.equal(structured.valid, false, "structured_result.valid");
+  assert.equal(structured.raw_status, "stalled", "structured_result.raw_status");
+  const history = readTaskSessionHistory(piDir);
+  assert.equal(history[0]?.rawStatus, "stalled", "history keeps the raw status word");
+});

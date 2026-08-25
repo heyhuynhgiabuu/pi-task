@@ -110,6 +110,7 @@ import {
   parseTaskControlRequest,
   parseTaskStartRequest,
   taskControlRequestError,
+  taskStartRequestError,
 } from "./task-control.js";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -330,9 +331,10 @@ export default function (pi: ExtensionAPI) {
       if (controlRequest) return controlTask(controlRequest);
       const parsedTaskParams = parseTaskStartRequest(params);
       if (!parsedTaskParams) {
+        const reason = taskStartRequestError(params) ?? "expected a start/resume request";
         return {
-          content: [{ type: "text" as const, text: "Invalid task request: expected a start/resume request." }],
-          details: { phase: "failed" as const, error: "invalid_task_request" },
+          content: [{ type: "text" as const, text: `Invalid task request: ${reason}.` }],
+          details: { phase: "failed" as const, error: "invalid_task_request", reason },
           isError: true,
         };
       }

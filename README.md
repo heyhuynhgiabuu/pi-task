@@ -143,7 +143,7 @@ The existing `task` tool also exposes lifecycle control without starting another
 }
 ```
 
-`status` is read-only and resolves by task id, session name, or conversation id. `cancel` only closes a live task-owned tmux or strongly-identified HerdR resource and persists `cancelled` before cleanup. If cleanup fails, the tool reports `cleanup_pending` and keeps a durable retry receipt for the next restore. SDK background cancellation is reported as unsupported because the SDK backend currently does not retain a durable cancellation handle. Start/resume requests may omit `operation` for compatibility or use `"operation": "start"` when a provider requires an explicit mode; never combine `status`/`cancel` with start fields.
+`status` is read-only and resolves by task id, session name, or conversation id. `cancel` only closes a live task-owned tmux or strongly-identified HerdR resource and persists `cancelled` before cleanup. If cleanup fails, the tool reports `cleanup_pending` and keeps a durable retry receipt for the next restore. SDK background cancellation is reported as unsupported because the SDK backend currently does not retain a durable cancellation handle. Start/resume requests may omit `operation` for compatibility or use `"operation": "start"` (or the equivalent `"resume"`) when a provider requires an explicit mode; never combine `status`/`cancel` with start fields. A rejected start/resume request returns a targeted reason naming each invalid field (for example `agent_type must be a string; prompt must be a string`) instead of one generic message.
 
 ## Agent precedence
 

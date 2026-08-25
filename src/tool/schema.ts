@@ -7,10 +7,11 @@ export function taskParametersSchema() {
     operation: Type.Optional(
       Type.Union([
         Type.Literal("start"),
+        Type.Literal("resume"),
         Type.Literal("status"),
         Type.Literal("cancel"),
       ], {
-        description: "Optional mode: use start for an explicit start/resume request; status/cancel control an existing task",
+        description: 'Optional mode: use start (or resume) for an explicit start/resume request; status/cancel control an existing task',
       }),
     ),
     task_id: Type.Optional(

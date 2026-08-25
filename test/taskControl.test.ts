@@ -16,6 +16,7 @@ import {
   parseTaskControlRequest,
   parseTaskStartRequest,
   fromRegistryEntry,
+  taskStartRequestError,
   type TaskControlRecord,
 } from "../src/task-control.js";
 
@@ -128,6 +129,73 @@ test("reviewer starts require structured parent context and proposed semantics",
   ]);
 });
 
+test("start parsing accepts the resume alias and reports targeted rejection reasons", () => {
+  const schema = taskParametersSchema();
+  const base = {
+    agent_type: "explore",
+    description: "Inspect the repository",
+    prompt: "Map the repository.",
+  };
+
+  // Schema accepts the resume alias for providers that require a mode discriminator.
+  assert.equal(Value.Check(schema, { ...base, operation: "resume" }), true);
+  // The alias parses exactly like an explicit start.
+  const resumed = parseTaskStartRequest({ ...base, operation: "resume" });
+  assert.equal(resumed?.agent_type, "explore");
+  assert.equal(resumed?.description, "Inspect the repository");
+
+  // Valid starts produce no error text.
+  assert.equal(taskStartRequestError(base), undefined);
+  assert.equal(taskStartRequestError({ ...base, operation: "start" }), undefined);
+  assert.equal(taskStartRequestError({ ...base, operation: "resume" }), undefined);
+
+  // Unknown operations get a targeted, actionable reason instead of a generic one.
+  assert.match(
+    taskStartRequestError({ ...base, operation: "deploy" })!,
+    /^operation must be "start" or "resume" \(or omitted\); received "deploy"$/,
+  );
+
+  // Missing or mistyped required fields are each named.
+  assert.equal(
+    taskStartRequestError({ agent_type: "explore", prompt: "x" }),
+    "description must be a string",
+  );
+  assert.equal(
+    taskStartRequestError({ operation: "start", agent_type: 7, prompt: 42, description: null }),
+    "agent_type must be a string; prompt must be a string; description must be a string",
+  );
+
+  // Optional fields with wrong types are named too.
+  assert.equal(taskStartRequestError({ ...base, background: "true" }), "background must be a boolean");
+  assert.equal(taskStartRequestError({ ...base, fast: 1 }), "fast must be a boolean");
+  assert.equal(taskStartRequestError({ ...base, task_id: 123 }), "task_id must be a string");
+  assert.equal(
+    taskStartRequestError({ ...base, cwd: "/tmp", workspace_group: [] }),
+    "workspace_group must be a string",
+  );
+
+  // Blank structured input is rejected even for non-reviewer agents (v0.5.1 passed "" through).
+  assert.equal(
+    taskStartRequestError({ ...base, parent_context: "   " }),
+    "parent_context was provided but is empty after trimming",
+  );
+
+  // Reviewer gaps name the missing structured inputs.
+  const reviewerBase = {
+    agent_type: "reviewer",
+    description: "Audit the manifest",
+    prompt: "Read the files and account for the proposed changes.",
+  };
+  assert.match(
+    taskStartRequestError(reviewerBase)!,
+    /reviewer tasks require parent_context and proposed_changes/,
+  );
+  assert.equal(
+    taskStartRequestError({ ...reviewerBase, parent_context: "   ", proposed_changes: [""] }),
+    "parent_context was provided but is empty after trimming; proposed_changes contains blank items; each entry must be a non-empty string",
+  );
+});
+
 test("task control parsing trims references and rejects malformed requests", () => {
   assert.deepEqual(parseTaskControlRequest({ operation: "status", task_id: " task-1 " }), {
     operation: "status",
@@ -194,8 +262,15 @@ test("task tool explains malformed control payloads instead of reporting a gener
     const invalidStart = await tool.execute("call-3", {
       operation: "start",
     }, new AbortController().signal, undefined, { cwd: isolatedCwd });
-    assert.equal(invalidStart.content[0]?.text, "Invalid task request: expected a start/resume request.");
+    assert.equal(
+      invalidStart.content[0]?.text,
+      "Invalid task request: agent_type must be a string; prompt must be a string; description must be a string.",
+    );
     assert.equal(invalidStart.details?.error, "invalid_task_request");
+    assert.equal(
+      invalidStart.details?.reason,
+      "agent_type must be a string; prompt must be a string; description must be a string",
+    );
   } finally {
     process.chdir(originalCwd);
     rmSync(isolatedCwd, { recursive: true, force: true });

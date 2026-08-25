@@ -141,74 +141,121 @@ function parsePromptHandoff(prompt: string): {
   return { parentContext, proposedChanges };
 }
 
-export function parseTaskStartRequest(value: unknown): TaskStartRequest | undefined {
-  if (!value || typeof value !== "object") return undefined;
-  const candidate = value as Record<string, unknown>;
-  if (
-    (candidate.operation !== undefined && candidate.operation !== "start") ||
-    typeof candidate.agent_type !== "string" ||
-    typeof candidate.prompt !== "string" ||
-    typeof candidate.description !== "string"
-  ) {
-    return undefined;
+interface TaskStartValidation {
+  request?: TaskStartRequest;
+  problems: string[];
+}
+
+function validateTaskStartRequest(value: unknown): TaskStartValidation {
+  if (!value || typeof value !== "object") {
+    return { problems: ["request payload must be a JSON object"] };
   }
-  const optionalStringFields = [
-    "workspace_group",
-    "cwd",
-    "task_id",
-    "conversation_id",
-  ] as const;
-  if (optionalStringFields.some((field) =>
-    candidate[field] !== undefined && typeof candidate[field] !== "string"
-  )) {
-    return undefined;
+  const candidate = value as Record<string, unknown>;
+  const problems: string[] = [];
+
+  const operation = candidate.operation;
+  if (operation !== undefined && operation !== "start" && operation !== "resume") {
+    problems.push(
+      `operation must be "start" or "resume" (or omitted); received ${JSON.stringify(operation)}`,
+    );
+  }
+  for (const field of ["agent_type", "prompt", "description"] as const) {
+    if (typeof candidate[field] !== "string") problems.push(`${field} must be a string`);
+  }
+  for (
+    const field of ["workspace_group", "cwd", "task_id", "conversation_id"] as const
+  ) {
+    if (candidate[field] !== undefined && typeof candidate[field] !== "string") {
+      problems.push(`${field} must be a string`);
+    }
   }
   if (candidate.fast !== undefined && typeof candidate.fast !== "boolean") {
-    return undefined;
+    problems.push("fast must be a boolean");
   }
   if (candidate.background !== undefined && typeof candidate.background !== "boolean") {
-    return undefined;
+    problems.push("background must be a boolean");
   }
-  const parsedPromptHandoff = parsePromptHandoff(candidate.prompt);
+  if (problems.length > 0) return { problems };
+
+  const parsedPromptHandoff = parsePromptHandoff(candidate.prompt as string);
   const suppliedParentContext = typeof candidate.parent_context === "string"
     ? candidate.parent_context.trim()
     : undefined;
-  if (candidate.parent_context !== undefined && suppliedParentContext === undefined) {
-    return undefined;
+  if (candidate.parent_context !== undefined) {
+    if (typeof candidate.parent_context !== "string") {
+      problems.push("parent_context must be a string");
+    } else if (suppliedParentContext === "") {
+      problems.push("parent_context was provided but is empty after trimming");
+    }
   }
-  const suppliedProposedChanges = Array.isArray(candidate.proposed_changes)
-    ? candidate.proposed_changes
-      .filter((change): change is string => typeof change === "string")
-      .map((change) => change.trim())
-      .filter(Boolean)
-    : undefined;
-  if (
-    candidate.proposed_changes !== undefined &&
-    (!Array.isArray(candidate.proposed_changes) ||
-      suppliedProposedChanges === undefined ||
-      suppliedProposedChanges.length !== candidate.proposed_changes.length)
-  ) {
-    return undefined;
+  let suppliedProposedChanges: string[] | undefined;
+  if (candidate.proposed_changes !== undefined) {
+    if (!Array.isArray(candidate.proposed_changes)) {
+      problems.push("proposed_changes must be an array of strings");
+    } else {
+      const items = candidate.proposed_changes
+        .filter((change): change is string => typeof change === "string")
+        .map((change) => change.trim())
+        .filter(Boolean);
+      if (items.length !== candidate.proposed_changes.length) {
+        const hasNonString = candidate.proposed_changes.some((change) => typeof change !== "string");
+        problems.push(
+          hasNonString
+            ? "proposed_changes must contain only strings"
+            : "proposed_changes contains blank items; each entry must be a non-empty string",
+        );
+      }
+      suppliedProposedChanges = items;
+    }
   }
+  if (problems.length > 0) return { problems };
+
   const parentContext = suppliedParentContext ?? parsedPromptHandoff.parentContext;
   const proposedChanges = suppliedProposedChanges ?? parsedPromptHandoff.proposedChanges;
-  const isReviewer = candidate.agent_type === "reviewer";
-  if (isReviewer && (!parentContext || !proposedChanges?.length)) {
-    return undefined;
+  if (candidate.agent_type === "reviewer") {
+    const missing: string[] = [];
+    if (!parentContext) missing.push("parent_context");
+    if (!proposedChanges?.length) missing.push("proposed_changes");
+    if (missing.length === 2) {
+      problems.push(
+        'reviewer tasks require parent_context and proposed_changes; pass them explicitly or include "Parent context:" and "Proposed changes:" sections in prompt',
+      );
+    } else if (missing.length === 1) {
+      const field = missing[0]!;
+      const header = field === "parent_context" ? "Parent context:" : "Proposed changes:";
+      problems.push(
+        `reviewer tasks require ${field}; pass it explicitly or include "${header}" section in prompt`,
+      );
+    }
   }
+  if (problems.length > 0) return { problems };
+
   return {
-    agent_type: candidate.agent_type,
-    prompt: candidate.prompt,
-    description: candidate.description,
-    ...(parentContext !== undefined ? { parent_context: parentContext } : {}),
-    ...(proposedChanges !== undefined ? { proposed_changes: proposedChanges } : {}),
-    ...(typeof candidate.workspace_group === "string" ? { workspace_group: candidate.workspace_group } : {}),
-    ...(typeof candidate.cwd === "string" ? { cwd: candidate.cwd } : {}),
-    ...(typeof candidate.task_id === "string" ? { task_id: candidate.task_id } : {}),
-    ...(typeof candidate.conversation_id === "string" ? { conversation_id: candidate.conversation_id } : {}),
-    ...(typeof candidate.fast === "boolean" ? { fast: candidate.fast } : {}),
-    ...(typeof candidate.background === "boolean" ? { background: candidate.background } : {}),
+    problems,
+    request: {
+      agent_type: candidate.agent_type as string,
+      prompt: candidate.prompt as string,
+      description: candidate.description as string,
+      ...(parentContext !== undefined ? { parent_context: parentContext } : {}),
+      ...(proposedChanges !== undefined ? { proposed_changes: proposedChanges } : {}),
+      ...(typeof candidate.workspace_group === "string" ? { workspace_group: candidate.workspace_group } : {}),
+      ...(typeof candidate.cwd === "string" ? { cwd: candidate.cwd } : {}),
+      ...(typeof candidate.task_id === "string" ? { task_id: candidate.task_id } : {}),
+      ...(typeof candidate.conversation_id === "string" ? { conversation_id: candidate.conversation_id } : {}),
+      ...(typeof candidate.fast === "boolean" ? { fast: candidate.fast } : {}),
+      ...(typeof candidate.background === "boolean" ? { background: candidate.background } : {}),
+    },
   };
+}
+
+export function parseTaskStartRequest(value: unknown): TaskStartRequest | undefined {
+  return validateTaskStartRequest(value).request;
+}
+
+/** Returns a targeted, model-actionable reason when a start/resume request would be rejected. */
+export function taskStartRequestError(value: unknown): string | undefined {
+  const { problems } = validateTaskStartRequest(value);
+  return problems.length > 0 ? problems.join("; ") : undefined;
 }
 
 export function taskControlRequestError(value: unknown): string | undefined {

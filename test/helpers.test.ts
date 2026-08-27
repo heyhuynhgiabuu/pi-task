@@ -883,8 +883,26 @@ import {
     },
   ];
   const r = formatAgentList(agents);
-  assert.match(r, /explore \(project\): Read-only explorer/, t + " explore");
-  assert.match(r, /general \(user\): Multi-step implementer/, t + " general");
+  assert.match(r, /explore: Read-only explorer/, t + " explore");
+  assert.match(r, /general: Multi-step implementer/, t + " general");
+}
+
+{
+  const t = "formatAgentList strips the PROACTIVE prefix and source tag from the rendered list";
+  const agents: AgentConfig[] = [
+    {
+      name: "explore",
+      description: "PROACTIVE — Read-only explorer",
+      body: "",
+      source: "project",
+      path: "/a",
+      proactive: true,
+    },
+  ];
+  const r = formatAgentList(agents);
+  assert.match(r, /explore: Read-only explorer/, t + " stripped");
+  assert.ok(!r.includes("PROACTIVE —"), t + " no prefix");
+  assert.ok(!r.includes("(project)"), t + " no source tag");
 }
 
 {
@@ -915,7 +933,7 @@ import {
     t + " does not repeat the agent description in the proactive block",
   );
   assert.ok(
-    d.includes("explore (project): Read-only explorer"),
+    d.includes("explore: Read-only explorer"),
     t + " descriptions still appear once in the agents list",
   );
 }
@@ -1114,8 +1132,6 @@ import {
         "Acceptance criteria and stop condition",
         "Verification recipe",
         "reviewer request with missing parent_context or proposed_changes is rejected",
-        "fan-out and synthesize",
-        "adversarial verification",
       ]) {
         assert.ok(TASK_TOOL_DESCRIPTION.includes(required), `${t}: includes ${required}`);
       }

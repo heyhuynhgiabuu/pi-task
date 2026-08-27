@@ -54,18 +54,18 @@ export function taskParametersSchema() {
       description: "Shared HerdR workspace group; same value = panes in one workspace.",
     })),
     cwd: Type.Optional(Type.String({
-      description: "Set cwd to an absolute existing directory for a new child; use a parent-created Git worktree for writer isolation. Defaults to caller cwd; resumes reuse stored cwd. pi-task does not create, merge, or remove worktrees.",
+      description: "Set cwd to an absolute existing directory (parent-created Git worktree for writer isolation). Defaults to caller cwd; resumes reuse stored cwd. pi-task does not create, merge, or remove worktrees.",
     })),
     fast: Type.Optional(
       Type.Boolean({
         description:
-          "OpenAI/OpenAI-Codex priority service tier when the model is listed in pi-codex-fast config (fallback: built-in gpt-5.4/gpt-5.5 list). Omitted = agent frontmatter fast value, else false. No model or thinking-level change.",
+          "Priority service tier when the model is in pi-codex-fast config (fallback: built-in gpt-5.4/5.5 list). Defaults to agent frontmatter fast, else false. No model or thinking-level change.",
       }),
     ),
     background: Type.Optional(
       Type.Boolean({
         description:
-          "Run async in background (default); you'll be notified when it completes",
+          "Run async in background; default true",
         default: true,
       }),
     ),

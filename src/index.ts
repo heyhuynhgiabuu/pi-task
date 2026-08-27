@@ -303,7 +303,7 @@ export default function (pi: ExtensionAPI) {
     name: taskToolName,
     label: taskToolName,
     description: buildTaskToolDescription(discoverAgents(process.cwd(), BUNDLED_AGENT_DIR).agents),
-    promptSnippet: "Delegate work to a specialist agent via the task tool",
+    promptSnippet: "Delegate work to a specialist agent",
         parameters: taskParametersSchema(),
 
         async execute(_toolCallId, params, signal, onUpdate, ctx) {

@@ -204,14 +204,11 @@ Prompt contract (put these fields in the task request):
 A reviewer request with missing parent_context or proposed_changes is rejected; if there are no design changes, pass an explicit "No proposed design changes" item. Generic tasks may omit these fields but must still copy parent reasoning into the prompt.
 
 Usage:
-1. Give complete context — the subagent's context is fresh
-2. Launch independent agents concurrently; do NOT duplicate delegated work — wait or work on non-overlapping tasks
-3. Background is the default (async; you'll be notified on completion); use background:false only to wait inline; never sleep/poll a background task
-4. Do not trust delegated output blindly: read changed files, review the diff, verify scope, and run relevant checks before claiming completion
-5. Tell the agent whether to write code or research; its result is not user-visible — send the user a concise summary
-6. Pass task_id to resume a previous subagent session
-
-Orchestration: fan-out and synthesize; adversarial verification; tournament/ranking; loop until done.
+1. Launch independent agents concurrently; do NOT duplicate delegated work — wait or work on non-overlapping tasks
+2. Background is the default (async; you'll be notified on completion); use background:false only to wait inline; never sleep/poll a background task
+3. Do not trust delegated output blindly: read changed files, review the diff, verify scope, and run relevant checks before claiming completion
+4. Tell the agent whether to write code or research; its result is not user-visible — send the user a concise summary
+5. Pass task_id to resume a previous subagent session
 
 Task control:
 - operation "status" + task_id: inspect a task without relaunching it
@@ -676,8 +673,14 @@ export function buildTaskToolDescription(agents: AgentConfig[]): string {
 export function formatAgentList(agents: AgentConfig[]): string {
   if (agents.length === 0) return "none available";
   return agents
-    .map((a) => `${a.name} (${a.source}): ${a.description}`)
+    .map((a) => `${a.name}: ${stripProactivePrefix(a.description)}`)
     .join("\n");
+}
+
+/** The PROACTIVE block header already marks proactive agents; drop the
+ * per-description "PROACTIVE — " prefix when rendering the agents list. */
+function stripProactivePrefix(description: string): string {
+  return description.replace(/^PROACTIVE —\s*/, "");
 }
 
 // ─── Sub-agent CLI args ─────────────────────────────────────────────────────

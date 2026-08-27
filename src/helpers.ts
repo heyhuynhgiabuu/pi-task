@@ -187,9 +187,9 @@ export const TASK_RESULT_XML_INSTRUCTIONS = `When the task is complete, wrap the
 <decisions> is merged into findings. The parent parses these tags for the task UI.`;
 
 
-export const TASK_TOOL_DESCRIPTION = `Launch a subagent to autonomously handle a complex, multistep task. The subagent starts with fresh context — everything it needs goes in the prompt.
+export const TASK_TOOL_DESCRIPTION = `Launch a subagent for a complex, multistep task that benefits from isolated context. The subagent starts with fresh context — everything it needs goes in the prompt: parent-synthesized facts, decisions, and proposed-change semantics (file paths alone are not a context handoff).
 
-When NOT to use: reading files or searching symbols (use Read/Grep), edits confined to 2-3 files (do directly), or no suitable agent type (use other tools).
+When NOT to use: file/symbol lookups (Read/Grep), 2-3 file edits (directly), or no suitable agent type (other tools).
 
 Prompt contract (put these fields in the task request):
 - Goal: the exact outcome wanted
@@ -201,21 +201,21 @@ Prompt contract (put these fields in the task request):
 - Acceptance criteria and stop condition: observable conditions that must be true before stopping
 - Verification recipe: checks to run or evidence to gather
 
-A reviewer request with missing parent_context or proposed_changes is rejected. If there are no design changes, pass an explicit item such as "No proposed design changes; assess the implementation against the stated goal." Generic tasks may omit these fields but must still copy parent reasoning into the prompt.
+A reviewer request with missing parent_context or proposed_changes is rejected; if there are no design changes, pass an explicit "No proposed design changes" item. Generic tasks may omit these fields but must still copy parent reasoning into the prompt.
 
 Usage:
 1. Give complete context — the subagent's context is fresh
-2. Launch independent agents concurrently in one message; do NOT duplicate delegated work — wait or work on non-overlapping tasks
-3. Background is the default (async; you'll be notified on completion). Use background:false only to wait inline; never sleep/poll a background task
+2. Launch independent agents concurrently; do NOT duplicate delegated work — wait or work on non-overlapping tasks
+3. Background is the default (async; you'll be notified on completion); use background:false only to wait inline; never sleep/poll a background task
 4. Do not trust delegated output blindly: read changed files, review the diff, verify scope, and run relevant checks before claiming completion
 5. Tell the agent whether to write code or research; its result is not user-visible — send the user a concise summary
 6. Pass task_id to resume a previous subagent session
 
-Orchestration patterns: fan-out and synthesize; adversarial verification (producer + skeptic); tournament/ranking (candidates + comparator); loop until done.
+Orchestration: fan-out and synthesize; adversarial verification; tournament/ranking; loop until done.
 
 Task control:
-- operation "status" + task_id: inspect a running or completed task without relaunching it
-- operation "cancel" + task_id: cancel a live tmux or HerdR background task (cleanup failure reports cleanup_pending with a durable retry receipt; SDK background cancellation is reported unsupported)
+- operation "status" + task_id: inspect a task without relaunching it
+- operation "cancel" + task_id: cancel a live tmux or HerdR background task (cleanup failure → cleanup_pending + durable retry receipt; SDK cancel → unsupported)
 - Omit operation for start/resume ("start"/"resume" explicit when the provider requires it); never combine "status"/"cancel" with start/resume fields`;
 
 /** @deprecated Import from ./agent-tools.js */

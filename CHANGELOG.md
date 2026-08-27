@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Changed
 
 - Task tool definition slimmed to protect model context: the tool description is ~35% shorter, the PROACTIVE agent block lists agent names instead of repeating each agent's full description (descriptions already appear in the agents list), schema parameter descriptions were tightened, and `promptGuidelines` no longer duplicate usage rules already stated in the description. All contract semantics are preserved (prompt-contract fields, reviewer gate, background default, verification policy, task-control operations); a test now guards the description's size budget.
+- Second slimming pass: `promptGuidelines` removed entirely — the three additive lines were folded into the tool description, making the description the single source of usage guidance (kills the duplicate-guidance class). Schema descriptions became lean call-time pointers that reference the prompt contract instead of restating its eight fields. Tests guard the description size budget (2500 chars), the schema description budget (1300 chars), and forbid reintroducing a `promptGuidelines` block. Model-visible task tool: ~1.7k → ~1.35k tokens in a bundled-agent setup.
 
 ## [0.5.2] - 2026-08-25
 

@@ -11,12 +11,12 @@ export function taskParametersSchema() {
         Type.Literal("status"),
         Type.Literal("cancel"),
       ], {
-        description: 'Optional: "start"/"resume" launch modes; "status"/"cancel" control an existing task',
+        description: 'Optional; "start"/"resume" launch, "status"/"cancel" control',
       }),
     ),
     task_id: Type.Optional(
       Type.String({
-        description: "Existing task id, session name, or conversation id; also used to resume a task",
+        description: "Existing task id, session name, or conversation id",
       }),
     ),
     conversation_id: Type.Optional(
@@ -32,17 +32,17 @@ export function taskParametersSchema() {
     prompt: Type.Optional(
       Type.String({
         description:
-          "Required for start requests; omitted for status/cancel controls. Self-contained: goal, scope, non-goals, write/read policy, acceptance criteria, stop condition, verification recipe, and why each reference matters. Parent reasoning in parent_context; design changes in proposed_changes.",
+          "Required for start requests; omitted for status/cancel controls. Follow the prompt contract in the tool description; parent reasoning in parent_context; design changes in proposed_changes.",
       }),
     ),
     parent_context: Type.Optional(
       Type.String({
-        description: "Facts, decisions, and constraints the parent learned outside the referenced files. Required for reviewer tasks.",
+        description: "Parent-learned facts/decisions/constraints outside the referenced files. Required for reviewer tasks.",
       }),
     ),
     proposed_changes: Type.Optional(
       Type.Array(Type.String(), {
-        description: "One item per proposed change: intended semantics and acceptance implication. Required and non-empty for reviewer tasks; use an explicit 'no design changes' item when none.",
+        description: "One item per change: intended semantics + acceptance implication. Required non-empty for reviewer tasks; explicit 'no design changes' item when none.",
       }),
     ),
     description: Type.Optional(
@@ -54,7 +54,7 @@ export function taskParametersSchema() {
       description: "Shared HerdR workspace group; same value = panes in one workspace.",
     })),
     cwd: Type.Optional(Type.String({
-      description: "Absolute existing directory for a newly launched child; use a parent-created Git worktree for writer isolation. Defaults to caller cwd; resumes reuse stored cwd. pi-task does not create, merge, or remove worktrees.",
+      description: "Set cwd to an absolute existing directory for a new child; use a parent-created Git worktree for writer isolation. Defaults to caller cwd; resumes reuse stored cwd. pi-task does not create, merge, or remove worktrees.",
     })),
     fast: Type.Optional(
       Type.Boolean({
@@ -65,7 +65,7 @@ export function taskParametersSchema() {
     background: Type.Optional(
       Type.Boolean({
         description:
-          "Run async in background (default); you'll be notified when it completes — do not sleep, poll, or duplicate its work while it runs.",
+          "Run async in background (default); you'll be notified when it completes",
         default: true,
       }),
     ),

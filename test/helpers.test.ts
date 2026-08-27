@@ -1123,7 +1123,7 @@ import {
       // registration (plus schema descriptions, prompt guidelines, and the
       // agents list). Keep it tight to protect context.
       assert.ok(
-        TASK_TOOL_DESCRIPTION.length < 2600,
+        TASK_TOOL_DESCRIPTION.length < 2500,
         `${t}: description stays under the size budget (${TASK_TOOL_DESCRIPTION.length} chars)`,
       );
     }

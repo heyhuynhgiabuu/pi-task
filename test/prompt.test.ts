@@ -321,13 +321,30 @@ if (process.platform !== "win32") {
 }
 
 {
-  const t = "task tool description includes parent cwd hint";
+  const t = "task tool guidance lives in one place: description, not duplicated guidelines";
   const indexSrc = readFileSync(
     fileURLToPath(new URL("../src/index.ts", import.meta.url)),
     "utf8",
   );
-  assert.ok(indexSrc.includes("set cwd to an absolute existing directory"), t);
-  assert.ok(indexSrc.includes("file paths alone are not a context handoff"), t + " handoff guideline");
+  const schemaSrc = readFileSync(
+    fileURLToPath(new URL("../src/tool/schema.ts", import.meta.url)),
+    "utf8",
+  );
+  const helpersSrc = readFileSync(
+    fileURLToPath(new URL("../src/helpers.ts", import.meta.url)),
+    "utf8",
+  );
+  // Guidance must not be duplicated in a second model-visible block:
+  // promptGuidelines were removed and folded into the tool description.
+  assert.ok(!indexSrc.includes("promptGuidelines"), t + " no duplicated guidelines block");
+  assert.ok(schemaSrc.toLowerCase().includes("set cwd to an absolute existing directory"), t + " cwd hint");
+  assert.ok(helpersSrc.includes("file paths alone are not a context handoff"), t + " handoff guidance");
+  assert.ok(helpersSrc.includes("parent-synthesized facts, decisions"), t + " context handoff folded into description");
+  // Schema descriptions are lean call-time pointers, not a second copy of
+  // the prompt contract (which lives in the tool description).
+  const schemaDescs = [...schemaSrc.matchAll(/description:\s*(?:\n\s*)?"([^"]+)"/g)].map((m) => m[1]);
+  const schemaChars = schemaDescs.reduce((a, d) => a + d.length, 0);
+  assert.ok(schemaChars < 1300, `${t}: schema descriptions stay lean (${schemaChars} chars)`);
   assert.ok(!indexSrc.includes("pi.getAllTools()"), "extension load avoids runtime-only tool enumeration");
   assert.ok(indexSrc.includes("cwd: taskCwd"), t + " prompt and backend cwd");
   assert.ok(indexSrc.includes("shellQuote(taskCwd)"), t + " tmux shell cwd");

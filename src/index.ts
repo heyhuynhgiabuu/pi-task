@@ -304,16 +304,6 @@ export default function (pi: ExtensionAPI) {
     label: taskToolName,
     description: buildTaskToolDescription(discoverAgents(process.cwd(), BUNDLED_AGENT_DIR).agents),
     promptSnippet: "Delegate work to a specialist agent via the task tool",
-    promptGuidelines: [
-      "Delegate complex multi-step work to a specialist agent when the work benefits from isolated context",
-      "Copy parent-synthesized facts, decisions, and proposed-change semantics into the task prompt; file paths alone are not a context handoff",
-      "Launch multiple agents concurrently in one message",
-      "Do NOT duplicate work you've delegated — wait for the result or work on non-overlapping tasks",
-      "For background tasks: DO NOT sleep, poll, or check on progress. You'll be notified",
-      "After delegated work completes, read changed files, review the diff, verify scope, and run relevant checks",
-      "Send the user a concise summary of the result since the agent's output is not user-visible",
-      "For repo-local work outside the caller checkout, set cwd to an absolute existing directory; use a parent-created Git worktree for writer isolation",
-        ],
         parameters: taskParametersSchema(),
 
         async execute(_toolCallId, params, signal, onUpdate, ctx) {

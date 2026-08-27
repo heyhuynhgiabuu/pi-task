@@ -299,11 +299,11 @@ const formatted = formatAgentList([
   },
 ]);
 assert.ok(
-  formatted.includes("alpha (project): First agent"),
+  formatted.includes("alpha: First agent"),
   "formatAgentList alpha",
 );
 assert.ok(
-  formatted.includes("beta (user): Second agent"),
+  formatted.includes("beta: Second agent"),
   "formatAgentList beta",
 );
 console.log("  PASS: agent list formatting");

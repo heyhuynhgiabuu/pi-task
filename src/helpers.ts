@@ -187,58 +187,36 @@ export const TASK_RESULT_XML_INSTRUCTIONS = `When the task is complete, wrap the
 <decisions> is merged into findings. The parent parses these tags for the task UI.`;
 
 
-export const TASK_TOOL_DESCRIPTION = `Launch a new agent to handle complex, multistep tasks autonomously.
+export const TASK_TOOL_DESCRIPTION = `Launch a subagent to autonomously handle a complex, multistep task. The subagent starts with fresh context — everything it needs goes in the prompt.
 
-Include relevant context from your current work in the prompt parameter —
-this becomes the subagent's instructions. The subagent knows nothing about what you've been doing except what you put in the prompt.
-
-When NOT to use:
-- To read a specific file path, use Read or Grep instead
-- To search for a class definition like 'class Foo', use Grep instead
-- To search code within 2-3 files, use Read instead
-- If no available agent fits the task, use other tools directly
+When NOT to use: reading files or searching symbols (use Read/Grep), edits confined to 2-3 files (do directly), or no suitable agent type (use other tools).
 
 Prompt contract (put these fields in the task request):
 - Goal: the exact outcome wanted
 - Parent context: facts, decisions, and constraints learned outside the referenced files
-- Proposed changes: one item per change, including intended semantics and acceptance implications; required and non-empty for a new reviewer task
+- Proposed changes: one item per change, including intended semantics and acceptance implications
 - Scope and references: what to inspect, why each reference matters, and the base/diff to review; paths are evidence, not context handoff
 - Non-goals: what to avoid or leave untouched
 - Write/read policy: whether the agent may edit files or must stay read-only
 - Acceptance criteria and stop condition: observable conditions that must be true before stopping
 - Verification recipe: checks to run or evidence to gather
 
-A reviewer request with missing parent_context or proposed_changes is rejected. If there are no design changes, pass an explicit item such as "No proposed design changes; assess the implementation against the stated goal." Generic tasks may omit these structured fields, but must still copy relevant parent reasoning into prompt.
+A reviewer request with missing parent_context or proposed_changes is rejected. If there are no design changes, pass an explicit item such as "No proposed design changes; assess the implementation against the stated goal." Generic tasks may omit these fields but must still copy parent reasoning into the prompt.
 
-Usage notes:
-1. Provide complete context in the prompt — the subagent starts with a fresh context
-2. Launch multiple agents concurrently when possible (use a single message with multiple tool calls)
-3. Once you delegate work, do NOT duplicate it. Continue with non-overlapping tasks, or wait for the result
-4. Background is the default. Use background:false only when you need the caller to wait inline for the tmux task result
-5. Do not trust delegated output blindly. Read changed files, review the diff, verify scope, and run the relevant checks before claiming completion
-6. Clearly tell the agent whether to write code or just research, since it doesn't know the user's intent
-7. The result returned by the agent is not visible to the user. Send a concise summary back to the user
-8. Pass task_id to resume a previous subagent session (continues with its prior context)
+Usage:
+1. Give complete context — the subagent's context is fresh
+2. Launch independent agents concurrently in one message; do NOT duplicate delegated work — wait or work on non-overlapping tasks
+3. Background is the default (async; you'll be notified on completion). Use background:false only to wait inline; never sleep/poll a background task
+4. Do not trust delegated output blindly: read changed files, review the diff, verify scope, and run relevant checks before claiming completion
+5. Tell the agent whether to write code or research; its result is not user-visible — send the user a concise summary
+6. Pass task_id to resume a previous subagent session
 
-Recommended orchestration patterns (still using only task):
-- Fan-out and synthesize: launch several read-only tasks, then one reviewer/synthesizer task
-- Adversarial verification: pair a producer task with an independent skeptic/verifier task
-- Tournament/ranking: launch competing candidates, then a comparator task with a rubric
-- Loop until done: repeat targeted tasks until no new findings or no remaining failures
-
-Background mode (background: true):
-- Launches the subagent asynchronously and returns immediately
-- You will be notified automatically when it finishes
-- DO NOT sleep, poll, ask the task for status, or duplicate its work while it runs in background
-- Avoid working with the same files or topics the background task is using
-- Work on non-overlapping tasks, or briefly tell the user what you launched and end your response
+Orchestration patterns: fan-out and synthesize; adversarial verification (producer + skeptic); tournament/ranking (candidates + comparator); loop until done.
 
 Task control:
-- Use operation: "status" with task_id to inspect a running or completed task without relaunching it.
-- Use operation: "cancel" with task_id to cancel a live tmux or strongly-identified HerdR background task. If cleanup fails, the result reports cleanup_pending and keeps a durable retry receipt. SDK background cancellation is reported as unsupported rather than guessed.
-- For a new start/resume request, omit operation for compatibility or use operation: "start" (or "resume") when the provider requires an explicit mode.
-- Never use operation: "status" or "cancel" together with start/resume fields.
-- Omit operation for the normal start/resume API described above`;
+- operation "status" + task_id: inspect a running or completed task without relaunching it
+- operation "cancel" + task_id: cancel a live tmux or HerdR background task (cleanup failure reports cleanup_pending with a durable retry receipt; SDK background cancellation is reported unsupported)
+- Omit operation for start/resume ("start"/"resume" explicit when the provider requires it); never combine "status"/"cancel" with start/resume fields`;
 
 /** @deprecated Import from ./agent-tools.js */
 export { ALL_TOOL_NAMES } from "./agent-tools.js";
@@ -682,7 +660,7 @@ export function buildTaskToolDescription(agents: AgentConfig[]): string {
       ? [
           "",
           "PROACTIVE — delegate via task without user @mention when triggers match (see parent APPEND_SYSTEM.md):",
-          ...proactive.map((a) => `- ${a.name}: ${a.description.replace(/\s+/g, " ").trim()}`),
+          ...proactive.map((a) => `- ${a.name}`),
         ].join("\n")
       : "";
 

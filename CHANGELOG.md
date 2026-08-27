@@ -4,6 +4,12 @@ All notable changes to `@heyhuynhgiabuu/pi-task` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- Task tool definition slimmed to protect model context: the tool description is ~35% shorter, the PROACTIVE agent block lists agent names instead of repeating each agent's full description (descriptions already appear in the agents list), schema parameter descriptions were tightened, and `promptGuidelines` no longer duplicate usage rules already stated in the description. All contract semantics are preserved (prompt-contract fields, reviewer gate, background default, verification policy, task-control operations); a test now guards the description's size budget.
+
 ## [0.5.2] - 2026-08-25
 
 ### Fixed

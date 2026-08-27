@@ -30,6 +30,7 @@ import {
   loadAgentsFromDir,
   discoverAgents,
   formatAgentList,
+  buildTaskToolDescription,
   type AgentConfig,
 } from "../src/helpers.js";
 
@@ -886,6 +887,39 @@ import {
   assert.match(r, /general \(user\): Multi-step implementer/, t + " general");
 }
 
+{
+  const t = "PROACTIVE block lists agent names without repeating their descriptions";
+  const agents: AgentConfig[] = [
+    {
+      name: "explore",
+      description: "Read-only explorer with a very long description that must not be repeated",
+      body: "",
+      source: "project",
+      path: "/a",
+      proactive: true,
+    },
+    {
+      name: "general",
+      description: "Multi-step implementer",
+      body: "",
+      source: "user",
+      path: "/b",
+    },
+  ];
+  const d = buildTaskToolDescription(agents);
+  assert.ok(d.includes("PROACTIVE — delegate via task"), t + " has proactive header");
+  assert.ok(d.includes("- explore"), t + " lists the proactive agent name");
+  const proactiveTail = d.slice(d.indexOf("PROACTIVE —"));
+  assert.ok(
+    !proactiveTail.includes("Read-only explorer"),
+    t + " does not repeat the agent description in the proactive block",
+  );
+  assert.ok(
+    d.includes("explore (project): Read-only explorer"),
+    t + " descriptions still appear once in the agents list",
+  );
+}
+
 // ─── Integration: discoverAgents with fixture ────────────────────────────────
 
 {
@@ -1080,11 +1114,18 @@ import {
         "Acceptance criteria and stop condition",
         "Verification recipe",
         "reviewer request with missing parent_context or proposed_changes is rejected",
-        "Fan-out and synthesize",
-        "Adversarial verification",
+        "fan-out and synthesize",
+        "adversarial verification",
       ]) {
         assert.ok(TASK_TOOL_DESCRIPTION.includes(required), `${t}: includes ${required}`);
       }
+      // Size budget: the description is model-visible on every task-tool
+      // registration (plus schema descriptions, prompt guidelines, and the
+      // agents list). Keep it tight to protect context.
+      assert.ok(
+        TASK_TOOL_DESCRIPTION.length < 2600,
+        `${t}: description stays under the size budget (${TASK_TOOL_DESCRIPTION.length} chars)`,
+      );
     }
 
 

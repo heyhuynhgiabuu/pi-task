@@ -11,7 +11,7 @@ export function taskParametersSchema() {
         Type.Literal("status"),
         Type.Literal("cancel"),
       ], {
-        description: 'Optional mode: use start (or resume) for an explicit start/resume request; status/cancel control an existing task',
+        description: 'Optional: "start"/"resume" launch modes; "status"/"cancel" control an existing task',
       }),
     ),
     task_id: Type.Optional(
@@ -26,13 +26,13 @@ export function taskParametersSchema() {
     ),
     agent_type: Type.Optional(
       Type.String({
-        description: "The type of specialist agent to use for this task",
+        description: "Specialist agent type for this task",
       }),
     ),
     prompt: Type.Optional(
       Type.String({
         description:
-          "Required for start requests; omitted for status/cancel controls. Be detailed and self-contained: include goal, scope, non-goals, write/read policy, acceptance criteria, stop condition, verification recipe, and why each reference matters. Put parent-only reasoning in parent_context and enumerate proposed changes in proposed_changes.",
+          "Required for start requests; omitted for status/cancel controls. Self-contained: goal, scope, non-goals, write/read policy, acceptance criteria, stop condition, verification recipe, and why each reference matters. Parent reasoning in parent_context; design changes in proposed_changes.",
       }),
     ),
     parent_context: Type.Optional(
@@ -42,7 +42,7 @@ export function taskParametersSchema() {
     ),
     proposed_changes: Type.Optional(
       Type.Array(Type.String(), {
-        description: "One item per proposed change, including its intended semantics and acceptance implication. Required and non-empty for reviewer tasks; use an explicit 'no design changes' item when applicable.",
+        description: "One item per proposed change: intended semantics and acceptance implication. Required and non-empty for reviewer tasks; use an explicit 'no design changes' item when none.",
       }),
     ),
     description: Type.Optional(
@@ -51,21 +51,21 @@ export function taskParametersSchema() {
       }),
     ),
     workspace_group: Type.Optional(Type.String({
-      description: "Shared HerdR workspace group. Concurrent tasks with the same value use panes in one workspace.",
+      description: "Shared HerdR workspace group; same value = panes in one workspace.",
     })),
     cwd: Type.Optional(Type.String({
-      description: "Absolute existing directory where a newly launched child runs. Use a parent-created Git worktree for writer isolation. Defaults to the caller cwd; resumed launches reuse their stored cwd. pi-task does not create, merge, or remove the worktree.",
+      description: "Absolute existing directory for a newly launched child; use a parent-created Git worktree for writer isolation. Defaults to caller cwd; resumes reuse stored cwd. pi-task does not create, merge, or remove worktrees.",
     })),
     fast: Type.Optional(
       Type.Boolean({
         description:
-          "Use OpenAI/OpenAI-Codex priority service tier for this child when its model is listed in pi-codex-fast configuration; a missing or invalid config falls back to the built-in gpt-5.4/gpt-5.5 model list. When omitted, the agent frontmatter fast value applies; otherwise behavior defaults to false. Does not change model or thinking level.",
+          "OpenAI/OpenAI-Codex priority service tier when the model is listed in pi-codex-fast config (fallback: built-in gpt-5.4/gpt-5.5 list). Omitted = agent frontmatter fast value, else false. No model or thinking-level change.",
       }),
     ),
     background: Type.Optional(
       Type.Boolean({
         description:
-          "Run in background (async). You will be notified when it completes. DO NOT sleep, poll, ask the task for status, or duplicate its work while it runs in background.",
+          "Run async in background (default); you'll be notified when it completes — do not sleep, poll, or duplicate its work while it runs.",
         default: true,
       }),
     ),

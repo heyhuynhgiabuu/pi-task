@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 
 - Error-path hardening from the live restart-rehearsal audit: background polling and the SDK background lifecycle can no longer leak unhandled rejections when durable writes fail mid-settlement; a failed registry-removal write can no longer trigger a resource re-close (herdr close is not idempotent); restore-time durable-write failures retain entries instead of aborting extension registration; backend CLI calls (tmux/herdr) are bounded by a 30s kill timeout so a wedged CLI cannot stall completion and timeout checks forever; the task widget degrades to an empty transcript instead of throwing when a session directory is unreadable.
+- Follow-up hardening from independent dual-model audits: settled tasks are retired unconditionally even when panel callbacks throw (polling and cancel paths); the cleanup receipt is written before the history record so a registry outage can never rewrite a settled phase; restore synthesizes the terminal history record for receipt-only crash windows — preserving already-delivered comparison markers — so comparison reports survive restarts in that window; the default CLI kill-timeout is pinned by test.
 
 ## [0.5.3] - 2026-08-27
 

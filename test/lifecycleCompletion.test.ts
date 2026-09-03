@@ -390,3 +390,76 @@ test("onComparisonSettled hook is invoked even when deliveryGuard refuses in-con
   assert.equal(history?.comparisonDescription, "compare guard");
   assert.equal(history?.comparisonIndex, 0);
 });
+
+test("a failed registry-removal write never causes a resource re-close on retry", () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-completion-removal-"));
+  const task: BackgroundTask = {
+    dir: join(piDir, "artifacts", "tasks", "task-removal"),
+    agentType: "general",
+    sessionName: "task-task-removal",
+    originalPane: null,
+    description: "removal write fails",
+    startedAt: Date.now() - 1000,
+    toolUses: 0,
+    turns: 0,
+  };
+  writeRegistry(piDir, [{
+    id: "task-removal",
+    agentType: "general",
+    description: task.description,
+    sessionName: task.sessionName,
+    startedAt: task.startedAt,
+    paneId: task.paneId,
+    piDir,
+    dir: task.dir,
+  }]);
+
+  let closeCount = 0;
+  let sawReceipt = false;
+  let sawRemoval = false;
+  const failRemovalWrite = (dir: string, entries: [{ id: string; cleanupPending?: boolean }]) => {
+    sawReceipt = sawReceipt || entries.some((e) => e.id === "task-removal" && e.cleanupPending === true);
+    if (!entries.some((e) => e.id === "task-removal")) {
+      sawRemoval = true;
+      throw new Error("removal write boom");
+    }
+    void dir;
+  };
+
+  const pi = { sendMessage: () => {} };
+  const first = completeTask(
+    pi as never,
+    "task-removal",
+    task,
+    "<task_result><summary>done</summary></task_result>",
+    "done",
+    piDir,
+    () => {
+      closeCount += 1;
+    },
+    undefined,
+    undefined,
+    failRemovalWrite as never,
+  );
+  assert.equal(first.cleanupSucceeded, true, "close succeeded despite removal write failure");
+  assert.equal(sawReceipt, true, "cleanup receipt was written before the removal attempt");
+  assert.equal(sawRemoval, true, "removal write was attempted");
+
+  // A retry after the failed removal must be a no-op: the id was marked
+  // settled before the removal write, so the resource is never re-closed.
+  completeTask(
+    pi as never,
+    "task-removal",
+    task,
+    "<task_result><summary>done</summary></task_result>",
+    "done",
+    piDir,
+    () => {
+      closeCount += 1;
+    },
+    undefined,
+    undefined,
+    failRemovalWrite as never,
+  );
+  assert.equal(closeCount, 1, "resource closed exactly once");
+});

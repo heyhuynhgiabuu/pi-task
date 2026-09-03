@@ -306,3 +306,50 @@ function makeDeps(
 }
 
 console.log("ALL POLLING TESTS PASSED");
+
+{
+  const t = "completeTask throwing inside tick never becomes an unhandled rejection and keeps polling";
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => unhandled.push(reason);
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const backgroundTasks = new Map<any, any>();
+    backgroundTasks.set("t1", {
+      dir: "/tmp",
+      sessionName: "s1",
+      paneId: undefined,
+      originalPane: null,
+      startedAt: Date.now(),
+    });
+    let failFirst = true;
+    let completedAfterFailure = true;
+    let errorMode = true;
+    const stop = startBackgroundPolling(
+      makeDeps({
+        backgroundTasks,
+        checkTaskCompletion: async () => {
+          if (errorMode) throw new Error("poll boom");
+          return { status: "completed", content: "done" };
+        },
+        completeTask: () => {
+          if (failFirst) {
+            // Only reachable from the poll-error catch handler: the success
+            // path's completeTask is already inside the per-task try.
+            failFirst = false;
+            errorMode = false;
+            throw new Error("durable write boom");
+          }
+          completedAfterFailure = true;
+        },
+      }),
+      10,
+    );
+    await sleep(80);
+    stop();
+    assert.equal(failFirst, false, t + ": catch-handler completeTask threw once");
+    assert.equal(completedAfterFailure, true, t + ": a later tick still delivered");
+    assert.equal(unhandled.length, 0, `${t}: no unhandled rejections (${unhandled.map(String).join("; ")})`);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+}

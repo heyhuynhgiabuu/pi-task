@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createTmuxTerminalBackend } from "../src/subagent/terminalBackend.js";
+import {
+  createDefaultCommandRunner,
+  createTmuxTerminalBackend,
+} from "../src/subagent/terminalBackend.js";
 
 test("tmux terminal backend preserves the launch handle contract", async () => {
   const calls: string[][] = [];
@@ -101,4 +104,19 @@ test("tmux terminal backend honors PI_TASK_TMUX_SPLIT", async () => {
       process.env.PI_TASK_TMUX_SPLIT = previousMode;
     }
   }
+});
+
+test("default command runner applies a kill timeout so a wedged CLI cannot stall polling", async () => {
+  const t = "default command runner";
+  const runner = createDefaultCommandRunner();
+  const started = Date.now();
+  await assert.rejects(
+    runner.run("sleep", ["5"], { timeoutMs: 150 }),
+    /exited unsuccessfully/,
+    t + ": hung command is rejected",
+  );
+  const elapsed = Date.now() - started;
+  assert.ok(elapsed < 2_000, `${t}: timeout fired promptly (took ${elapsed}ms)`);
+  const result = await runner.run("echo", ["hello"]);
+  assert.equal(result.stdout.trim(), "hello", t + ": normal commands still resolve");
 });

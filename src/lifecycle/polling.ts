@@ -114,17 +114,24 @@ export function startBackgroundPolling(
           pollErrors.set(id, count);
           if (count >= deps.MAX_POLL_ERRORS) {
             if (deps.backgroundTasks.get(id) !== task) continue;
-            deps.completeTask(
-              deps.pi,
-              id,
-              task,
-              `Background task polling failed: ${error instanceof Error ? error.message : String(error)}`,
-              "failed",
-              deps.piDir,
-              undefined,
-              deps.deliveryGuard ? () => deps.deliveryGuard!(id) : undefined,
-              deps.onComparisonSettled,
-            );
+            try {
+              deps.completeTask(
+                deps.pi,
+                id,
+                task,
+                `Background task polling failed: ${error instanceof Error ? error.message : String(error)}`,
+                "failed",
+                deps.piDir,
+                undefined,
+                deps.deliveryGuard ? () => deps.deliveryGuard!(id) : undefined,
+                deps.onComparisonSettled,
+              );
+            } catch {
+              // A durable-write failure while reporting the poll failure must
+              // not escape the tick as an unhandled rejection; keep the task
+              // so a later tick can retry settlement.
+              continue;
+            }
             deps.onTaskFinished?.(id, task);
             deps.backgroundTasks.delete(id);
             deps.clearTaskWidgetIfIdle();
@@ -138,7 +145,10 @@ export function startBackgroundPolling(
   };
 
   const interval = setInterval(() => {
-    void tick();
+    // Terminal guard: any escape from tick (including double-faults from the
+    // catch-handler above) must never surface as an unhandled rejection in
+    // the host Pi process.
+    tick().catch(() => {});
   }, pollMs);
 
   return () => {

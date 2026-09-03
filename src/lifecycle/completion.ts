@@ -57,6 +57,7 @@ export function completeTask(
   resourceCloser: (task: BackgroundTask) => void = closeTaskResource,
   deliveryGuard?: () => boolean,
   onComparisonSettled?: ComparisonSettledHook,
+  writeRegistryFn: (piDir: string, entries: RegistryEntry[]) => void = writeRegistry,
 ): { cleanupSucceeded: boolean } {
   if (completedTaskIds.has(id)) {
     // Already fully processed in this process: never re-deliver or re-close.
@@ -126,7 +127,7 @@ export function completeTask(
   // Keep a terminal cleanup receipt durable across a crash between the
   // state write and backend close. Restore retries it and removes it only
   // after close succeeds.
-  writeRegistry(piDir, [...entries, cleanupEntry]);
+  writeRegistryFn(piDir, [...entries, cleanupEntry]);
 
   let cleanupSucceeded = true;
   try {
@@ -134,7 +135,19 @@ export function completeTask(
   } catch {
     cleanupSucceeded = false;
   }
-  if (cleanupSucceeded) writeRegistry(piDir, entries);
+  // Terminal state is durable and the resource is closed (or its close is
+  // recorded as pending): mark settled BEFORE the best-effort removal write
+  // so a failed removal can never trigger a retry that re-closes a resource
+  // (herdr close is not idempotent).
+  completedTaskIds.add(id);
+  if (cleanupSucceeded) {
+    try {
+      writeRegistryFn(piDir, entries);
+    } catch {
+      // The cleanupPending receipt written above stays durable and restore
+      // retries cleanup (missing panes are tolerated and clear the receipt).
+    }
+  }
 
   // Record the id only after the durable writes and resource close have run:
   // if a write threw earlier, the id must not be poisoned so a retry (e.g.

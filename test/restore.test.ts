@@ -307,6 +307,33 @@ describe("restoreActiveBackgroundTasks", () => {
     assert.equal(entry?.completedAt, finishedAt);
   });
 
+  it("retains entries and never throws when a durable write fails during restore", () => {
+    // A restore-time I/O failure (e.g. history file occupied by a directory)
+    // must not abort extension registration or destroy the durable record.
+    const piDir = makePiDir();
+    const taskDir = join(piDir, "artifacts", "sessions", "task-unwritable");
+    writeSession(taskDir, "task-task-unwritable", "stop");
+    writeJson(join(piDir, "task-registry.json"), [{
+      id: "task-unwritable",
+      dir: taskDir,
+      sessionName: "task-task-unwritable",
+      startedAt: Date.now() - 1000,
+      paneId: "%gone",
+      agentType: "scout",
+      description: "history write will fail",
+    }]);
+    // Occupy the history file path with a directory: every history write fails.
+    mkdirSync(join(piDir, "task-session-history.json"), { recursive: true });
+
+    const backgroundTasks = new Map();
+    assert.doesNotThrow(() =>
+      restoreActiveBackgroundTasks(piDir, backgroundTasks, () => false),
+    );
+    // The entry could not be settled durably, so it must be retained.
+    const registry = readJson<Array<{ id: string }>>(join(piDir, "task-registry.json"));
+    assert.equal(registry.some((entry) => entry.id === "task-unwritable"), true);
+  });
+
   it("marks non-terminal entries failed when their pane is gone", () => {
     const piDir = makePiDir();
     const taskDir = join(piDir, "artifacts", "sessions", "task-2");

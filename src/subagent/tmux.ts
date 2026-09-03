@@ -10,6 +10,8 @@ function tmuxCmd(args: string[]): string {
   return execFileSync("tmux", args, {
     encoding: "utf-8",
     stdio: ["ignore", "pipe", "pipe"],
+    timeout: 10_000,
+    killSignal: "SIGKILL",
   }).trim();
 }
 

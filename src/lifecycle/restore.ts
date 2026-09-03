@@ -42,24 +42,40 @@ export function restoreActiveBackgroundTasks(
   };
 
   for (const entry of registry) {
+    try {
+      restoreEntry(entry);
+    } catch {
+      // A failed durable write or unreadable session during restore must not
+      // abort extension registration; retain the entry for a later attempt.
+    }
+  }
+
+  if (staleIds.length) {
+    writeRegistry(
+      piDir,
+      registry.filter((entry) => !staleIds.includes(entry.id)),
+    );
+  }
+
+  function restoreEntry(entry: RegistryEntry): void {
     if (entry.cleanupPending) {
       try {
         if (closeResource) closeResource(entry);
         else if (entry.handle?.backend !== "herdr" && (entry.handle?.resourceId ?? entry.paneId)) {
           killAgentPane(entry.handle?.resourceId ?? entry.paneId!, null);
         } else if (entry.handle?.backend === "herdr") {
-          continue;
+          return;
         }
         staleIds.push(entry.id);
       } catch {
         // Keep the terminal cleanup receipt for a later retry.
       }
-      continue;
+      return;
     }
 
     if (!existsSync(entry.dir)) {
       staleIds.push(entry.id);
-      continue;
+      return;
     }
 
     // Production layout nests per-task sessions under dir/sessions/<id>
@@ -79,7 +95,7 @@ export function restoreActiveBackgroundTasks(
           : Boolean(paneId && paneExists(paneId));
     } catch {
       // A temporary backend outage must not destroy the durable task record.
-      continue;
+      return;
     }
 
     if (sessionFinished) {
@@ -131,7 +147,7 @@ export function restoreActiveBackgroundTasks(
       }
 
       if (cleanupSucceeded) staleIds.push(entry.id);
-      continue;
+      return;
     }
 
     // Comparison siblings whose session is still running must remain active;
@@ -139,7 +155,7 @@ export function restoreActiveBackgroundTasks(
     // fed into the coordinator during extension startup.
     if (entry.comparisonGroupId && entry.comparisonModel) {
       restoreTask(entry, paneId);
-      continue;
+      return;
     }
 
     if (!paneAlive) {
@@ -154,7 +170,7 @@ export function restoreActiveBackgroundTasks(
           }
         }
       }
-      if (!cleanupSucceeded) continue;
+      if (!cleanupSucceeded) return;
       upsertTaskSessionHistory(piDir, {
         id: entry.id,
         status: "failed",
@@ -176,16 +192,9 @@ export function restoreActiveBackgroundTasks(
         comparisonDelivered: entry.comparisonDelivered,
       });
       staleIds.push(entry.id);
-      continue;
+      return;
     }
 
     restoreTask(entry, paneId);
-  }
-
-  if (staleIds.length) {
-    writeRegistry(
-      piDir,
-      registry.filter((entry) => !staleIds.includes(entry.id)),
-    );
   }
 }

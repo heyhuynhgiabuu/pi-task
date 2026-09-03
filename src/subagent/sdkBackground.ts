@@ -30,7 +30,8 @@ export interface SdkBackgroundTaskInput {
 export function startSdkBackgroundTask(input: SdkBackgroundTaskInput): void {
   const now = input.now ?? Date.now;
 
-  upsertTaskSessionHistory(input.piDir, {
+  try {
+    upsertTaskSessionHistory(input.piDir, {
     id: input.id,
     agentType: input.agentType,
     description: input.description,
@@ -47,33 +48,44 @@ export function startSdkBackgroundTask(input: SdkBackgroundTaskInput): void {
     comparisonDescription: input.comparisonDescription,
     comparisonIndex: input.comparisonIndex,
   });
+  } catch {
+    // A durable-write failure at launch must not prevent the task from
+    // starting; the lifecycle handlers below keep their own guards.
+  }
 
-  void input
-    .run()
+  // Promise.resolve().then defers input.run() so a synchronous throw is
+  // routed through the failure path instead of escaping this function.
+  void Promise.resolve()
+    .then(() => input.run())
     .then((result) => {
       const assessment = assessTaskResult(parseResultXml(result.output));
-      upsertTaskSessionHistory(input.piDir, {
-        id: input.id,
-        agentType: input.agentType,
-        description: input.description,
-        sessionName: input.sessionName,
-        startedAt: input.startedAt,
-        piDir: input.piDir,
-        dir: input.artifactsDir,
-        cwd: input.cwd,
-        conversationId: input.conversationId,
-        sessionRef: result.sessionPath ?? undefined,
-        status: "done",
-        reportedStatus: assessment.reportedStatus,
-        rawStatus: assessment.rawStatus,
-        resultValid: assessment.valid,
-        completedAt: now(),
-        background: true,
-        comparisonGroupId: input.comparisonGroupId,
-        comparisonModel: input.comparisonModel,
-        comparisonDescription: input.comparisonDescription,
-        comparisonIndex: input.comparisonIndex,
-      });
+      try {
+        upsertTaskSessionHistory(input.piDir, {
+          id: input.id,
+          agentType: input.agentType,
+          description: input.description,
+          sessionName: input.sessionName,
+          startedAt: input.startedAt,
+          piDir: input.piDir,
+          dir: input.artifactsDir,
+          cwd: input.cwd,
+          conversationId: input.conversationId,
+          sessionRef: result.sessionPath ?? undefined,
+          status: "done",
+          reportedStatus: assessment.reportedStatus,
+          rawStatus: assessment.rawStatus,
+          resultValid: assessment.valid,
+          completedAt: now(),
+          background: true,
+          comparisonGroupId: input.comparisonGroupId,
+          comparisonModel: input.comparisonModel,
+          comparisonDescription: input.comparisonDescription,
+          comparisonIndex: input.comparisonIndex,
+        });
+      } catch {
+        // A durable-write failure must not convert a completed task into a
+        // failed one; the completion callback still runs.
+      }
       try {
         input.onComplete?.(result);
       } catch {
@@ -81,31 +93,44 @@ export function startSdkBackgroundTask(input: SdkBackgroundTaskInput): void {
       }
     })
     .catch((error: unknown) => {
-      upsertTaskSessionHistory(input.piDir, {
-        id: input.id,
-        agentType: input.agentType,
-        description: input.description,
-        sessionName: input.sessionName,
-        startedAt: input.startedAt,
-        piDir: input.piDir,
-        dir: input.artifactsDir,
-        cwd: input.cwd,
-        conversationId: input.conversationId,
-        status: "failed",
-        completedAt: now(),
-        background: true,
-        comparisonGroupId: input.comparisonGroupId,
-        comparisonModel: input.comparisonModel,
-        comparisonDescription: input.comparisonDescription,
-        comparisonIndex: input.comparisonIndex,
-      });
+      try {
+        upsertTaskSessionHistory(input.piDir, {
+          id: input.id,
+          agentType: input.agentType,
+          description: input.description,
+          sessionName: input.sessionName,
+          startedAt: input.startedAt,
+          piDir: input.piDir,
+          dir: input.artifactsDir,
+          cwd: input.cwd,
+          conversationId: input.conversationId,
+          status: "failed",
+          completedAt: now(),
+          background: true,
+          comparisonGroupId: input.comparisonGroupId,
+          comparisonModel: input.comparisonModel,
+          comparisonDescription: input.comparisonDescription,
+          comparisonIndex: input.comparisonIndex,
+        });
+      } catch {
+        // Best-effort durable record of the failure.
+      }
       try {
         input.onFailed?.(error);
       } catch {
         // Notification failure does not change the durable task failure.
       }
     })
-    .finally(() => input.onSettled?.());
+    .finally(() => {
+      try {
+        input.onSettled?.();
+      } catch {
+        // Settled callbacks must never reject the lifecycle chain.
+      }
+    })
+    .catch(() => {
+      // Terminal guard: no unhandled rejections from the task lifecycle.
+    });
 }
 
 export function formatSdkBackgroundReceipt(id: string): string {

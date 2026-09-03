@@ -40,7 +40,16 @@ export interface CommandRunOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   input?: string;
+  /** Kill timeout for the child process; defaults to CLI_TIMEOUT_MS. */
+  timeoutMs?: number;
 }
+
+/**
+ * Upper bound for backend CLI invocations (tmux/herdr). A wedged CLI call
+ * awaited inside the polling tick would otherwise hold the inFlight latch
+ * forever and stall every background task's completion and timeout checks.
+ */
+export const CLI_TIMEOUT_MS = 30_000;
 
 export interface CommandResult {
   stdout: string;
@@ -90,6 +99,8 @@ export function createDefaultCommandRunner(): CommandRunner {
             env: options.env,
             encoding: "utf8",
             maxBuffer: 4 * 1024 * 1024,
+            timeout: options.timeoutMs ?? CLI_TIMEOUT_MS,
+            killSignal: "SIGKILL",
           },
           (error, stdout, stderr) => {
             if (error) {

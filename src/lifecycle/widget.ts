@@ -119,31 +119,41 @@ export function createTaskWidgetController(
   }
 
   function itemsFor(taskId: string): TranscriptItem[] {
-    const task = findTask(taskId);
-    if (!task) return [];
-    const dir = transcriptDir(taskId, task);
-    const result = readTaskTranscript(dir, task.sessionName);
-    if (result.found && result.items.length > 0) return result.items;
-    // SDK children may not flush a session JSONL: show live tool activity.
-    return (task.recentCalls ?? []).map((c) => ({
-      type: "tool" as const,
-      name: c.name,
-      toolCallId: c.id ?? "",
-      args: {},
-      result: c.detail,
-      timestamp: "",
-    }));
+    try {
+      const task = findTask(taskId);
+      if (!task) return [];
+      const dir = transcriptDir(taskId, task);
+      const result = readTaskTranscript(dir, task.sessionName);
+      if (result.found && result.items.length > 0) return result.items;
+      // SDK children may not flush a session JSONL: show live tool activity.
+      return (task.recentCalls ?? []).map((c) => ({
+        type: "tool" as const,
+        name: c.name,
+        toolCallId: c.id ?? "",
+        args: {},
+        result: c.detail,
+        timestamp: "",
+      }));
+    } catch {
+      // A hostile/unreadable session dir must degrade to an empty transcript,
+      // not throw inside the TUI render pass.
+      return [];
+    }
   }
 
   /** Cheap signature: the session JSONL's mtime+size, or live activity count. */
   function transcriptSig(taskId: string): string {
-    const task = findTask(taskId);
-    if (!task) return "";
-    const fileSig = transcriptSignature(transcriptDir(taskId, task));
-    if (fileSig !== "") return fileSig;
-    const calls = task.recentCalls ?? [];
-    const last = calls.at(-1);
-    return `activity:${calls.length}:${last?.id ?? ""}`;
+    try {
+      const task = findTask(taskId);
+      if (!task) return "";
+      const fileSig = transcriptSignature(transcriptDir(taskId, task));
+      if (fileSig !== "") return fileSig;
+      const calls = task.recentCalls ?? [];
+      const last = calls.at(-1);
+      return `activity:${calls.length}:${last?.id ?? ""}`;
+    } catch {
+      return "";
+    }
   }
 
   function reconcileSelection(): void {

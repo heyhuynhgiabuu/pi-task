@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { createTaskWidgetController } from "../src/lifecycle/widget";
 
@@ -40,4 +43,37 @@ test("task widget renders only when explicitly refreshed", () => {
   controller.requestRender();
   assert.equal(renders, 2);
   controller.dispose();
+});
+
+test("hostile session dirs degrade to an empty transcript instead of a render error", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-widget-hostile-"));
+  try {
+    // `dir` is a FILE, so any readdir/stat underneath throws.
+    const hostileDir = join(root, "not-a-dir");
+    writeFileSync(hostileDir, "x");
+    const backgroundTasks = new Map<string, any>();
+    backgroundTasks.set("t-hostile", {
+      dir: hostileDir,
+      sessionName: "task-t-hostile",
+      agentType: "general",
+      description: "hostile dir",
+      startedAt: Date.now(),
+      toolUses: 1,
+      turns: 1,
+      recentCalls: [],
+    });
+    const { context, getWidgetFactory } = createTuiContext();
+    const controller = createTaskWidgetController(new Map(), backgroundTasks);
+    controller.ensureTaskWidget(context);
+    const widget = getWidgetFactory()?.({ requestRender: () => {} }, undefined) as {
+      render: (width: number) => string[];
+    };
+    const lines = widget.render(100);
+    const joined = lines.join("\n");
+    assert.match(joined, /general/, "task row still renders");
+    assert.doesNotMatch(joined, /render error/, "no render-error fallback line");
+    controller.dispose();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

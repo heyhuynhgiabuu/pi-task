@@ -107,3 +107,74 @@ async function eventually(assertion: () => void): Promise<void> {
     rmSync(root, { recursive: true, force: true });
   }
 }
+
+{
+  const t = "sync throw from run() routes through onFailed without escaping";
+  const root = mkdtempSync(join(tmpdir(), "pi-task-sdk-bg-sync-throw-"));
+  try {
+    const piDir = join(root, ".pi");
+    mkdirSync(piDir, { recursive: true });
+    let failed = false;
+    let settled = false;
+    startSdkBackgroundTask({
+      id: "m123abc-sync0",
+      agentType: "general",
+      description: "Do work",
+      sessionName: "task-m123abc-sync0",
+      startedAt: 100,
+      piDir,
+      artifactsDir: piDir,
+      now: () => 200,
+      run: (() => {
+        throw new Error("sync boom");
+      }) as unknown as () => Promise<{ output: string }>,
+      onFailed: () => {
+        failed = true;
+      },
+      onSettled: () => {
+        settled = true;
+      },
+    });
+    await eventually(() => {
+      assert.equal(failed, true, t + ": onFailed called for sync throw");
+      assert.equal(settled, true, t + ": onSettled called for sync throw");
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const t = "throwing onSettled and history writes never become unhandled rejections";
+  const root = mkdtempSync(join(tmpdir(), "pi-task-sdk-bg-settled-throw-"));
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => unhandled.push(reason);
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const piDir = join(root, ".pi");
+    // Make durable history writes fail: history path is occupied by a directory.
+    mkdirSync(join(piDir, "task-session-history.json"), { recursive: true });
+    let settled = false;
+    startSdkBackgroundTask({
+      id: "m123abc-thr0",
+      agentType: "general",
+      description: "Do work",
+      sessionName: "task-m123abc-thr0",
+      startedAt: 100,
+      piDir,
+      artifactsDir: piDir,
+      now: () => 200,
+      run: async () => ({ output: "<status>success</status><summary>ok</summary>" }),
+      onSettled: () => {
+        settled = true;
+        throw new Error("settled boom");
+      },
+    });
+    await eventually(() => assert.equal(settled, true, t + ": onSettled ran"));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(unhandled.length, 0, `${t}: no unhandled rejections (${unhandled.map(String).join("; ")})`);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+    rmSync(root, { recursive: true, force: true });
+  }
+}

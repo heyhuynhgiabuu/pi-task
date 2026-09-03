@@ -375,26 +375,34 @@ export default function (pi: ExtensionAPI) {
     }
     return registryEntryStatus(entry);
   };
-  restoreActiveBackgroundTasks(
-    piDir,
-    backgroundTasks,
-    registryEntryAlive,
-    (entry) => {
-      if (entry.handle?.backend === "herdr") {
-        if (
-          entry.handle.foregroundProcessGroupId === undefined
-        ) {
-          throw new Error("HerdR restore cleanup requires persisted agent identity");
+  try {
+    restoreActiveBackgroundTasks(
+      piDir,
+      backgroundTasks,
+      registryEntryAlive,
+      (entry) => {
+        if (entry.handle?.backend === "herdr") {
+          if (
+            entry.handle.foregroundProcessGroupId === undefined
+          ) {
+            throw new Error("HerdR restore cleanup requires persisted agent identity");
+          }
+          syncHerdr.close(entry.handle);
+        } else {
+          const paneId = entry.handle?.backend === "tmux"
+            ? entry.handle.resourceId
+            : entry.paneId;
+          if (paneId) killAgentPaneStrict(paneId, null);
         }
-        syncHerdr.close(entry.handle);
-      } else {
-        const paneId = entry.handle?.backend === "tmux"
-          ? entry.handle.resourceId
-          : entry.paneId;
-        if (paneId) killAgentPaneStrict(paneId, null);
-      }
-    },
-  );
+      },
+    );
+  } catch (error) {
+    // Restore must never abort extension registration; durable records stay
+    // on disk and the next load retries them.
+    console.error(
+      `[pi-task] background task restore failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
 
 
   // ── Widget / timer setup ───────────────────────────────────────────────

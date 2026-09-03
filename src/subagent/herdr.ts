@@ -820,6 +820,12 @@ export function createHerdrTerminalBackend(
         const key = workspaceGroupKey(owned.socketPath, owned.workspaceGroup);
         const group = groupedWorkspaces.get(key);
         if (!group || group.workspaceId !== owned.workspaceId) {
+          // Grouped workspace after a restart (in-memory membership lost):
+          // close ONLY the pane. The workspace may still host a live sibling
+          // (compare runs both siblings in one workspace), and HerdR offers
+          // no safe way to enumerate remaining tenants — a workspace close
+          // here could kill an unrelated running task. The workspace leaks
+          // by design; HerdR reaps or the user reclaims it.
           await closeHerdrPane(run, owned.resourceId);
           return;
         }
@@ -856,6 +862,8 @@ function syncRun(args: readonly string[], socketPath: string): string {
     encoding: "utf8",
     env: { ...process.env, HERDR_SOCKET_PATH: socketPath },
     stdio: ["ignore", "pipe", "pipe"],
+    timeout: 30_000,
+    killSignal: "SIGKILL",
   });
 }
 
@@ -960,6 +968,8 @@ export function createSyncHerdrControl(
         const key = workspaceGroupKey(handle.socketPath, handle.workspaceGroup);
         const group = groupedWorkspaces.get(key);
         if (!group || group.workspaceId !== handle.workspaceId) {
+          // Grouped workspace after a restart: pane-only close, never a
+          // workspace close — a live sibling may share it (see async close).
           try {
             run(["pane", "close", handle.resourceId], handle.socketPath);
           } catch (error) {

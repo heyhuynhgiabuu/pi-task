@@ -4,7 +4,7 @@ All notable changes to `@heyhuynhgiabuu/pi-task` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.6.0] - 2026-09-03
 
 ### Added
 
@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   - Sibling task orchestration: spawns linked subagent tasks (`${id}-m0`, `${id}-m1`) with independent panes/sessions, persists comparison metadata for terminal restoration, and tracks foreground siblings in the TUI panel.
   - Side-by-side comparative report: aggregates status, duration, tool call counts, and outputs into a clean comparative table and detailed model cards while reserving space for task metadata and both model cards.
   - Restart-safe grouping: recovery rebuilds comparison groups from registry plus history, replays an undelivered grouped report into the loading session at most once (delivered groups are marked in `task-session-history.json`), and records restored completion times from the session JSONL rather than restore time.
+
+### Fixed
+
+- Error-path hardening from the live restart-rehearsal audit: background polling and the SDK background lifecycle can no longer leak unhandled rejections when durable writes fail mid-settlement; a failed registry-removal write can no longer trigger a resource re-close (herdr close is not idempotent); restore-time durable-write failures retain entries instead of aborting extension registration; backend CLI calls (tmux/herdr) are bounded by a 30s kill timeout so a wedged CLI cannot stall completion and timeout checks forever; the task widget degrades to an empty transcript instead of throwing when a session directory is unreadable.
 
 ## [0.5.3] - 2026-08-27
 

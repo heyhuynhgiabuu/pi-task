@@ -178,3 +178,49 @@ async function eventually(assertion: () => void): Promise<void> {
     rmSync(root, { recursive: true, force: true });
   }
 }
+
+{
+  const t = "a throwing onComplete must not flip a completed task to failed";
+  const root = mkdtempSync(join(tmpdir(), "pi-task-sdk-bg-oncomplete-"));
+  try {
+    const piDir = join(root, ".pi");
+    const artifactsDir = join(piDir, "artifacts");
+    mkdirSync(artifactsDir, { recursive: true });
+    let settled = false;
+    let failedCalled = false;
+    startSdkBackgroundTask({
+      id: "m123abc-def9",
+      agentType: "general",
+      description: "onComplete throws",
+      sessionName: "task-m123abc-def9-general",
+      startedAt: 100,
+      piDir,
+      artifactsDir,
+      now: () => 200,
+      run: async () => ({
+        output: "<status>success</status>\n<summary>fine</summary>",
+        sessionPath: null,
+      }),
+      onComplete: () => {
+        throw new Error("panel boom");
+      },
+      onFailed: () => {
+        failedCalled = true;
+      },
+      onSettled: () => {
+        settled = true;
+      },
+    });
+    await eventually(() => {
+      assert.equal(settled, true, t + ": lifecycle settled");
+      const history = JSON.parse(
+        readFileSync(join(piDir, "task-session-history.json"), "utf-8"),
+      ) as Array<{ id: string; status: string }>;
+      const entry = history.find((e) => e.id === "m123abc-def9");
+      assert.equal(entry?.status, "done", t + ": task stays done");
+      assert.equal(failedCalled, false, t + ": onFailed never runs");
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}

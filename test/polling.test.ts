@@ -24,7 +24,6 @@ function makeDeps(
     completeTask: any;
     backgroundTasks: Map<any, any>;
     checkTaskCompletion: any;
-    killAgentPane: any;
     clearTaskWidgetIfIdle: any;
     TASK_TIMEOUT_MS: number;
     MAX_POLL_ERRORS: number;
@@ -35,7 +34,6 @@ function makeDeps(
   return {
     backgroundTasks: new Map(),
     checkTaskCompletion: async () => ({ status: "running" }),
-    killAgentPane: () => {},
     clearTaskWidgetIfIdle: () => {},
     completeTask: () => {},
     TASK_TIMEOUT_MS: 10_000,
@@ -352,4 +350,50 @@ console.log("ALL POLLING TESTS PASSED");
   } finally {
     process.off("unhandledRejection", onUnhandled);
   }
+}
+
+{
+  const t = "a throwing onTaskFinished retires the settled task instead of leaving a zombie";
+  const backgroundTasks = new Map<string, any>();
+  backgroundTasks.set("t-zombie", {
+    dir: "/tmp/pi-task-zombie",
+    sessionName: "task-t-zombie",
+    agentType: "general",
+    description: "zombie check",
+    startedAt: Date.now() - 1000,
+    paneId: "%9",
+    backend: "tmux",
+    recentCalls: [],
+  });
+  let completeCalls = 0;
+  let finishedCalls = 0;
+  const stop = startBackgroundPolling(
+    makeDeps({
+      backgroundTasks,
+      checkTaskCompletion: async () => ({
+        status: "completed",
+        content: "<task_result><summary>done</summary></task_result>",
+      }),
+      completeTask: () => {
+        completeCalls += 1;
+      },
+      onTaskFinished: () => {
+        finishedCalls += 1;
+        throw new Error("panel boom");
+      },
+    }),
+    10,
+  );
+  try {
+    await sleep(80);
+  } finally {
+    stop();
+  }
+  assert.ok(finishedCalls >= 1, t + ": the notification threw");
+  assert.equal(completeCalls, 1, t + ": settlement ran exactly once");
+  assert.equal(
+    backgroundTasks.has("t-zombie"),
+    false,
+    t + ": settled task was retired despite the throwing callback",
+  );
 }

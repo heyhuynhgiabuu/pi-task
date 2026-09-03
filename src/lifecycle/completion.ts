@@ -76,6 +76,35 @@ export function completeTask(
     task.agentType,
   )?.sessionRef;
 
+  const entries = readRegistry(piDir).filter((entry) => entry.id !== id);
+  const cleanupEntry: RegistryEntry = {
+    id,
+    agentType: task.agentType,
+    description: task.description,
+    sessionName: task.sessionName,
+    startedAt: task.startedAt,
+    handle: task.handle,
+    paneId: task.paneId,
+    piDir,
+    dir: task.dir,
+    cwd: task.cwd,
+    conversationId: task.conversationId,
+    sessionRef: completedSessionRef,
+    cleanupPending: true,
+    cleanupPhase: phase,
+    comparisonGroupId: task.comparisonGroupId,
+    comparisonModel: task.comparisonModel,
+    comparisonDescription: task.comparisonDescription,
+    comparisonIndex: task.comparisonIndex,
+    comparisonDelivered: task.comparisonDelivered,
+  };
+  // Keep a terminal cleanup receipt durable across a crash between the
+  // state write and backend close. Restore retries it and removes it only
+  // after close succeeds. This write runs BEFORE the history upsert: if the
+  // registry is unreadable, no terminal phase is recorded at all, so a
+  // poll-error retry can never rewrite a recorded done/timeout as failed.
+  writeRegistryFn(piDir, [...entries, cleanupEntry]);
+
   upsertTaskSessionHistory(piDir, {
     id,
     agentType: task.agentType,
@@ -101,33 +130,6 @@ export function completeTask(
     comparisonIndex: task.comparisonIndex,
     comparisonDelivered: task.comparisonDelivered,
   });
-
-  const entries = readRegistry(piDir).filter((entry) => entry.id !== id);
-  const cleanupEntry: RegistryEntry = {
-    id,
-    agentType: task.agentType,
-    description: task.description,
-    sessionName: task.sessionName,
-    startedAt: task.startedAt,
-    handle: task.handle,
-    paneId: task.paneId,
-    piDir,
-    dir: task.dir,
-    cwd: task.cwd,
-    conversationId: task.conversationId,
-    sessionRef: completedSessionRef,
-    cleanupPending: true,
-    cleanupPhase: phase,
-    comparisonGroupId: task.comparisonGroupId,
-    comparisonModel: task.comparisonModel,
-    comparisonDescription: task.comparisonDescription,
-    comparisonIndex: task.comparisonIndex,
-    comparisonDelivered: task.comparisonDelivered,
-  };
-  // Keep a terminal cleanup receipt durable across a crash between the
-  // state write and backend close. Restore retries it and removes it only
-  // after close succeeds.
-  writeRegistryFn(piDir, [...entries, cleanupEntry]);
 
   let cleanupSucceeded = true;
   try {

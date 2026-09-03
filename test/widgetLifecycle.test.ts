@@ -77,3 +77,68 @@ test("hostile session dirs degrade to an empty transcript instead of a render er
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("transcript view sig/read survive a hostile session dir", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-widget-pane-"));
+  try {
+    // `dir` is a FILE, so transcriptSig/readTaskTranscript underneath throw.
+    const hostileDir = join(root, "not-a-dir");
+    writeFileSync(hostileDir, "x");
+    const backgroundTasks = new Map<string, any>();
+    backgroundTasks.set("t-hostile", {
+      dir: hostileDir,
+      sessionName: "task-t-hostile",
+      agentType: "general",
+      description: "hostile dir",
+      startedAt: Date.now(),
+      toolUses: 0,
+      turns: 0,
+      recentCalls: [],
+      backend: "tmux",
+    });
+
+    const widgets = new Map<string, any>();
+    let editorFactory: ((tui: any, theme: any, kb: any) => any) | undefined;
+    const context = {
+      mode: "tui",
+      hasUI: true,
+      cwd: root,
+      ui: {
+        setWidget(name: string, value: unknown) {
+          widgets.set(name, value);
+        },
+        getEditorComponent() {
+          return undefined;
+        },
+        setEditorComponent(factory: any) {
+          editorFactory = factory;
+        },
+        notify() {},
+      },
+    } as any;
+
+    const controller = createTaskWidgetController(new Map(), backgroundTasks);
+    controller.ensureTaskWidget(context);
+    assert.ok(editorFactory, "editor factory installed");
+
+    // Construct the panel editor (Editor's constructor only stores these) and
+    // reach the host to open the transcript view the way Enter on a row does.
+    const fakeTui = { terminal: { rows: 40 } };
+    const editor = editorFactory!(fakeTui, { borderColor: "#000" }, {});
+    const host = (editor as unknown as { host: { onEnter(id: string | null): void } })
+      .host;
+    host.onEnter("t-hostile");
+
+    const paneFactory = widgets.get("task-transcript");
+    assert.ok(typeof paneFactory === "function", "transcript pane registered");
+    const pane = paneFactory(
+      fakeTui,
+      { fg: (_style: string, text: string) => text },
+    );
+    const lines = pane.render(80);
+    assert.ok(Array.isArray(lines), "pane renders without throwing");
+    controller.dispose();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

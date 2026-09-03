@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -462,4 +462,40 @@ test("a failed registry-removal write never causes a resource re-close on retry"
     failRemovalWrite as never,
   );
   assert.equal(closeCount, 1, "resource closed exactly once");
+});
+
+test("a broken registry blocks terminal history writes so phases cannot flap", () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-completion-regflap-"));
+  const task: BackgroundTask = {
+    dir: join(piDir, "artifacts", "tasks", "task-flap"),
+    agentType: "general",
+    sessionName: "task-task-flap",
+    originalPane: null,
+    description: "registry flap",
+    startedAt: Date.now() - 1000,
+    toolUses: 0,
+    turns: 0,
+  };
+  // Occupy the registry path with a directory: every registry write fails.
+  mkdirSync(join(piDir, "task-registry.json"), { recursive: true });
+  const pi = { sendMessage: () => {} };
+
+  assert.throws(() =>
+    completeTask(
+      pi as never,
+      "task-flap",
+      task,
+      "<task_result><summary>done</summary></task_result>",
+      "done",
+      piDir,
+    ),
+  );
+
+  // No terminal record may exist when the registry is unreadable: otherwise a
+  // poll-error fallback would rewrite done -> failed on every retry tick.
+  assert.equal(
+    readTaskSessionHistory(piDir).some((entry) => entry.id === "task-flap"),
+    false,
+    "no durable terminal phase while the registry is broken",
+  );
 });

@@ -482,9 +482,6 @@ export default function (pi: ExtensionAPI) {
         : task.paneId
           ? paneExists(task.paneId)
           : false,
-      killAgentPane: (paneId, originalPane) => {
-        if (paneId) killAgentPane(paneId, originalPane);
-      },
       clearTaskWidgetIfIdle,
       completeTask,
       onComparisonSettled: comparisonSettledHandler,

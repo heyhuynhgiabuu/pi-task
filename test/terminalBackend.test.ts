@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  CLI_TIMEOUT_MS,
   createDefaultCommandRunner,
   createTmuxTerminalBackend,
 } from "../src/subagent/terminalBackend.js";
@@ -119,4 +120,10 @@ test("default command runner applies a kill timeout so a wedged CLI cannot stall
   assert.ok(elapsed < 2_000, `${t}: timeout fired promptly (took ${elapsed}ms)`);
   const result = await runner.run("echo", ["hello"]);
   assert.equal(result.stdout.trim(), "hello", t + ": normal commands still resolve");
+});
+
+test("CLI_TIMEOUT_MS pins the default kill bound at 30 seconds", () => {
+  // The hung-command test above only exercises the timeoutMs override; this
+  // pins the default value the polling latch relies on.
+  assert.equal(CLI_TIMEOUT_MS, 30_000);
 });

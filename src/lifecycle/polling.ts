@@ -18,7 +18,6 @@ export interface BackgroundPollingDeps {
       }) => Promise<TaskCompletionSnapshot>;
       resourceExists?: (task: BackgroundTask) => boolean | Promise<boolean>;
       closeTask?: (task: BackgroundTask) => void | Promise<void>;
-      killAgentPane: (paneId: string, originalPane: string | null) => void;
   clearTaskWidgetIfIdle: () => void;
   completeTask: typeof completeTask;
   onComparisonSettled?: ComparisonSettledHook;
@@ -59,12 +58,23 @@ export function startBackgroundPolling(
       deps.deliveryGuard ? () => deps.deliveryGuard!(id) : undefined,
       deps.onComparisonSettled,
     );
-    deps.onTaskFinished?.(id, task);
+    // Settlement is durable from here: retirement must be unconditional. A
+    // throwing notification callback must not leave the task in the map —
+    // a retried completeTask is an idempotent no-op, so the zombie could
+    // never be recovered.
+    try {
+      deps.onTaskFinished?.(id, task);
+    } catch {
+      // Panel notification is best-effort.
+    }
     deps.backgroundTasks.delete(id);
-    deps.clearTaskWidgetIfIdle();
+    try {
+      deps.clearTaskWidgetIfIdle();
+    } catch {
+      // Widget refresh is best-effort.
+    }
     pollErrors.delete(id);
   };
-
   const tick = async () => {
     if (stopped || inFlight) return;
     inFlight = true;

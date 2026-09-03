@@ -96,7 +96,12 @@ export function restoreActiveBackgroundTasks(
           comparisonModel: entry.comparisonModel,
           comparisonDescription: entry.comparisonDescription,
           comparisonIndex: entry.comparisonIndex,
-          comparisonDelivered: entry.comparisonDelivered,
+          // Forward the delivered marker only when the receipt truly has it:
+          // upsert spread-merges, so an explicit undefined would clobber a
+          // true marker recorded before the registry-removal write failed.
+          ...(entry.comparisonDelivered === true
+            ? { comparisonDelivered: true }
+            : {}),
         });
         staleIds.push(entry.id);
       } catch {

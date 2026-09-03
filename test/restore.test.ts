@@ -410,6 +410,8 @@ it("synthesizes the terminal history record for a receipt that lost its history 
     cleanupPending: true,
     cleanupPhase: "done",
     comparisonGroupId: "grp-1",
+    comparisonModel: "zai/glm-5.3",
+    comparisonDescription: "receipt sibling",
     comparisonIndex: 0,
   }]);
 
@@ -422,8 +424,51 @@ it("synthesizes the terminal history record for a receipt that lost its history 
   const entry = history.find((e) => e.id === "task-receipt-only");
   assert.ok(entry, "terminal history record was synthesized");
   assert.equal(entry.status, "done", "phase comes from cleanupPhase");
+  assert.equal(entry.comparisonGroupId, "grp-1", "comparison group copied");
+  assert.equal(entry.comparisonModel, "zai/glm-5.3", "comparison model copied");
   assert.ok(typeof entry.completedAt === "number", "completedAt recorded");
   assert.deepEqual(readJson<unknown[]>(join(piDir, "task-registry.json")), []);
+});
+
+it("receipt synthesis never clobbers an already-delivered comparison marker", () => {
+  // A delivered group is marked comparisonDelivered: true in history; if the
+  // registry-removal write then failed, the receipt still sits in the
+  // registry WITHOUT the marker. Synthesizing naively would clobber true back
+  // to undefined and let a restart replay the grouped report.
+  const piDir = makePiDir();
+  const taskDir = join(piDir, "artifacts", "sessions", "task-delivered");
+  mkdirSync(taskDir, { recursive: true });
+  writeJson(join(piDir, "task-registry.json"), [{
+    id: "task-delivered",
+    dir: taskDir,
+    sessionName: "task-task-delivered",
+    startedAt: Date.now() - 1000,
+    paneId: "%delivered",
+    agentType: "scout",
+    description: "delivered receipt",
+    cleanupPending: true,
+    cleanupPhase: "done",
+    comparisonGroupId: "grp-2",
+  }]);
+  writeJson(join(piDir, "task-session-history.json"), [{
+    id: "task-delivered",
+    status: "done",
+    background: true,
+    comparisonGroupId: "grp-2",
+    comparisonDelivered: true,
+  }]);
+
+  restoreActiveBackgroundTasks(piDir, new Map(), () => true, () => {});
+
+  const history = readJson<Array<{ id: string; comparisonDelivered?: boolean }>>(
+    join(piDir, "task-session-history.json"),
+  );
+  const entry = history.find((e) => e.id === "task-delivered");
+  assert.equal(
+    entry.comparisonDelivered,
+    true,
+    "delivered marker survives receipt synthesis",
+  );
 });
 
 it("preserves terminal cleanup receipts when retry still fails", () => {

@@ -36,7 +36,9 @@ import {
   findJsonlSessionByName,
   normalizeConversationId,
   findTaskSessionHistory,
+  markComparisonGroupDelivered,
   readRegistry,
+  readTaskSessionHistory,
   readTaskSessionsRegistry,
   upsertTaskSessionHistory,
   writeRegistry,
@@ -57,9 +59,18 @@ import {
   taskResultContentText,
   completionDeliveryOptions,
   formatBackgroundReceipt,
+  formatComparisonReport,
+  isTaskCompareAllowed,
   parseResultXml,
+  resolveCompareModels,
   shellQuote,
+  type ComparisonRunResult,
+  type ParsedResult,
 } from "./helpers.js";
+import {
+  ComparisonCoordinator,
+  persistComparisonTaskHistory,
+} from "./comparison.js";
 import {
   completeTask,
   createTaskWidgetController,
@@ -68,6 +79,7 @@ import {
   startToolStatsPolling,
 } from "./lifecycle/index.js";
 import { DeliveryGuard, sessionViewOf } from "./panel/delivery.js";
+import { getLastAssistantTextFromSessionDir } from "./session-text.js";
 import { formatSdkBackgroundReceipt, startSdkBackgroundTask } from "./subagent/sdkBackground.js";
 import { runSdkSubagent } from "./subagent/runSdk.js";
 import { resolveAgentSkillPaths } from "./subagent/skills.js";
@@ -100,6 +112,7 @@ import {
 import type {
   BackgroundTask,
   RegistryEntry,
+  TaskSessionHistoryEntry,
   TerminalHandle,
 } from "./types.js";
 import { ignoreStaleExtensionCtx } from "./stale-ctx.js";
@@ -122,6 +135,158 @@ const BUNDLED_AGENT_DIR = join(
   "agents",
 );
 // Conversation helpers live in ./conversation.js.
+
+function comparisonRunFromHistory(
+  entry: TaskSessionHistoryEntry,
+): ComparisonRunResult | undefined {
+  if (entry.status === "running" || !entry.comparisonModel) return undefined;
+
+  const sessionDir = entry.sessionRef
+    ? dirname(entry.sessionRef)
+    : join(entry.dir, "sessions", entry.id);
+  let output = "";
+  try {
+    output = getLastAssistantTextFromSessionDir(
+      sessionDir,
+      entry.sessionName,
+      entry.startedAt,
+    );
+  } catch {
+    // The durable history record still provides a terminal status if the
+    // session file is temporarily unavailable during restoration.
+  }
+
+  const parsed = parseResultXml(output);
+  const assessment = assessTaskResult(parsed);
+  const completedNormally = entry.status === "done";
+  const { toolUses } = countToolUses(sessionDir, entry.sessionName);
+  return {
+    model: entry.comparisonModel,
+    taskId: entry.id,
+    status: completedNormally
+      ? entry.reportedStatus ?? assessment.reportedStatus
+      : "failure",
+    rawStatus: entry.rawStatus ?? (completedNormally ? assessment.rawStatus : entry.status),
+    summary: parsed.summary,
+    findings: parsed.findings,
+    evidence: parsed.evidence,
+    files: parsed.files,
+    caveats: parsed.caveats,
+    nextSteps: parsed.next_steps,
+    toolUses,
+    durationMs: Math.max(0, (entry.completedAt ?? entry.startedAt) - entry.startedAt),
+    sessionPath: entry.sessionRef,
+    error: completedNormally ? undefined : parsed.summary || `Task ${entry.status}`,
+  };
+}
+
+interface RestoredComparisonRecord {
+  id: string;
+  groupId: string;
+  agentType: string;
+  description: string;
+  model: string;
+  index?: 0 | 1;
+  task?: BackgroundTask;
+  history?: TaskSessionHistoryEntry;
+}
+
+export function restoreComparisonGroups(
+  piDir: string,
+  backgroundTasks: Map<string, BackgroundTask>,
+  coordinator: ComparisonCoordinator,
+): ComparisonRunResult[] {
+  const byGroup = new Map<string, Map<string, RestoredComparisonRecord>>();
+  const add = (record: RestoredComparisonRecord): void => {
+    const siblings = byGroup.get(record.groupId) ?? new Map();
+    const existing = siblings.get(record.id);
+    if (existing) {
+      existing.task ??= record.task;
+      existing.history ??= record.history;
+    } else {
+      siblings.set(record.id, record);
+    }
+    byGroup.set(record.groupId, siblings);
+  };
+
+  for (const [id, task] of backgroundTasks) {
+    if (!task.comparisonGroupId || !task.comparisonModel) continue;
+    add({
+      id,
+      groupId: task.comparisonGroupId,
+      agentType: task.agentType,
+      description: task.comparisonDescription ?? task.description,
+      model: task.comparisonModel,
+      index: task.comparisonIndex,
+      task,
+    });
+  }
+
+  for (const history of readTaskSessionHistory(piDir)) {
+    const backend = history.handle?.backend ?? history.backend;
+    const terminal = backend === "tmux" || backend === "herdr" || Boolean(history.paneId);
+    if (
+      !history.background ||
+      !terminal ||
+      !history.comparisonGroupId ||
+      !history.comparisonModel ||
+      (history.status === "running" && !backgroundTasks.has(history.id))
+    ) {
+      continue;
+    }
+    add({
+      id: history.id,
+      groupId: history.comparisonGroupId,
+      agentType: history.agentType,
+      description: history.comparisonDescription ?? history.description,
+      model: history.comparisonModel,
+      index: history.comparisonIndex,
+      history,
+    });
+  }
+
+  const pendingRuns: ComparisonRunResult[] = [];
+  for (const [groupId, siblings] of byGroup) {
+    if (siblings.size !== 2) continue;
+    const ordered = [...siblings.values()].sort(
+      (a, b) =>
+        (a.index ?? Number.MAX_SAFE_INTEGER) -
+          (b.index ?? Number.MAX_SAFE_INTEGER) ||
+        a.id.localeCompare(b.id),
+    );
+    const first = ordered[0];
+    const second = ordered[1];
+    if (!first || !second) continue;
+
+    const histories = ordered.map((record) => record.history);
+    if (
+      histories.every(
+        (history) =>
+          history &&
+          history.status !== "running" &&
+          history.comparisonDelivered === true,
+      )
+    ) {
+      continue;
+    }
+
+    coordinator.registerGroup(
+      groupId,
+      groupId,
+      first.agentType,
+      first.description,
+      [first.id, second.id],
+      [first.model, second.model],
+    );
+
+    for (const record of ordered) {
+      if (!record.history || record.history.comparisonDelivered === true) continue;
+      const run = comparisonRunFromHistory(record.history);
+      if (run) pendingRuns.push(run);
+    }
+  }
+  return pendingRuns;
+}
 
 // ─── Extension Entry Point ──────────────────────────────────────────────────
 
@@ -243,6 +408,63 @@ export default function (pi: ExtensionAPI) {
 
   // ── Polling loop (background task completion, pane death, timeout) ──────
 
+  const comparisonCoordinator = new ComparisonCoordinator();
+  const restoredComparisonRuns = restoreComparisonGroups(
+    piDir,
+    backgroundTasks,
+    comparisonCoordinator,
+  );
+
+  const comparisonSettledHandler = (
+    id: string,
+    task: BackgroundTask,
+    parsed: ParsedResult,
+    phase: "done" | "cancelled" | "timeout" | "failed",
+  ) => {
+    if (!task.comparisonGroupId) return false;
+    const assessment = assessTaskResult(parsed);
+    const runResult: ComparisonRunResult = {
+      model: task.comparisonModel || task.agentType,
+      taskId: id,
+      status: phase === "done" ? assessment.reportedStatus : "failure",
+      rawStatus: phase === "done" ? assessment.rawStatus : phase,
+      summary: parsed.summary,
+      findings: parsed.findings,
+      evidence: parsed.evidence,
+      files: parsed.files,
+      caveats: parsed.caveats,
+      nextSteps: parsed.next_steps,
+      toolUses: task.toolUses,
+      durationMs: Date.now() - task.startedAt,
+    };
+    const ctx = taskWidget.getContext();
+    const allowed = ctx ? deliveryGuard.allows(sessionViewOf(ctx), id) : true;
+    return comparisonCoordinator.recordTaskSettled(
+      id,
+      runResult,
+      pi,
+      allowed,
+      (taskIds) => markComparisonGroupDelivered(piDir, taskIds),
+    );
+  };
+
+  for (const run of restoredComparisonRuns) {
+    // Load-time replay is best-effort: a non-stale send failure must not abort
+    // extension registration. The delivered marker stays unset, so the group
+    // is recovered and retried on the next extension load.
+    try {
+      comparisonCoordinator.recordTaskSettled(
+        run.taskId,
+        run,
+        pi,
+        true,
+        (taskIds) => markComparisonGroupDelivered(piDir, taskIds),
+      );
+    } catch {
+      // Retry on next restart via durable history.
+    }
+  }
+
   const stopBackgroundPolling = startBackgroundPolling(
     {
       backgroundTasks,
@@ -257,6 +479,7 @@ export default function (pi: ExtensionAPI) {
       },
       clearTaskWidgetIfIdle,
       completeTask,
+      onComparisonSettled: comparisonSettledHandler,
       onTaskFinished: (id, task) => taskWidget.noteTaskFinished(id, task),
       deliveryGuard: (id) => {
         const ctx = taskWidget.getContext();
@@ -277,6 +500,8 @@ export default function (pi: ExtensionAPI) {
       backgroundTasks,
       registryEntryStatus: registryEntryCancellationStatus,
       clearTaskWidgetIfIdle,
+      completeTask,
+      onComparisonSettled: comparisonSettledHandler,
       noteTaskFinished: (id, task) => taskWidget.noteTaskFinished(id, task),
     });
 
@@ -366,6 +591,55 @@ export default function (pi: ExtensionAPI) {
       // ── Resolve task identity: new, task resume, or conversation resume ──
       const conversationId = normalizeConversationId(taskParams.conversation_id);
       const taskId = normalizeConversationId(taskParams.task_id);
+
+      if (taskParams.compare) {
+        if (taskId || conversationId) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: "Comparison mode (compare: true) does not support task_id or conversation_id resume in V1.",
+              },
+            ],
+            details: {
+              phase: "failed" as const,
+              error: "resume_unsupported_for_compare",
+            },
+            isError: true,
+          };
+        }
+        const compareEffectiveTools = buildAgentToolSelection({
+          tools: agent.tools,
+          disallowedTools: agent.disallowedTools,
+          parentToolNames,
+          taskToolName,
+        }).tools;
+        const compareAllowed = isTaskCompareAllowed(agent, compareEffectiveTools);
+        if (!compareAllowed.allowed) {
+          return {
+            content: [{ type: "text" as const, text: compareAllowed.reason }],
+            details: {
+              phase: "failed" as const,
+              error: "compare_disallowed_for_agent",
+              reason: compareAllowed.reason,
+            },
+            isError: true,
+          };
+        }
+        const modelResolution = resolveCompareModels(agent);
+        if (!modelResolution.ok) {
+          return {
+            content: [{ type: "text" as const, text: modelResolution.reason }],
+            details: {
+              phase: "failed" as const,
+              error: "insufficient_models_for_compare",
+              reason: modelResolution.reason,
+            },
+            isError: true,
+          };
+        }
+      }
+
       const admissionKey = conversationId
         ? `${piDir}\u0000conversation:${conversationId}`
         : taskId
@@ -769,6 +1043,672 @@ export default function (pi: ExtensionAPI) {
         };
       }
       const effectiveFast = resolveTaskFastMode(taskParams.fast, agent.fast);
+
+      if (taskParams.compare) {
+        const compareModels = resolveCompareModels(agent);
+        if (!compareModels.ok) {
+          return {
+            content: [{ type: "text" as const, text: compareModels.reason }],
+            details: { phase: "failed" as const, error: "insufficient_models_for_compare" },
+            isError: true,
+          };
+        }
+        const [modelA, modelB] = compareModels.models;
+        const baseId = `${Date.now().toString(36)}-${randomUUID().slice(0, 4)}`;
+        const groupId = `compare-${baseId}`;
+        const id0 = `${baseId}-m0`;
+        const id1 = `${baseId}-m1`;
+        const sessionName0 = `task-${id0}`;
+        const sessionName1 = `task-${id1}`;
+        const sessionDir0 = join(artifactsDir, "sessions", id0);
+        const sessionDir1 = join(artifactsDir, "sessions", id1);
+        await mkdir(sessionDir0, { recursive: true });
+        await mkdir(sessionDir1, { recursive: true });
+
+        const specA = agent.modelSpecs?.find((s) => s.model === modelA);
+        const specB = agent.modelSpecs?.find((s) => s.model === modelB);
+
+        const siblings = [
+          {
+            id: id0,
+            index: 0 as const,
+            model: modelA,
+            agent: { ...agent, model: modelA, thinking: specA?.thinking ?? agent.thinking },
+            desc: descText ? `${descText} [${modelA}]` : `[${modelA}]`,
+            sessionName: sessionName0,
+            sessionDir: sessionDir0,
+          },
+          {
+            id: id1,
+            index: 1 as const,
+            model: modelB,
+            agent: { ...agent, model: modelB, thinking: specB?.thinking ?? agent.thinking },
+            desc: descText ? `${descText} [${modelB}]` : `[${modelB}]`,
+            sessionName: sessionName1,
+            sessionDir: sessionDir1,
+          },
+        ] as const;
+
+        const toolSelection = buildAgentToolSelection({
+          tools: agent.tools,
+          disallowedTools: agent.disallowedTools,
+          parentToolNames,
+          taskToolName,
+        });
+
+        if (selectedBackend === "sdk") {
+          if (!isBackground) {
+            const fgTasks = siblings.map((s) => {
+              const fg: BackgroundTask = {
+                dir: artifactsDir,
+                cwd: taskCwd,
+                agentType: agent.name,
+                sessionName: s.sessionName,
+                backend: "sdk",
+                originalPane: null,
+                description: s.desc,
+                startedAt: Date.now(),
+                toolUses: 0,
+                turns: 0,
+                recentCalls: [],
+                comparisonGroupId: groupId,
+                comparisonModel: s.model,
+                comparisonDescription: descText,
+                comparisonIndex: s.index,
+              };
+              foregroundTasks.set(s.id, fg);
+              return fg;
+            });
+            ignoreStaleExtensionCtx(() => ensureTaskWidget(ctx));
+
+            try {
+              for (let i = 0; i < siblings.length; i++) {
+                persistComparisonTaskHistory(piDir, {
+                  id: siblings[i]!.id,
+                  task: fgTasks[i]!,
+                  status: "running",
+                  background: false,
+                });
+              }
+              const runs = (await Promise.all(
+                siblings.map(async (s, i) => {
+                  const fg = fgTasks[i]!;
+                  try {
+                    const res = await runSdkSubagent({
+                      onSession: (session) => subscribeToolEvents(session, fg, 10, taskWidget.requestRender),
+                      prompt: promptContent,
+                      agent: s.agent,
+                      cwd: taskCwd,
+                      ctx,
+                      model: s.model,
+                      thinkingLevel: s.agent.thinking,
+                      tools: toolSelection.tools,
+                      excludeTools: toolSelection.excludeTools,
+                      systemPrompt: agent.body,
+                      skillPaths,
+                      fast: effectiveFast,
+                    });
+                    const parsed = parseResultXml(res.output);
+                    const assess = assessTaskResult(parsed);
+                    const run = {
+                      model: s.model,
+                      taskId: s.id,
+                      status: assess.reportedStatus,
+                      rawStatus: assess.rawStatus,
+                      summary: parsed.summary,
+                      findings: parsed.findings,
+                      evidence: parsed.evidence,
+                      files: parsed.files,
+                      caveats: parsed.caveats,
+                      nextSteps: parsed.next_steps,
+                      toolUses: fg.toolUses,
+                      durationMs: Date.now() - fg.startedAt,
+                      sessionPath: res.sessionPath ?? undefined,
+                    } satisfies ComparisonRunResult;
+                    persistComparisonTaskHistory(piDir, {
+                      id: s.id,
+                      task: fg,
+                      status: "done",
+                      background: false,
+                      sessionRef: run.sessionPath,
+                      reportedStatus: assess.reportedStatus,
+                      rawStatus: assess.rawStatus,
+                      resultValid: assess.valid,
+                      completedAt: Date.now(),
+                    });
+                    return run;
+                  } catch (err) {
+                    const error = err instanceof Error ? err.message : String(err);
+                    const run = {
+                      model: s.model,
+                      taskId: s.id,
+                      status: "failure",
+                      rawStatus: "failed",
+                      summary: "",
+                      findings: "",
+                      evidence: "",
+                      files: "",
+                      caveats: "",
+                      nextSteps: "",
+                      toolUses: fg.toolUses,
+                      durationMs: Date.now() - fg.startedAt,
+                      error,
+                    } satisfies ComparisonRunResult;
+                    persistComparisonTaskHistory(piDir, {
+                      id: s.id,
+                      task: fg,
+                      status: "failed",
+                      background: false,
+                      reportedStatus: "failure",
+                      rawStatus: "failed",
+                      resultValid: false,
+                      completedAt: Date.now(),
+                    });
+                    return run;
+                  }
+                }),
+              )) as [ComparisonRunResult, ComparisonRunResult];
+
+              const report = formatComparisonReport({
+                agentType: agent.name,
+                description: descText,
+                runs,
+              });
+
+              return {
+                content: [{ type: "text" as const, text: report }],
+                details: {
+                  phase: "done" as const,
+                  compare: true,
+                  agent_type: agent.name,
+                  description: descText,
+                  models: [modelA, modelB],
+                  runs,
+                },
+              };
+            } finally {
+              for (const s of siblings) foregroundTasks.delete(s.id);
+              clearTaskWidgetIfIdle();
+            }
+          }
+
+          // SDK Background
+          comparisonCoordinator.registerGroup(
+            groupId,
+            baseId,
+            agent.name,
+            descText,
+            [id0, id1],
+            [modelA, modelB],
+          );
+
+          for (const s of siblings) {
+            const bg: BackgroundTask = {
+              dir: artifactsDir,
+              cwd: taskCwd,
+              agentType: agent.name,
+              sessionName: s.sessionName,
+              backend: "sdk",
+              originalPane: null,
+              description: s.desc,
+              startedAt: Date.now(),
+              toolUses: 0,
+              turns: 0,
+              recentCalls: [],
+              comparisonGroupId: groupId,
+              comparisonModel: s.model,
+              comparisonDescription: descText,
+              comparisonIndex: s.index,
+            };
+            backgroundTasks.set(s.id, bg);
+            deliveryGuard.track(s.id, sessionViewOf(ctx));
+
+            startSdkBackgroundTask({
+              id: s.id,
+              agentType: agent.name,
+              description: s.desc,
+              sessionName: s.sessionName,
+              startedAt: bg.startedAt,
+              piDir,
+              artifactsDir,
+              cwd: taskCwd,
+              comparisonGroupId: groupId,
+              comparisonModel: s.model,
+              comparisonDescription: descText,
+              comparisonIndex: s.index,
+              run: () =>
+                runSdkSubagent({
+                  onSession: (session) => subscribeToolEvents(session, bg, 10, taskWidget.requestRender),
+                  prompt: promptContent,
+                  agent: s.agent,
+                  cwd: taskCwd,
+                  ctx,
+                  model: s.model,
+                  thinkingLevel: s.agent.thinking,
+                  tools: toolSelection.tools,
+                  excludeTools: toolSelection.excludeTools,
+                  systemPrompt: agent.body,
+                  skillPaths,
+                  fast: effectiveFast,
+                }),
+              onComplete: (result) => {
+                bg.status = "done";
+                const parsed = parseResultXml(result.output);
+                const assess = assessTaskResult(parsed);
+                comparisonCoordinator.recordTaskSettled(
+                  s.id,
+                  {
+                    model: s.model,
+                    taskId: s.id,
+                    status: assess.reportedStatus,
+                    rawStatus: assess.rawStatus,
+                    summary: parsed.summary,
+                    findings: parsed.findings,
+                    evidence: parsed.evidence,
+                    files: parsed.files,
+                    caveats: parsed.caveats,
+                    nextSteps: parsed.next_steps,
+                    toolUses: bg.toolUses,
+                    durationMs: Date.now() - bg.startedAt,
+                    sessionPath: result.sessionPath ?? undefined,
+                  },
+                  pi,
+                  deliveryGuard.allows(sessionViewOf(ctx), s.id),
+                );
+              },
+              onFailed: (error) => {
+                bg.status = "failed";
+                comparisonCoordinator.recordTaskSettled(
+                  s.id,
+                  {
+                    model: s.model,
+                    taskId: s.id,
+                    status: "failure",
+                    rawStatus: "failed",
+                    summary: "",
+                    findings: "",
+                    evidence: "",
+                    files: "",
+                    caveats: "",
+                    nextSteps: "",
+                    toolUses: bg.toolUses,
+                    durationMs: Date.now() - bg.startedAt,
+                    error: error instanceof Error ? error.message : String(error),
+                  },
+                  pi,
+                  deliveryGuard.allows(sessionViewOf(ctx), s.id),
+                );
+              },
+              onSettled: () => {
+                taskWidget.noteTaskFinished(s.id, bg);
+                backgroundTasks.delete(s.id);
+                clearTaskWidgetIfIdle();
+              },
+            });
+          }
+          ignoreStaleExtensionCtx(() => ensureTaskWidget(ctx));
+
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Dual-model evaluation started for agent "${agent.name}":
+- Model A: \`${modelA}\` (task \`${id0}\`)
+- Model B: \`${modelB}\` (task \`${id1}\`)
+
+Both subagents are running in background. Results will be compared and delivered once both complete.`,
+              },
+            ],
+            details: {
+              phase: "running" as const,
+              compare: true,
+              agent_type: agent.name,
+              description: descText,
+              models: [modelA, modelB],
+              task_ids: [id0, id1],
+            },
+          };
+        }
+
+        // Terminal backend (tmux / HerdR)
+        const terminalTasks: Array<(typeof siblings)[number] & { handle: TerminalHandle; paneId: string; originalPane: string | null; startedAt: number }> = [];
+        try {
+          for (const s of siblings) {
+            const startedAt = Date.now();
+            let promptLaunch: { systemPromptPath: string; deferTaskPrompt: boolean } | undefined;
+            if (selectedBackend === "herdr") {
+              promptLaunch = {
+                systemPromptPath: join(s.sessionDir, "agent-system-prompt.md"),
+                deferTaskPrompt: true,
+              };
+              await writeFile(promptLaunch.systemPromptPath, s.agent.body, "utf8");
+            }
+
+            const piArgs = buildPiArgs(
+              s.agent,
+              s.sessionName,
+              s.sessionDir,
+              promptContent,
+              false,
+              parentToolNames,
+              taskToolName,
+              undefined,
+              promptLaunch,
+              skillPaths,
+              effectiveFast,
+              TASK_EXTENSION_PATH,
+            );
+
+            let handle: TerminalHandle;
+            let paneId: string;
+            let originalPane: string | null;
+            if (selectedBackend === "herdr") {
+              handle = await herdrBackend.launch({
+                agentArgs: piArgs,
+                initialPrompt: promptContent,
+                cwd: taskCwd,
+                env: { PI_TASK_TOOL_DISABLED: "1" },
+                label: `${agent.name}-${s.id}`,
+                workspaceGroup: taskParams.workspace_group,
+              });
+              paneId = handle.resourceId;
+              originalPane = process.env.HERDR_PANE_ID ?? null;
+            } else {
+              const shellCommand = `PI_TASK_TOOL_DISABLED=1 pi ${piArgs.map((a) => shellQuote(a)).join(" ")}`;
+              const sessionFile = join(s.sessionDir, s.sessionName + ".jsonl");
+              const childCommand = `cd ${shellQuote(taskCwd)} && ${shellCommand}`;
+              const terminalCommand = wrapWithPaneExitWatcher(sessionFile, childCommand);
+              const splitResult = splitWindowPane(taskCwd, terminalCommand);
+              paneId = splitResult.paneId;
+              originalPane = splitResult.originalPane;
+              handle = { backend: "tmux", resourceId: paneId };
+              setPaneRemainOnExit(paneId, !isBackground);
+              if (isBackground) setPaneSelfDestruct(paneId, true);
+            }
+            terminalTasks.push({ ...s, handle, paneId, originalPane, startedAt });
+          }
+        } catch (error) {
+          for (const t of terminalTasks) {
+            try {
+              if (t.handle.backend === "herdr") await herdrBackend.close(t.handle);
+              else killAgentPane(t.paneId, t.originalPane);
+            } catch {
+              // Best effort cleanup of already created panes
+            }
+          }
+          const message = error instanceof Error ? error.message : String(error);
+          return {
+            content: [{ type: "text" as const, text: `Failed to create ${selectedBackend} execution panes for comparison: ${message}` }],
+            details: { phase: "failed" as const, error: `${selectedBackend} launch failed`, reason: message },
+            isError: true,
+          };
+        }
+
+        if (!isBackground) {
+          for (const t of terminalTasks) {
+            foregroundTasks.set(t.id, {
+              dir: artifactsDir,
+              cwd: taskCwd,
+              agentType: agent.name,
+              sessionName: t.sessionName,
+              backend: selectedBackend,
+              paneId: t.paneId,
+              handle: t.handle,
+              originalPane: t.originalPane,
+              description: t.desc,
+              startedAt: t.startedAt,
+              toolUses: 0,
+              turns: 0,
+              recentCalls: [],
+              comparisonGroupId: groupId,
+              comparisonModel: t.model,
+              comparisonDescription: descText,
+              comparisonIndex: t.index,
+            });
+          }
+          ignoreStaleExtensionCtx(() => ensureTaskWidget(ctx));
+          const stopProgress = terminalTasks.map((t) =>
+            startForegroundProgressPolling({
+              taskId: t.id,
+              sessionDir: t.sessionDir,
+              sessionName: t.sessionName,
+              agentType: agent.name,
+              description: t.desc,
+              startedAt: t.startedAt,
+              onUpdate: (update) => {
+                const progress = update.details._taskRunningProgress;
+                const foregroundTask = foregroundTasks.get(t.id);
+                if (
+                  foregroundTask &&
+                  progress &&
+                  typeof progress === "object" &&
+                  "toolUses" in progress &&
+                  typeof progress.toolUses === "number"
+                ) {
+                  foregroundTask.toolUses = progress.toolUses;
+                  taskWidget.requestRender();
+                }
+                onUpdate?.(update);
+              },
+            }),
+          );
+
+          try {
+            const runs = (await Promise.all(
+            terminalTasks.map(async (t) => {
+              upsertTaskSessionHistory(piDir, {
+                id: t.id,
+                agentType: agent.name,
+                description: t.desc,
+                sessionName: t.sessionName,
+                startedAt: t.startedAt,
+                paneId: t.paneId,
+                handle: t.handle,
+                piDir,
+                dir: artifactsDir,
+                cwd: taskCwd,
+                status: "running",
+                background: false,
+                comparisonGroupId: groupId,
+                comparisonModel: t.model,
+                comparisonDescription: descText,
+                comparisonIndex: t.index,
+              });
+
+              const completion = await waitForSessionTaskCompletion({
+                sessionDir: t.sessionDir,
+                sessionName: t.sessionName,
+                paneId: t.paneId,
+                signal,
+                timeoutMs: TASK_TIMEOUT_MS,
+                pollMs: 1000,
+                sinceMs: t.startedAt,
+                resourceExists: selectedBackend === "herdr"
+                  ? () => herdrBackend.isAlive(t.handle as Extract<TerminalHandle, { backend: "herdr" }>)
+                  : undefined,
+              });
+
+              if (t.handle.backend === "herdr") {
+                await herdrBackend.close(t.handle);
+              } else {
+                killAgentPane(t.paneId, t.originalPane);
+              }
+
+              const parsed = parseResultXml(completion.content);
+              const assess = assessTaskResult(parsed);
+              const phase = completion.status === "completed" ? "done" : completion.status === "cancelled" ? "cancelled" : "failed";
+              const completedSessionRef = findJsonlSessionByName(
+                piDir,
+                t.sessionName,
+                agent.name,
+              )?.sessionRef;
+              upsertTaskSessionHistory(piDir, {
+                id: t.id,
+                agentType: agent.name,
+                description: t.desc,
+                sessionName: t.sessionName,
+                startedAt: t.startedAt,
+                paneId: t.paneId,
+                handle: t.handle,
+                piDir,
+                dir: artifactsDir,
+                cwd: taskCwd,
+                sessionRef: completedSessionRef,
+                status: phase,
+                reportedStatus: assess.reportedStatus,
+                rawStatus: assess.rawStatus,
+                resultValid: assess.valid,
+                completedAt: Date.now(),
+                background: false,
+                comparisonGroupId: groupId,
+                comparisonModel: t.model,
+                comparisonDescription: descText,
+                comparisonIndex: t.index,
+              });
+              const { toolUses } = countToolUses(t.sessionDir, t.sessionName);
+              return {
+                model: t.model,
+                taskId: t.id,
+                status: completion.status === "completed" ? assess.reportedStatus : "failure",
+                rawStatus: completion.status === "completed" ? assess.rawStatus : completion.status,
+                summary: parsed.summary,
+                findings: parsed.findings,
+                evidence: parsed.evidence,
+                files: parsed.files,
+                caveats: parsed.caveats,
+                nextSteps: parsed.next_steps,
+                toolUses,
+                durationMs: Date.now() - t.startedAt,
+                sessionPath: completedSessionRef,
+              } satisfies ComparisonRunResult;
+            }),
+          )) as [ComparisonRunResult, ComparisonRunResult];
+
+          const report = formatComparisonReport({
+            agentType: agent.name,
+            description: descText,
+            runs,
+          });
+
+            return {
+              content: [{ type: "text" as const, text: report }],
+              details: {
+                phase: "done" as const,
+                compare: true,
+                agent_type: agent.name,
+                description: descText,
+                models: [modelA, modelB],
+                runs,
+              },
+            };
+          } finally {
+            for (const stop of stopProgress) stop();
+            for (const t of terminalTasks) foregroundTasks.delete(t.id);
+            clearTaskWidgetIfIdle();
+          }
+        }
+
+        // Terminal Background
+        comparisonCoordinator.registerGroup(
+          groupId,
+          baseId,
+          agent.name,
+          descText,
+          [id0, id1],
+          [modelA, modelB],
+        );
+
+        for (const t of terminalTasks) {
+          const bg: BackgroundTask = {
+            dir: artifactsDir,
+            cwd: taskCwd,
+            agentType: agent.name,
+            sessionName: t.sessionName,
+            backend: selectedBackend,
+            paneId: t.paneId,
+            handle: t.handle,
+            originalPane: t.originalPane,
+            description: t.desc,
+            startedAt: t.startedAt,
+            toolUses: 0,
+            turns: 0,
+            recentCalls: [],
+            comparisonGroupId: groupId,
+            comparisonModel: t.model,
+            comparisonDescription: descText,
+            comparisonIndex: t.index,
+          };
+          backgroundTasks.set(t.id, bg);
+          deliveryGuard.track(t.id, sessionViewOf(ctx));
+
+          upsertTaskSessionHistory(piDir, {
+            id: t.id,
+            agentType: agent.name,
+            description: t.desc,
+            sessionName: t.sessionName,
+            startedAt: bg.startedAt,
+            paneId: t.paneId,
+            handle: t.handle,
+            piDir,
+            dir: artifactsDir,
+            cwd: taskCwd,
+            status: "running",
+            background: true,
+            comparisonGroupId: groupId,
+            comparisonModel: t.model,
+            comparisonDescription: descText,
+            comparisonIndex: t.index,
+          });
+
+        }
+
+        const comparisonIds = new Set(terminalTasks.map((t) => t.id));
+        const existingEntries = readRegistry(piDir).filter(
+          (entry) => !comparisonIds.has(entry.id),
+        );
+        writeRegistry(piDir, [
+          ...existingEntries,
+          ...terminalTasks.map((t) => ({
+            id: t.id,
+            agentType: agent.name,
+            description: t.desc,
+            sessionName: t.sessionName,
+            startedAt: t.startedAt,
+            paneId: t.paneId,
+            handle: t.handle,
+            backend: selectedBackend,
+            piDir,
+            dir: artifactsDir,
+            cwd: taskCwd,
+            comparisonGroupId: groupId,
+            comparisonModel: t.model,
+            comparisonDescription: descText,
+            comparisonIndex: t.index,
+          })),
+        ]);
+        ignoreStaleExtensionCtx(() => ensureTaskWidget(ctx));
+
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Dual-model evaluation started for agent "${agent.name}":
+- Model A: \`${modelA}\` (task \`${id0}\`, pane \`${terminalTasks[0]!.paneId}\`)
+- Model B: \`${modelB}\` (task \`${id1}\`, pane \`${terminalTasks[1]!.paneId}\`)
+
+Both subagents are running in background. Results will be compared and delivered once both complete.`,
+            },
+          ],
+          details: {
+            phase: "running" as const,
+            compare: true,
+            agent_type: agent.name,
+            description: descText,
+            models: [modelA, modelB],
+            task_ids: [id0, id1],
+          },
+        };
+      }
       let promptLaunch:
         | { systemPromptPath: string; deferTaskPrompt: boolean }
         | undefined;

@@ -1,10 +1,11 @@
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 import {
   readRegistry,
   upsertTaskSessionHistory,
   writeRegistry,
 } from "../conversation.js";
-import { hasAgentFinished } from "../session-text.js";
+import { hasAgentFinished, getLastMessageTimestampFromSessionDir } from "../session-text.js";
 import { killAgentPane, paneExists } from "../subagent/tmux.js";
 import type { BackgroundTask, RegistryEntry } from "../types.js";
 
@@ -16,6 +17,29 @@ export function restoreActiveBackgroundTasks(
 ): void {
   const registry = readRegistry(piDir);
   const staleIds: string[] = [];
+  const restoreTask = (entry: RegistryEntry, paneId: string | undefined): void => {
+    backgroundTasks.set(entry.id, {
+      dir: entry.dir,
+      cwd: entry.cwd,
+      agentType: entry.agentType,
+      sessionName: entry.sessionName,
+      paneId,
+      handle: entry.handle,
+      backend: entry.handle?.backend ?? entry.backend ?? "tmux",
+      originalPane: null,
+      description: entry.description,
+      startedAt: entry.startedAt,
+      toolUses: 0,
+      turns: 0,
+      conversationId: entry.conversationId,
+      recentCalls: [],
+      comparisonGroupId: entry.comparisonGroupId,
+      comparisonModel: entry.comparisonModel,
+      comparisonDescription: entry.comparisonDescription,
+      comparisonIndex: entry.comparisonIndex,
+      comparisonDelivered: entry.comparisonDelivered,
+    });
+  };
 
   for (const entry of registry) {
     if (entry.cleanupPending) {
@@ -38,10 +62,12 @@ export function restoreActiveBackgroundTasks(
       continue;
     }
 
-    const sessionFinished = hasAgentFinished(
-      entry.dir,
-      entry.sessionName,
-      entry.startedAt,
+    // Production layout nests per-task sessions under dir/sessions/<id>
+    // (see startBackgroundPolling); legacy records and tests may point dir
+    // directly at the session folder, so accept both.
+    const sessionDirs = [join(entry.dir, "sessions", entry.id), entry.dir];
+    const sessionFinished = sessionDirs.some((dir) =>
+      hasAgentFinished(dir, entry.sessionName, entry.startedAt),
     );
     const paneId = entry.handle?.resourceId ?? entry.paneId;
     let paneAlive: boolean;
@@ -57,6 +83,14 @@ export function restoreActiveBackgroundTasks(
     }
 
     if (sessionFinished) {
+      // Faithful completion time from the session itself: restore can happen
+      // long after the child finished, and recovered comparison reports would
+      // otherwise inflate durations by the outage length.
+      const completedAt = sessionDirs
+        .map((dir) =>
+          getLastMessageTimestampFromSessionDir(dir, entry.sessionName, entry.startedAt),
+        )
+        .find((ts) => ts !== undefined) ?? Date.now();
       upsertTaskSessionHistory(piDir, {
         id: entry.id,
         status: "done",
@@ -65,11 +99,17 @@ export function restoreActiveBackgroundTasks(
         description: entry.description,
         sessionName: entry.sessionName,
         startedAt: entry.startedAt,
+        handle: entry.handle,
+        paneId: entry.paneId,
         piDir: entry.piDir,
         dir: entry.dir,
         cwd: entry.cwd,
-        paneId: entry.paneId,
-        completedAt: Date.now(),
+        completedAt,
+        comparisonGroupId: entry.comparisonGroupId,
+        comparisonModel: entry.comparisonModel,
+        comparisonDescription: entry.comparisonDescription,
+        comparisonIndex: entry.comparisonIndex,
+        comparisonDelivered: entry.comparisonDelivered,
       });
       let cleanupSucceeded = true;
       if (entry.handle?.backend === "herdr") {
@@ -94,6 +134,14 @@ export function restoreActiveBackgroundTasks(
       continue;
     }
 
+    // Comparison siblings whose session is still running must remain active;
+    // a sibling already finished above is recovered from durable history and
+    // fed into the coordinator during extension startup.
+    if (entry.comparisonGroupId && entry.comparisonModel) {
+      restoreTask(entry, paneId);
+      continue;
+    }
+
     if (!paneAlive) {
       let cleanupSucceeded = true;
       if (entry.handle?.backend === "herdr") {
@@ -115,32 +163,23 @@ export function restoreActiveBackgroundTasks(
         description: entry.description,
         sessionName: entry.sessionName,
         startedAt: entry.startedAt,
+        handle: entry.handle,
+        paneId: entry.paneId,
         piDir: entry.piDir,
         dir: entry.dir,
         cwd: entry.cwd,
-        paneId: entry.paneId,
         completedAt: Date.now(),
+        comparisonGroupId: entry.comparisonGroupId,
+        comparisonModel: entry.comparisonModel,
+        comparisonDescription: entry.comparisonDescription,
+        comparisonIndex: entry.comparisonIndex,
+        comparisonDelivered: entry.comparisonDelivered,
       });
       staleIds.push(entry.id);
       continue;
     }
 
-    backgroundTasks.set(entry.id, {
-      dir: entry.dir,
-      cwd: entry.cwd,
-      agentType: entry.agentType,
-      sessionName: entry.sessionName,
-        paneId,
-        handle: entry.handle,
-        backend: entry.handle?.backend ?? "tmux",
-        originalPane: null,
-      description: entry.description,
-      startedAt: entry.startedAt,
-      toolUses: 0,
-      turns: 0,
-      conversationId: entry.conversationId,
-      recentCalls: [],
-    });
+    restoreTask(entry, paneId);
   }
 
   if (staleIds.length) {

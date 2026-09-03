@@ -7,7 +7,10 @@
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, dirname, basename, resolve } from "node:path";
-import { parseToolList } from "./agent-tools.js";
+import {
+  parseToolList,
+  resolveAgentToolAllowlist,
+} from "./agent-tools.js";
 import { parseMergedDisallowedTools } from "./policy.js";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
@@ -33,13 +36,28 @@ function parseMarkdownFrontmatter(content: string): {
   const raw = normalizedContent.slice(4, end).trim();
   const body = normalizedContent.slice(end + "\n---".length).replace(/^\n/, "");
   const frontmatter: Record<string, string> = {};
+  let currentKey: string | undefined;
 
   for (const line of raw.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("- ") && currentKey) {
+      const item = trimmed.slice(2).trim();
+      if (item) {
+        frontmatter[currentKey] = frontmatter[currentKey]
+          ? `${frontmatter[currentKey]}, ${item}`
+          : item;
+      }
+      continue;
+    }
+
     const idx = line.indexOf(":");
     if (idx === -1) continue;
     const key = line.slice(0, idx).trim();
     const value = line.slice(idx + 1).trim();
-    if (key) frontmatter[key] = value;
+    if (key) {
+      frontmatter[key] = value;
+      currentKey = key;
+    }
   }
 
   return { frontmatter, body };
@@ -47,11 +65,20 @@ function parseMarkdownFrontmatter(content: string): {
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+export interface AgentModelSpec {
+  model: string;
+  thinking?: string;
+}
+
 export interface AgentConfig {
   name: string;
   description: string;
   model?: string;
+  /** Configured models from frontmatter `models:`; primary is `model ?? models[0]`. */
+  models?: string[];
   thinking?: string;
+  /** Resolved model specifications including per-model thinking levels. */
+  modelSpecs?: AgentModelSpec[];
   /** Optional Fast Mode default from frontmatter `fast:`. */
   fast?: boolean;
   /** Skill names from frontmatter `skills:`; resolved to paths before launch. */
@@ -314,6 +341,103 @@ export function parseResultXml(raw: string): ParsedResult {
   };
 }
 
+export interface ComparisonRunResult {
+  model: string;
+  taskId: string;
+  status: TaskReportedStatus;
+  rawStatus: string;
+  summary: string;
+  findings: string;
+  evidence: string;
+  files: string;
+  caveats: string;
+  nextSteps: string;
+  toolUses: number;
+  durationMs: number;
+  sessionPath?: string;
+  error?: string;
+}
+
+export interface ComparisonReportOptions {
+  agentType: string;
+  description: string;
+  runs: [ComparisonRunResult, ComparisonRunResult];
+}
+
+export function formatComparisonReport(options: ComparisonReportOptions): string {
+  const [a, b] = options.runs;
+  const MAX_SECTION_CHARS = 3_500;
+  const MAX_MODEL_CARD_CHARS = 11_000;
+  const MAX_METADATA_CHARS = 512;
+  const MAX_DESCRIPTION_CHARS = 2_000;
+  const MAX_TOTAL_REPORT_CHARS = 24_000;
+  const REPORT_TRUNCATION_MARKER = "\n\n... (comparison report truncated to size budget)";
+  const MODEL_TRUNCATION_MARKER = "\n... (model output truncated)";
+
+  function truncateText(text: string, maxChars: number, marker: string): string {
+    if (text.length <= maxChars) return text;
+    if (maxChars <= marker.length) return marker.slice(0, maxChars);
+    return text.slice(0, maxChars - marker.length) + marker;
+  }
+
+  function formatSection(label: string, content: string): string {
+    const trimmed = content.trim();
+    if (!trimmed) return "";
+    return `\n**${label}:**\n${truncateText(trimmed, MAX_SECTION_CHARS, "\n... (truncated)")}\n`;
+  }
+
+  function formatModelCard(
+    label: string,
+    run: ComparisonRunResult,
+    maxChars: number,
+  ): string {
+    const model = truncateText(run.model, MAX_METADATA_CHARS, "…");
+    const taskId = truncateText(run.taskId, MAX_METADATA_CHARS, "…");
+    const errorBlock = run.error ? `\n**Error:** ${run.error}\n` : "";
+    const summaryBlock = run.summary ? `\n**Summary:** ${run.summary}\n` : "";
+    const card = `### ${label} (\`${model}\`)
+*Status:* \`${run.status}\` | *Duration:* ${formatMs(run.durationMs)} | *Tool uses:* ${run.toolUses} | *Task:* \`${taskId}\`
+${errorBlock}${summaryBlock}${formatSection("Findings", run.findings)}${formatSection("Evidence", run.evidence)}${formatSection("Files", run.files)}${formatSection("Caveats", run.caveats)}${formatSection("Next steps", run.nextSteps)}`.trim();
+    return truncateText(card, maxChars, MODEL_TRUNCATION_MARKER);
+  }
+
+  const agentType = truncateText(options.agentType.trim(), MAX_METADATA_CHARS, "…");
+  const description = truncateText(
+    options.description.trim(),
+    MAX_DESCRIPTION_CHARS,
+    "\n... (description truncated)",
+  );
+  const descLine = description ? `\n**Task:** ${description}\n` : "\n";
+  const modelA = truncateText(a.model, MAX_METADATA_CHARS, "…");
+  const modelB = truncateText(b.model, MAX_METADATA_CHARS, "…");
+  const taskA = truncateText(a.taskId, MAX_METADATA_CHARS, "…");
+  const taskB = truncateText(b.taskId, MAX_METADATA_CHARS, "…");
+  const prefix = `# Subagent Model Comparison: ${agentType}${descLine}
+| Metric | Model A: \`${modelA}\` | Model B: \`${modelB}\` |
+| --- | --- | --- |
+| **Status** | \`${a.status}\` | \`${b.status}\` |
+| **Duration** | ${formatMs(a.durationMs)} | ${formatMs(b.durationMs)} |
+| **Tool uses** | ${a.toolUses} | ${b.toolUses} |
+| **Task ID** | \`${taskA}\` | \`${taskB}\` |
+
+---
+
+`;
+  const separator = "\n\n---\n\n";
+  const suffix = "\n";
+  const reserved = prefix.length + separator.length + suffix.length + REPORT_TRUNCATION_MARKER.length;
+  const cardBudget = Math.max(
+    0,
+    Math.min(MAX_MODEL_CARD_CHARS, Math.floor((MAX_TOTAL_REPORT_CHARS - reserved) / 2)),
+  );
+  const report = `${prefix}${formatModelCard("Model A", a, cardBudget)}${separator}${formatModelCard("Model B", b, cardBudget)}${suffix}`;
+
+  if (report.length > MAX_TOTAL_REPORT_CHARS) {
+    return truncateText(report, MAX_TOTAL_REPORT_CHARS, REPORT_TRUNCATION_MARKER);
+  }
+  return report;
+}
+
 export function buildTaskEnvelope(
   parsed: ParsedResult,
   meta: {
@@ -531,12 +655,22 @@ export function loadAgentsFromDir(
       frontmatter.tools as string | string[] | undefined,
     );
     const skills = parseToolList(frontmatter.skills);
+    const modelSpecs = parseModelSpecs(
+      frontmatter.models as string | string[] | undefined,
+      frontmatter.model?.trim(),
+      frontmatter.thinking,
+    );
+    const models = modelSpecs.length > 0 ? modelSpecs.map((s) => s.model) : undefined;
+    const model = modelSpecs[0]?.model;
+    const thinking = modelSpecs[0]?.thinking ?? (frontmatter.thinking ? frontmatter.thinking.trim() : undefined);
 
     agents.push({
       name,
       description: frontmatter.description,
-      model: frontmatter.model,
-      thinking: frontmatter.thinking,
+      model,
+      models,
+      modelSpecs: modelSpecs.length > 0 ? modelSpecs : undefined,
+      thinking,
       fast,
       skills: skills.length > 0 ? skills : undefined,
       tools: tools.length > 0 ? tools : undefined,
@@ -583,12 +717,102 @@ export function discoverAgents(
   };
 }
 
-/** Mutating tools denied when `readonly: true`. Bash is not denied — use explicit `tools:` or `disallowed_tools` to block shell. */
+/** Mutating tools denied when `readonly: true`. */
 const READONLY_TOOL_DENY = [
   "write",
   "edit",
   "apply_patch",
 ] as const;
+
+/**
+ * Comparison is concurrent and shares the task cwd, so unknown extension tools
+ * are denied by default rather than treated as read-only by their names alone.
+ */
+const COMPARISON_READONLY_TOOLS = new Set([
+  "read",
+  "grep",
+  "find",
+  "ls",
+  "websearch",
+  "codesearch",
+  "web_fetch",
+  "context7",
+  "deepwiki",
+  "webclaw_scrape",
+  "webclaw_batch",
+  "memory-search",
+  "vcc_recall",
+  "diagnostics",
+  "observation",
+]);
+
+export function isTaskCompareAllowed(
+  agent: AgentConfig,
+  effectiveTools?: readonly string[],
+): { allowed: true } | { allowed: false; reason: string } {
+  const tools = effectiveTools ??
+    resolveAgentToolAllowlist({
+      tools: agent.tools,
+      disallowedTools: agent.disallowedTools,
+    });
+  const unsafeTools = tools.filter((tool) => !COMPARISON_READONLY_TOOLS.has(tool));
+  if (unsafeTools.length === 0) return { allowed: true };
+
+  return {
+    allowed: false,
+    reason: `Comparison mode (compare: true) requires an effective read-only tool allowlist. Agent "${agent.name}" includes: ${unsafeTools.join(", ")}.`,
+  };
+}
+
+export function resolveCompareModels(
+  agent: AgentConfig,
+): { ok: true; models: [string, string] } | { ok: false; reason: string } {
+  const models = agent.models ?? (agent.model ? [agent.model] : []);
+  if (models.length < 2) {
+    return {
+      ok: false,
+      reason: `Comparison mode requires at least 2 configured models in agent frontmatter "models: [...]". Agent "${agent.name}" has ${models.length === 0 ? "none" : `only 1 ("${models[0]}")`}.`,
+    };
+  }
+  return { ok: true, models: [models[0]!, models[1]!] };
+}
+
+export function parseModelSpecs(
+  modelsRaw: string | string[] | undefined,
+  fallbackModel?: string,
+  thinkingRaw?: string | string[] | undefined,
+): AgentModelSpec[] {
+  const modelEntries = parseModelList(modelsRaw ?? fallbackModel);
+  const thinkings = parseToolList(thinkingRaw);
+
+  return modelEntries.map((entry, i) => {
+    const parts = entry.split(/\s+/);
+    if (parts.length >= 2) {
+      return { model: parts[0]!, thinking: parts[1]! };
+    }
+    return {
+      model: entry,
+      thinking: thinkings[i] || (thinkings.length === 1 ? thinkings[0] : undefined),
+    };
+  });
+}
+
+export function parseModelList(raw: string | string[] | undefined): string[] {
+  if (!raw) return [];
+  if (Array.isArray(raw)) {
+    return raw
+      .map((m) => String(m).trim().replace(/^['"]|['"]$/g, ""))
+      .filter(Boolean);
+  }
+  let str = String(raw).trim();
+  if (str.startsWith("[") && str.endsWith("]")) {
+    str = str.slice(1, -1);
+  }
+  return str
+    .split(",")
+    .map((m) => m.trim().replace(/^['"]|['"]$/g, ""))
+    .filter(Boolean);
+}
 
 export function parseBool(value: unknown): boolean | undefined {
   if (value === true || value === "true" || value === "yes" || value === "1")

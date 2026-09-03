@@ -4,7 +4,7 @@ thinking: off
 readonly: true
 proactive: true
 skills: memory
-tools: read, grep, find, ls, bash
+tools: read, grep, find, ls
 ---
 
 # Explore Agent

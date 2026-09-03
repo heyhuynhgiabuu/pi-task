@@ -102,6 +102,30 @@ test("fast is an optional start setting and survives task control parsing", () =
   }), undefined);
 });
 
+test("compare is an optional start setting and survives task control parsing", () => {
+  const schema = taskParametersSchema();
+  const base = {
+    agent_type: "explore",
+    description: "Inspect the repository",
+    prompt: "Map the repository.",
+  };
+
+  assert.equal(Value.Check(schema, { ...base, compare: true }), true);
+  assert.equal(Value.Check(schema, { ...base, compare: false }), true);
+  assert.equal(parseTaskStartRequest({ ...base, compare: true })?.compare, true);
+  assert.equal(parseTaskStartRequest({ ...base, compare: false })?.compare, false);
+  assert.equal(parseTaskStartRequest({ ...base, compare: "true" }), undefined);
+  assert.equal(
+    taskStartRequestError({ ...base, compare: "true" }),
+    "compare must be a boolean",
+  );
+  assert.equal(parseTaskControlRequest({
+    operation: "status",
+    task_id: "task-1",
+    compare: true,
+  }), undefined);
+});
+
 test("reviewer starts require structured parent context and proposed semantics", () => {
   const base = {
     agent_type: "reviewer",

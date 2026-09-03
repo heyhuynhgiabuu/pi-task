@@ -94,6 +94,45 @@ export function hasAgentFinished(
 }
 
 /**
+ * Timestamp (ms) of the last message row in matching session files, or
+ * undefined when the session has no messages after `sinceMs`. Used to
+ * reconstruct a faithful completedAt for tasks restored after a restart.
+ */
+export function getLastMessageTimestampFromSessionDir(
+  sessionDir: string,
+  sessionName?: string,
+  sinceMs?: number,
+): number | undefined {
+  if (!existsSync(sessionDir)) return undefined;
+
+  const files = readdirSync(sessionDir)
+    .filter((f) => f.endsWith(".jsonl"))
+    .sort();
+
+  let last: number | undefined;
+  for (const file of files) {
+    const content = readFileSync(join(sessionDir, file), "utf-8");
+    if (!matchesSessionName(content, sessionName)) continue;
+
+    for (const rawLine of content.split("\n")) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      try {
+        const entry = JSON.parse(line) as { type?: string; timestamp?: string };
+        if (entry.type !== "message" || !entry.timestamp) continue;
+        const timestampMs = Date.parse(entry.timestamp);
+        if (!Number.isFinite(timestampMs)) continue;
+        if (sinceMs !== undefined && timestampMs < sinceMs) continue;
+        if (last === undefined || timestampMs > last) last = timestampMs;
+      } catch {
+        /* skip malformed JSONL rows */
+      }
+    }
+  }
+  return last;
+}
+
+/**
  * Last non-empty assistant message from matching .jsonl files in sessionDir.
  */
 export function getLastAssistantTextFromSessionDir(

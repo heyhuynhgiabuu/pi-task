@@ -62,6 +62,12 @@ export function taskParametersSchema() {
           "Priority service tier when the model is in pi-codex-fast config (fallback: built-in gpt-5.4/5.5 list). Defaults to agent frontmatter fast, else false. No model or thinking-level change.",
       }),
     ),
+    compare: Type.Optional(
+      Type.Boolean({
+        description:
+          "Run dual-model evaluation comparison on read-only agents.",
+      }),
+    ),
     background: Type.Optional(
       Type.Boolean({
         description:

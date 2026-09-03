@@ -4,6 +4,18 @@ All notable changes to `@heyhuynhgiabuu/pi-task` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Dual model subagent configuration and evaluation comparison:
+  - Subagent frontmatter supports `models: [...]` or comma-separated list of models, with `model` falling back to `models[0]` for backwards compatibility.
+  - Optional `compare: true` flag in the `task` tool schema to evaluate two configured models side-by-side.
+  - Workspace safety gate: `compare: true` requires an effective allowlist of known non-mutating tools; bash, mutation tools, and unknown extension tools are rejected even for `readonly: true` agents.
+  - Sibling task orchestration: spawns linked subagent tasks (`${id}-m0`, `${id}-m1`) with independent panes/sessions, persists comparison metadata for terminal restoration, and tracks foreground siblings in the TUI panel.
+  - Side-by-side comparative report: aggregates status, duration, tool call counts, and outputs into a clean comparative table and detailed model cards while reserving space for task metadata and both model cards.
+  - Restart-safe grouping: recovery rebuilds comparison groups from registry plus history, replays an undelivered grouped report into the loading session at most once (delivered groups are marked in `task-session-history.json`), and records restored completion times from the session JSONL rather than restore time.
+
 ## [0.5.3] - 2026-08-27
 
 ### Changed

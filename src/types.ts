@@ -30,6 +30,11 @@ export interface BackgroundTask {
   phase?: string;
   result?: string;
   completedAt?: number;
+  comparisonGroupId?: string;
+  comparisonModel?: string;
+  comparisonDescription?: string;
+  comparisonIndex?: 0 | 1;
+  comparisonDelivered?: boolean;
 }
 
 /** Serializable subset for active task registry persistence. */
@@ -52,6 +57,12 @@ export interface RegistryEntry {
   /** Terminal cleanup must be retried before this record is removed. */
   cleanupPending?: boolean;
   cleanupPhase?: "done" | "cancelled" | "timeout" | "failed";
+  /** Durable comparison metadata used to rebuild sibling aggregation after restart. */
+  comparisonGroupId?: string;
+  comparisonModel?: string;
+  comparisonDescription?: string;
+  comparisonIndex?: 0 | 1;
+  comparisonDelivered?: boolean;
 }
 
 /** Durable task→session mapping used for resume after task completion. */

@@ -68,25 +68,37 @@ export async function resolveSdkModel(
         model?.name === requested,
     );
     if (byId) return byId;
+    return undefined;
   }
   return available[0];
 }
+
+let activeSdkRuns = 0;
+let outerDisabledSnapshot: string | undefined;
 
 export async function runSdkSubagent(options: RunSdkSubagentOptions): Promise<{
   output: string;
   sessionPath?: string;
 }> {
+  const requestedModel = options.model ?? options.agent.model;
   const model = await resolveSdkModel(
     options.ctx,
-    options.model ?? options.agent.model,
+    requestedModel,
   );
   if (!model) {
-    throw new Error("No model available for SDK subagent execution");
+    throw new Error(
+      requestedModel
+        ? `Model "${requestedModel}" is not available in the model registry`
+        : "No model available for SDK subagent execution",
+    );
   }
 
   const { createAgentSession, DefaultResourceLoader, getAgentDir, SettingsManager } =
     await import("@earendil-works/pi-coding-agent");
-  const previousDisabled = process.env.PI_TASK_TOOL_DISABLED;
+  if (activeSdkRuns === 0) {
+    outerDisabledSnapshot = process.env.PI_TASK_TOOL_DISABLED;
+  }
+  activeSdkRuns += 1;
   process.env.PI_TASK_TOOL_DISABLED = "1";
   let session: any;
   let unsubSession: (() => void) | undefined;
@@ -131,10 +143,15 @@ export async function runSdkSubagent(options: RunSdkSubagentOptions): Promise<{
   } finally {
     unsubSession?.();
     session?.dispose?.();
-    if (previousDisabled === undefined) {
-      delete process.env.PI_TASK_TOOL_DISABLED;
-    } else {
-      process.env.PI_TASK_TOOL_DISABLED = previousDisabled;
+    activeSdkRuns -= 1;
+    if (activeSdkRuns <= 0) {
+      activeSdkRuns = 0;
+      if (outerDisabledSnapshot === undefined) {
+        delete process.env.PI_TASK_TOOL_DISABLED;
+      } else {
+        process.env.PI_TASK_TOOL_DISABLED = outerDisabledSnapshot;
+      }
+      outerDisabledSnapshot = undefined;
     }
   }
 }

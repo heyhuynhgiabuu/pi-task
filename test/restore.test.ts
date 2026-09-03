@@ -125,6 +125,188 @@ describe("restoreActiveBackgroundTasks", () => {
     assert.equal(backgroundTasks.get("task-live")?.cwd, childCwd);
   });
 
+  it("restores comparison metadata on live sibling tasks", () => {
+    const piDir = makePiDir();
+    const taskDir = join(piDir, "artifacts", "sessions", "task-compare-m0");
+    mkdirSync(taskDir, { recursive: true });
+    writeJson(join(piDir, "task-registry.json"), [{
+      id: "task-compare-m0",
+      dir: taskDir,
+      sessionName: "task-compare-m0",
+      startedAt: Date.now() - 1000,
+      paneId: "%compare",
+      agentType: "reviewer",
+      description: "Review [model-a]",
+      comparisonGroupId: "compare-group",
+      comparisonModel: "model-a",
+      comparisonDescription: "Review",
+      comparisonIndex: 0,
+    }]);
+
+    const backgroundTasks = new Map();
+    restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true);
+
+    const restored = backgroundTasks.get("task-compare-m0") as {
+      comparisonGroupId?: string;
+      comparisonModel?: string;
+      comparisonDescription?: string;
+      comparisonIndex?: number;
+    } | undefined;
+    assert.equal(restored?.comparisonGroupId, "compare-group");
+    assert.equal(restored?.comparisonModel, "model-a");
+    assert.equal(restored?.comparisonDescription, "Review");
+    assert.equal(restored?.comparisonIndex, 0);
+  });
+
+  it("persists finished comparison siblings for grouped restore", () => {
+    const piDir = makePiDir();
+    const taskDirA = join(piDir, "artifacts", "sessions", "task-compare-m0");
+    const taskDirB = join(piDir, "artifacts", "sessions", "task-compare-m1");
+    writeSession(taskDirA, "task-compare-m0", "stop");
+    writeSession(taskDirB, "task-compare-m1");
+    writeJson(join(piDir, "task-registry.json"), [
+      {
+        id: "task-compare-m0",
+        dir: taskDirA,
+        sessionName: "task-compare-m0",
+        startedAt: Date.now() - 1000,
+        paneId: "%compare-a",
+        agentType: "reviewer",
+        description: "Review [model-a]",
+        comparisonGroupId: "compare-group",
+        comparisonModel: "model-a",
+        comparisonDescription: "Review",
+        comparisonIndex: 0,
+      },
+      {
+        id: "task-compare-m1",
+        dir: taskDirB,
+        sessionName: "task-compare-m1",
+        startedAt: Date.now() - 1000,
+        paneId: "%compare-b",
+        agentType: "reviewer",
+        description: "Review [model-b]",
+        comparisonGroupId: "compare-group",
+        comparisonModel: "model-b",
+        comparisonDescription: "Review",
+        comparisonIndex: 1,
+      },
+    ]);
+
+    const backgroundTasks = new Map();
+    restoreActiveBackgroundTasks(piDir, backgroundTasks, () => false);
+
+    assert.equal(backgroundTasks.size, 1);
+    assert.equal(backgroundTasks.has("task-compare-m1"), true);
+    assert.equal(readJson<unknown[]>(join(piDir, "task-registry.json")).length, 1);
+    const history = readJson<Array<{ id: string; status: string; comparisonModel?: string }>>(
+      join(piDir, "task-session-history.json"),
+    );
+    assert.equal(history.find((entry) => entry.id === "task-compare-m0")?.status, "done");
+    assert.equal(history.find((entry) => entry.id === "task-compare-m0")?.comparisonModel, "model-a");
+  });
+
+  it("detects a comparison sibling finished during a long outage in the production session layout", () => {
+    // Production layout: dir is the artifacts root and the session JSONL lives
+    // under dir/sessions/<id>/ — restore must look there, not only at dir.
+    const piDir = makePiDir();
+    const artifactsDir = join(piDir, "artifacts");
+    const taskDirA = join(artifactsDir, "sessions", "task-compare-m0");
+    const taskDirB = join(artifactsDir, "sessions", "task-compare-m1");
+    writeSession(taskDirA, "task-compare-m0", "stop");
+    mkdirSync(taskDirB, { recursive: true });
+    writeJson(join(piDir, "task-registry.json"), [
+      {
+        id: "task-compare-m0",
+        dir: artifactsDir,
+        sessionName: "task-compare-m0",
+        startedAt: Date.now() - 40 * 60 * 1000,
+        paneId: "%compare-a",
+        agentType: "reviewer",
+        description: "Review [model-a]",
+        comparisonGroupId: "compare-group",
+        comparisonModel: "model-a",
+        comparisonDescription: "Review",
+        comparisonIndex: 0,
+      },
+      {
+        id: "task-compare-m1",
+        dir: artifactsDir,
+        sessionName: "task-compare-m1",
+        startedAt: Date.now() - 40 * 60 * 1000,
+        paneId: "%compare-b",
+        agentType: "reviewer",
+        description: "Review [model-b]",
+        comparisonGroupId: "compare-group",
+        comparisonModel: "model-b",
+        comparisonDescription: "Review",
+        comparisonIndex: 1,
+      },
+    ]);
+
+    const backgroundTasks = new Map();
+    // Sibling A finished while Pi was offline (pane gone); sibling B is live.
+    restoreActiveBackgroundTasks(piDir, backgroundTasks, (entry) => entry.id === "task-compare-m1");
+
+    // The finished sibling must be persisted done and dropped from polling,
+    // not restored as running where the global timeout would misreport it.
+    assert.equal(backgroundTasks.size, 1);
+    assert.equal(backgroundTasks.has("task-compare-m1"), true);
+    const registry = readJson<Array<{ id: string }>>(join(piDir, "task-registry.json"));
+    assert.equal(registry.some((entry) => entry.id === "task-compare-m0"), false);
+    const history = readJson<Array<{ id: string; status: string; comparisonModel?: string }>>(
+      join(piDir, "task-session-history.json"),
+    );
+    const finished = history.find((entry) => entry.id === "task-compare-m0");
+    assert.equal(finished?.status, "done");
+    assert.equal(finished?.comparisonModel, "model-a");
+  });
+
+  it("persists restored finished tasks with the session's last message timestamp", () => {
+    // A sibling that finished while Pi was offline must record completedAt
+    // from its session JSONL, not from restore time — recovered comparison
+    // reports otherwise show durations inflated by the outage.
+    const piDir = makePiDir();
+    const artifactsDir = join(piDir, "artifacts");
+    const taskDir = join(artifactsDir, "sessions", "task-finished-ts");
+    const startedAt = Date.now() - 31 * 60 * 1000;
+    const finishedAt = Date.now() - 30 * 60 * 1000;
+    const finishedIso = new Date(finishedAt).toISOString();
+    mkdirSync(taskDir, { recursive: true });
+    writeFileSync(
+      join(taskDir, "session.jsonl"),
+      [
+        { type: "session_info", timestamp: finishedIso, name: "task-task-finished-ts" },
+        {
+          type: "message",
+          timestamp: finishedIso,
+          message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] },
+        },
+      ].map((entry) => JSON.stringify(entry)).join("\n"),
+    );
+    writeJson(join(piDir, "task-registry.json"), [{
+      id: "task-finished-ts",
+      dir: artifactsDir,
+      sessionName: "task-task-finished-ts",
+      startedAt,
+      paneId: "%gone",
+      agentType: "reviewer",
+      description: "finished during outage",
+      comparisonGroupId: "compare-ts",
+      comparisonModel: "model-a",
+      comparisonIndex: 0,
+    }]);
+
+    restoreActiveBackgroundTasks(piDir, new Map(), () => false);
+
+    const history = readJson<Array<{ id: string; status: string; completedAt?: number }>>(
+      join(piDir, "task-session-history.json"),
+    );
+    const entry = history.find((e) => e.id === "task-finished-ts");
+    assert.equal(entry?.status, "done");
+    assert.equal(entry?.completedAt, finishedAt);
+  });
+
   it("marks non-terminal entries failed when their pane is gone", () => {
     const piDir = makePiDir();
     const taskDir = join(piDir, "artifacts", "sessions", "task-2");

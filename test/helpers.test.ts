@@ -31,7 +31,11 @@ import {
   discoverAgents,
   formatAgentList,
   buildTaskToolDescription,
+  formatComparisonReport,
+  isTaskCompareAllowed,
+  resolveCompareModels,
   type AgentConfig,
+  type ComparisonRunResult,
 } from "../src/helpers.js";
 
 // ─── extractTag ──────────────────────────────────────────────────────────────
@@ -858,6 +862,229 @@ import {
 }
 
 // ─── formatAgentList ─────────────────────────────────────────────────────────
+
+{
+  const t = "isTaskCompareAllowed allows readonly agents and disallows mutating agents";
+  const readonlyAgent: AgentConfig = {
+    name: "explore",
+    description: "Read-only explorer",
+    readonly: true,
+    tools: ["read", "bash"],
+    body: "",
+    source: "bundled",
+    path: "/explore.md",
+  };
+  const safeToolsAgent: AgentConfig = {
+    name: "audit",
+    description: "Audit agent",
+    tools: ["read", "grep", "find"],
+    body: "",
+    source: "project",
+    path: "/audit.md",
+  };
+  const mutatingAgent: AgentConfig = {
+    name: "general",
+    description: "Mutating agent",
+    tools: ["read", "write", "edit"],
+    body: "",
+    source: "bundled",
+    path: "/general.md",
+  };
+  const unconstrainedAgent: AgentConfig = {
+    name: "worker",
+    description: "Unconstrained agent",
+    body: "",
+    source: "user",
+    path: "/worker.md",
+  };
+  const bashNonReadonlyAgent: AgentConfig = {
+    name: "sheller",
+    description: "Shell agent",
+    tools: ["read", "bash"],
+    body: "",
+    source: "user",
+    path: "/sheller.md",
+  };
+
+  assert.equal(isTaskCompareAllowed(readonlyAgent).allowed, false, t + " readonly bash disallowed");
+  assert.deepEqual(isTaskCompareAllowed(safeToolsAgent), { allowed: true }, t + " safe tools");
+  assert.equal(isTaskCompareAllowed(mutatingAgent).allowed, false, t + " mutating tools disallowed");
+  assert.equal(isTaskCompareAllowed(unconstrainedAgent).allowed, false, t + " unconstrained disallowed");
+  assert.equal(isTaskCompareAllowed(bashNonReadonlyAgent).allowed, false, t + " non-readonly with bash disallowed");
+  assert.equal(
+    isTaskCompareAllowed({ ...readonlyAgent, tools: ["read", "custom-write"] }).allowed,
+    false,
+    t + " unknown extension tool disallowed",
+  );
+  assert.equal(
+    isTaskCompareAllowed({ ...safeToolsAgent, readonly: true }, ["read", "bash"]).allowed,
+    false,
+    t + " effective bash disallowed",
+  );
+}
+
+{
+  const t = "resolveCompareModels requires at least 2 models";
+  const zeroModels: AgentConfig = {
+    name: "empty",
+    description: "No models",
+    body: "",
+    source: "bundled",
+    path: "/empty.md",
+  };
+  const singleModel: AgentConfig = {
+    name: "single",
+    description: "Single model",
+    model: "openai/gpt-4o",
+    body: "",
+    source: "bundled",
+    path: "/single.md",
+  };
+  const dualModels: AgentConfig = {
+    name: "dual",
+    description: "Dual models",
+    models: ["openai/gpt-4o", "anthropic/claude-3-5-sonnet"],
+    body: "",
+    source: "bundled",
+    path: "/dual.md",
+  };
+  const multiModels: AgentConfig = {
+    name: "multi",
+    description: "Multi models",
+    models: ["openai/gpt-4o", "anthropic/claude-3-5-sonnet", "google/gemini-2.0-flash"],
+    body: "",
+    source: "bundled",
+    path: "/multi.md",
+  };
+
+  assert.equal(resolveCompareModels(zeroModels).ok, false, t + " 0 models");
+  assert.equal(resolveCompareModels(singleModel).ok, false, t + " 1 model");
+  assert.deepEqual(
+    resolveCompareModels(dualModels),
+    { ok: true, models: ["openai/gpt-4o", "anthropic/claude-3-5-sonnet"] },
+    t + " 2 models",
+  );
+  assert.deepEqual(
+    resolveCompareModels(multiModels),
+    { ok: true, models: ["openai/gpt-4o", "anthropic/claude-3-5-sonnet"] },
+    t + " pick first 2 of 3 models",
+  );
+}
+
+{
+  const t = "formatComparisonReport builds comparison table and individual model sections";
+  const runA: ComparisonRunResult = {
+    model: "openai/gpt-4o",
+    taskId: "task-001-m0",
+    status: "success",
+    rawStatus: "done",
+    summary: "Model A identified auth middleware issue.",
+    findings: "src/auth.ts line 42 lacks token refresh.",
+    evidence: "grep found 0 calls to refreshToken.",
+    files: "src/auth.ts",
+    caveats: "Only tested against dev environment.",
+    nextSteps: "Add unit test for token refresh.",
+    toolUses: 5,
+    durationMs: 4200,
+  };
+  const runB: ComparisonRunResult = {
+    model: "anthropic/claude-3-5-sonnet",
+    taskId: "task-001-m1",
+    status: "success",
+    rawStatus: "done",
+    summary: "Model B identified missing error handler in auth.",
+    findings: "src/auth.ts throws unhandled rejection.",
+    evidence: "Error logs show unhandled promise rejection.",
+    files: "src/auth.ts\nsrc/errors.ts",
+    caveats: "None",
+    nextSteps: "Wrap with try-catch.",
+    toolUses: 3,
+    durationMs: 3100,
+  };
+
+  const report = formatComparisonReport({
+    agentType: "reviewer",
+    description: "Review auth implementation",
+    runs: [runA, runB],
+  });
+
+  assert.ok(report.includes("Model Comparison: reviewer"), t + " title");
+  assert.ok(report.includes("Review auth implementation"), t + " description");
+  assert.ok(report.includes("openai/gpt-4o"), t + " model A name in table");
+  assert.ok(report.includes("anthropic/claude-3-5-sonnet"), t + " model B name in table");
+  assert.ok(report.includes("4.2s"), t + " duration A");
+  assert.ok(report.includes("3.1s"), t + " duration B");
+  assert.ok(report.includes("Model A identified auth middleware issue."), t + " summary A");
+  assert.ok(report.includes("Model B identified missing error handler in auth."), t + " summary B");
+  assert.ok(report.includes("src/auth.ts line 42 lacks token refresh."), t + " findings A");
+  assert.ok(report.includes("src/auth.ts throws unhandled rejection."), t + " findings B");
+}
+
+{
+  const t = "formatComparisonReport truncates oversized findings";
+  const runA: ComparisonRunResult = {
+    model: "model-a",
+    taskId: "task-001-m0",
+    status: "success",
+    rawStatus: "done",
+    summary: "Huge output",
+    findings: "X".repeat(12_000),
+    evidence: "",
+    files: "",
+    caveats: "",
+    nextSteps: "",
+    toolUses: 0,
+    durationMs: 1000,
+  };
+  const runB: ComparisonRunResult = {
+    model: "model-b",
+    taskId: "task-001-m1",
+    status: "success",
+    rawStatus: "done",
+    summary: "Normal output",
+    findings: "Short finding",
+    evidence: "",
+    files: "",
+    caveats: "",
+    nextSteps: "",
+    toolUses: 0,
+    durationMs: 1000,
+  };
+  const report = formatComparisonReport({
+    agentType: "reviewer",
+    description: "Check truncation",
+    runs: [runA, runB],
+  });
+  assert.ok(report.includes("... (truncated)") || report.includes("... (model output truncated)"), t + " truncated marker");
+  assert.ok(report.includes("Model B (`model-b`)"), t + " model B card is retained even when model A is huge");
+  assert.ok(report.length <= 24_000, t + " length capped");
+}
+
+{
+  const t = "formatComparisonReport reserves both cards when description is huge";
+  const run = (model: string, taskId: string): ComparisonRunResult => ({
+    model,
+    taskId,
+    status: "success",
+    rawStatus: "done",
+    summary: "summary",
+    findings: "findings",
+    evidence: "evidence",
+    files: "files",
+    caveats: "caveats",
+    nextSteps: "next steps",
+    toolUses: 1,
+    durationMs: 1000,
+  });
+  const report = formatComparisonReport({
+    agentType: "reviewer",
+    description: "D".repeat(30_000),
+    runs: [run("model-a", "task-a"), run("model-b", "task-b")],
+  });
+  assert.ok(report.length <= 24_000, t + " length capped");
+  assert.ok(report.includes("### Model A (`model-a`)") , t + " model A retained");
+  assert.ok(report.includes("### Model B (`model-b`)") , t + " model B retained");
+}
 
 {
   const t = "formatAgentList returns 'none available' for empty";

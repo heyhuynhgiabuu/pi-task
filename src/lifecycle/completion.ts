@@ -11,6 +11,7 @@ import {
   parseResultXml,
   structuredResultPayload,
   unrecognizedStatusWarning,
+  type ParsedResult,
 } from "../helpers.js";
 import { createSyncHerdrControl } from "../subagent/herdr.js";
 import { killAgentPaneStrict } from "../subagent/tmux.js";
@@ -39,6 +40,13 @@ function closeTaskResource(task: BackgroundTask): void {
  */
 const completedTaskIds = new Set<string>();
 
+export type ComparisonSettledHook = (
+  id: string,
+  task: BackgroundTask,
+  parsed: ParsedResult,
+  phase: "done" | "cancelled" | "timeout" | "failed",
+) => boolean;
+
 export function completeTask(
   pi: ExtensionAPI,
   id: string,
@@ -48,6 +56,7 @@ export function completeTask(
   piDir: string,
   resourceCloser: (task: BackgroundTask) => void = closeTaskResource,
   deliveryGuard?: () => boolean,
+  onComparisonSettled?: ComparisonSettledHook,
 ): { cleanupSucceeded: boolean } {
   if (completedTaskIds.has(id)) {
     // Already fully processed in this process: never re-deliver or re-close.
@@ -85,6 +94,11 @@ export function completeTask(
     resultValid: assessment.valid,
     completedAt: Date.now(),
     background: true,
+    comparisonGroupId: task.comparisonGroupId,
+    comparisonModel: task.comparisonModel,
+    comparisonDescription: task.comparisonDescription,
+    comparisonIndex: task.comparisonIndex,
+    comparisonDelivered: task.comparisonDelivered,
   });
 
   const entries = readRegistry(piDir).filter((entry) => entry.id !== id);
@@ -103,6 +117,11 @@ export function completeTask(
     sessionRef: completedSessionRef,
     cleanupPending: true,
     cleanupPhase: phase,
+    comparisonGroupId: task.comparisonGroupId,
+    comparisonModel: task.comparisonModel,
+    comparisonDescription: task.comparisonDescription,
+    comparisonIndex: task.comparisonIndex,
+    comparisonDelivered: task.comparisonDelivered,
   };
   // Keep a terminal cleanup receipt durable across a crash between the
   // state write and backend close. Restore retries it and removes it only
@@ -126,6 +145,10 @@ export function completeTask(
     ? parsed.summary.trim()
     : content.replace(/\s+/g, " ").trim().slice(0, 240);
   const warning = unrecognizedStatusWarning(assessment);
+
+  if (onComparisonSettled && onComparisonSettled(id, task, parsed, phase)) {
+    return { cleanupSucceeded };
+  }
 
   // pi-subtask delivery-guard pattern: skip the in-conversation result
   // when the conversation that spawned the task is no longer the one we

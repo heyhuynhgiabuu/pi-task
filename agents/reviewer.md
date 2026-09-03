@@ -2,6 +2,7 @@
 description: PROACTIVE — Use after non-trivial edits for an independent read-only audit of correctness, security, regressions, and maintainability with path:line evidence; not before reviewable code exists.
 thinking: max
 readonly: true
+tools: read, grep, find, ls
 proactive: true
 skills: memory, code-review-and-quality, verification-before-completion
 ---

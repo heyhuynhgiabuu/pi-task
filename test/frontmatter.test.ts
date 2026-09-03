@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadAgentsFromDir, parseBool, resolveTaskFastMode } from "../src/helpers.js";
+import { loadAgentsFromDir, parseBool, parseModelList, parseModelSpecs, resolveTaskFastMode } from "../src/helpers.js";
 
 {
   const t = "parseBool";
@@ -84,6 +84,102 @@ No description.`,
   assert.equal(resolveTaskFastMode(undefined, undefined), false, t + " omitted defaults false");
   assert.equal(resolveTaskFastMode(true, false), true, t + " explicit true wins");
   assert.equal(resolveTaskFastMode(false, true), false, t + " explicit false wins");
+}
+
+{
+  const t = "parseModelList parses single, comma-separated, bracketed, and array inputs";
+  assert.deepEqual(parseModelList(undefined), [], t + " undefined");
+  assert.deepEqual(parseModelList(""), [], t + " empty string");
+  assert.deepEqual(parseModelList("openai/gpt-4o"), ["openai/gpt-4o"], t + " single");
+  assert.deepEqual(
+    parseModelList("openai/gpt-4o, anthropic/claude-3-5-sonnet"),
+    ["openai/gpt-4o", "anthropic/claude-3-5-sonnet"],
+    t + " comma-separated",
+  );
+  assert.deepEqual(
+    parseModelList("[openai/gpt-4o, anthropic/claude-3-5-sonnet]"),
+    ["openai/gpt-4o", "anthropic/claude-3-5-sonnet"],
+    t + " bracketed",
+  );
+  assert.deepEqual(
+    parseModelList(["'openai/gpt-4o'", '"anthropic/claude-3-5-sonnet"']),
+    ["openai/gpt-4o", "anthropic/claude-3-5-sonnet"],
+    t + " array with quotes",
+  );
+}
+
+{
+  const t = "parseModelSpecs parses model with inline thinking and parallel thinking list";
+  assert.deepEqual(
+    parseModelSpecs("zai/glm-5.3 max, antigravity/gemini-3.8-flash high"),
+    [
+      { model: "zai/glm-5.3", thinking: "max" },
+      { model: "antigravity/gemini-3.8-flash", thinking: "high" },
+    ],
+    t + " inline thinking",
+  );
+  assert.deepEqual(
+    parseModelSpecs("zai/glm-5.3, antigravity/gemini-3.8-flash", undefined, "max, high"),
+    [
+      { model: "zai/glm-5.3", thinking: "max" },
+      { model: "antigravity/gemini-3.8-flash", thinking: "high" },
+    ],
+    t + " parallel thinking list",
+  );
+}
+
+{
+  const t = "loadAgentsFromDir parses models and preserves backwards compatibility with model";
+  const root = mkdtempSync(join(tmpdir(), "task-fm-models-"));
+  try {
+    const dir = join(root, "agents");
+    mkdirSync(dir);
+    writeFileSync(
+      join(dir, "multi.md"),
+      `---
+description: Multi-model agent
+models:
+  - openai/gpt-4o
+  - anthropic/claude-3-5-sonnet
+---
+Body.`,
+    );
+    writeFileSync(
+      join(dir, "legacy.md"),
+      `---
+description: Legacy single-model agent
+model: google/gemini-2.0-flash
+---
+Body.`,
+    );
+    writeFileSync(
+      join(dir, "inline.md"),
+      `---
+description: Inline models agent
+models: openai/gpt-4o-mini, anthropic/claude-3-haiku
+---
+Body.`,
+    );
+
+    const agents = loadAgentsFromDir(dir, "bundled");
+    const multi = agents.find((a) => a.name === "multi")!;
+    const legacy = agents.find((a) => a.name === "legacy")!;
+    const inline = agents.find((a) => a.name === "inline")!;
+
+    assert.ok(multi, t + " multi exists");
+    assert.deepEqual(multi.models, ["openai/gpt-4o", "anthropic/claude-3-5-sonnet"], t + " multi models");
+    assert.equal(multi.model, "openai/gpt-4o", t + " multi fallback model");
+
+    assert.ok(legacy, t + " legacy exists");
+    assert.equal(legacy.model, "google/gemini-2.0-flash", t + " legacy model");
+    assert.deepEqual(legacy.models, ["google/gemini-2.0-flash"], t + " legacy models normalized");
+
+    assert.ok(inline, t + " inline exists");
+    assert.deepEqual(inline.models, ["openai/gpt-4o-mini", "anthropic/claude-3-haiku"], t + " inline models");
+    assert.equal(inline.model, "openai/gpt-4o-mini", t + " inline fallback model");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 console.log("frontmatter.test.ts: all passed");

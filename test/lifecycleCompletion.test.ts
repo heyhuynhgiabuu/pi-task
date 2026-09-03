@@ -343,3 +343,50 @@ test("completion surfaces an unrecognized child status word to the parent", () =
   const history = readTaskSessionHistory(piDir);
   assert.equal(history[0]?.rawStatus, "stalled", "history keeps the raw status word");
 });
+
+test("onComparisonSettled hook is invoked even when deliveryGuard refuses in-conversation delivery", () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-comp-guard-"));
+  const task: BackgroundTask = {
+    dir: join(piDir, "artifacts", "tasks", "task-cmp-guard"),
+    agentType: "reviewer",
+    sessionName: "task-task-cmp-guard",
+    originalPane: null,
+    description: "compare guard check",
+    startedAt: Date.now() - 1000,
+    toolUses: 0,
+    turns: 0,
+    comparisonGroupId: "group-123",
+    comparisonModel: "model-a",
+    comparisonDescription: "compare guard",
+    comparisonIndex: 0,
+  };
+  let comparisonSettledCalled = false;
+  let messageDelivered = false;
+
+  completeTask(
+    {
+      sendMessage: () => {
+        messageDelivered = true;
+      },
+    } as never,
+    "task-cmp-guard",
+    task,
+    "<status>done</status>\n<summary>All good</summary>",
+    "done",
+    piDir,
+    undefined,
+    () => false, // deliveryGuard refuses delivery
+    (id, t, parsed, phase) => {
+      comparisonSettledCalled = true;
+      return true; // handled
+    },
+  );
+
+  assert.equal(comparisonSettledCalled, true, "onComparisonSettled called despite deliveryGuard false");
+  assert.equal(messageDelivered, false, "in-conversation delivery suppressed");
+  const history = readTaskSessionHistory(piDir)[0];
+  assert.equal(history?.comparisonGroupId, "group-123");
+  assert.equal(history?.comparisonModel, "model-a");
+  assert.equal(history?.comparisonDescription, "compare guard");
+  assert.equal(history?.comparisonIndex, 0);
+});

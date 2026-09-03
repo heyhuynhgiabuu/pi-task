@@ -2,7 +2,7 @@ import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { TaskCompletionSnapshot } from "../subagent/waitCompletion.js";
 import type { BackgroundTask } from "../types.js";
-import { completeTask } from "./completion.js";
+import { completeTask, type ComparisonSettledHook } from "./completion.js";
 
 export interface BackgroundPollingDeps {
   backgroundTasks: Map<string, BackgroundTask>;
@@ -21,6 +21,7 @@ export interface BackgroundPollingDeps {
       killAgentPane: (paneId: string, originalPane: string | null) => void;
   clearTaskWidgetIfIdle: () => void;
   completeTask: typeof completeTask;
+  onComparisonSettled?: ComparisonSettledHook;
   /** Optional per-task delivery guard consulted before delivering a result. */
   deliveryGuard?: (taskId: string) => boolean;
   /** Notified with the completed task so the panel can keep a lingering row. */
@@ -59,6 +60,7 @@ export function startBackgroundPolling(
               deps.piDir,
               undefined,
               deps.deliveryGuard ? () => deps.deliveryGuard!(id) : undefined,
+              deps.onComparisonSettled,
             );
             deps.onTaskFinished?.(id, task);
             deps.backgroundTasks.delete(id);
@@ -81,7 +83,7 @@ export function startBackgroundPolling(
 
           if (snapshot.status === "completed") {
             if (deps.backgroundTasks.get(id) !== task) continue;
-            deps.completeTask(deps.pi, id, task, snapshot.content, "done", deps.piDir, undefined, deps.deliveryGuard ? () => deps.deliveryGuard!(id) : undefined);
+            deps.completeTask(deps.pi, id, task, snapshot.content, "done", deps.piDir, undefined, deps.deliveryGuard ? () => deps.deliveryGuard!(id) : undefined, deps.onComparisonSettled);
             deps.onTaskFinished?.(id, task);
             deps.backgroundTasks.delete(id);
             deps.clearTaskWidgetIfIdle();
@@ -97,6 +99,7 @@ export function startBackgroundPolling(
               deps.piDir,
               undefined,
               deps.deliveryGuard ? () => deps.deliveryGuard!(id) : undefined,
+              deps.onComparisonSettled,
             );
             deps.onTaskFinished?.(id, task);
             deps.backgroundTasks.delete(id);
@@ -120,6 +123,7 @@ export function startBackgroundPolling(
               deps.piDir,
               undefined,
               deps.deliveryGuard ? () => deps.deliveryGuard!(id) : undefined,
+              deps.onComparisonSettled,
             );
             deps.onTaskFinished?.(id, task);
             deps.backgroundTasks.delete(id);

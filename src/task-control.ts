@@ -32,6 +32,7 @@ export interface TaskStartRequest {
   conversation_id?: string;
   fast?: boolean;
   background?: boolean;
+  compare?: boolean;
 }
 
 export interface TaskControlRecord {
@@ -175,6 +176,9 @@ function validateTaskStartRequest(value: unknown): TaskStartValidation {
   if (candidate.background !== undefined && typeof candidate.background !== "boolean") {
     problems.push("background must be a boolean");
   }
+  if (candidate.compare !== undefined && typeof candidate.compare !== "boolean") {
+    problems.push("compare must be a boolean");
+  }
   if (problems.length > 0) return { problems };
 
   const parsedPromptHandoff = parsePromptHandoff(candidate.prompt as string);
@@ -244,6 +248,7 @@ function validateTaskStartRequest(value: unknown): TaskStartValidation {
       ...(typeof candidate.conversation_id === "string" ? { conversation_id: candidate.conversation_id } : {}),
       ...(typeof candidate.fast === "boolean" ? { fast: candidate.fast } : {}),
       ...(typeof candidate.background === "boolean" ? { background: candidate.background } : {}),
+      ...(typeof candidate.compare === "boolean" ? { compare: candidate.compare } : {}),
     },
   };
 }

@@ -2,6 +2,7 @@
 description: PROACTIVE — Use for official docs, API or library behavior, and external web evidence with citations; not for repository-only mapping or implementation.
 thinking: high
 readonly: true
+tools: read, grep, find, ls, websearch, codesearch, web_fetch
 proactive: true
 skills: memory, source-driven-development
 ---

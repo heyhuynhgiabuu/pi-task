@@ -16,6 +16,10 @@ export interface SdkBackgroundTaskInput {
   artifactsDir: string;
   cwd?: string;
   conversationId?: string;
+  comparisonGroupId?: string;
+  comparisonModel?: string;
+  comparisonDescription?: string;
+  comparisonIndex?: 0 | 1;
   run: () => Promise<SdkBackgroundResult>;
   onComplete?: (result: SdkBackgroundResult) => void;
   onFailed?: (error: unknown) => void;
@@ -38,6 +42,10 @@ export function startSdkBackgroundTask(input: SdkBackgroundTaskInput): void {
     conversationId: input.conversationId,
     status: "running",
     background: true,
+    comparisonGroupId: input.comparisonGroupId,
+    comparisonModel: input.comparisonModel,
+    comparisonDescription: input.comparisonDescription,
+    comparisonIndex: input.comparisonIndex,
   });
 
   void input
@@ -61,6 +69,10 @@ export function startSdkBackgroundTask(input: SdkBackgroundTaskInput): void {
         resultValid: assessment.valid,
         completedAt: now(),
         background: true,
+        comparisonGroupId: input.comparisonGroupId,
+        comparisonModel: input.comparisonModel,
+        comparisonDescription: input.comparisonDescription,
+        comparisonIndex: input.comparisonIndex,
       });
       try {
         input.onComplete?.(result);
@@ -82,6 +94,10 @@ export function startSdkBackgroundTask(input: SdkBackgroundTaskInput): void {
         status: "failed",
         completedAt: now(),
         background: true,
+        comparisonGroupId: input.comparisonGroupId,
+        comparisonModel: input.comparisonModel,
+        comparisonDescription: input.comparisonDescription,
+        comparisonIndex: input.comparisonIndex,
       });
       try {
         input.onFailed?.(error);

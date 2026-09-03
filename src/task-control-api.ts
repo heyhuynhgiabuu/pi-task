@@ -3,7 +3,10 @@ import {
   readRegistry,
   readTaskSessionHistory,
 } from "./conversation.js";
-import { completeTask as persistCompletedTask } from "./lifecycle/completion.js";
+import {
+  completeTask as persistCompletedTask,
+  type ComparisonSettledHook,
+} from "./lifecycle/completion.js";
 import {
   decideCancellation,
   findTaskRecord,
@@ -30,6 +33,7 @@ export interface TaskControlDependencies {
   registryEntryStatus(entry: RegistryEntry): TaskResourceStatus;
   clearTaskWidgetIfIdle(): void;
   completeTask?: typeof persistCompletedTask;
+  onComparisonSettled?: ComparisonSettledHook;
   /** Keep the cancelled task's row visible in the panel for its linger. */
   noteTaskFinished?: (id: string, task: BackgroundTask) => void;
 }
@@ -70,6 +74,10 @@ function backgroundTaskFromRegistry(entry: RegistryEntry): BackgroundTask {
     turns: 0,
     conversationId: entry.conversationId,
     recentCalls: [],
+    comparisonGroupId: entry.comparisonGroupId,
+    comparisonModel: entry.comparisonModel,
+    comparisonDescription: entry.comparisonDescription,
+    comparisonIndex: entry.comparisonIndex,
   };
 }
 
@@ -170,6 +178,9 @@ export function handleTaskControl(
     "Task was cancelled by request.",
     "cancelled",
     deps.piDir,
+    undefined,
+    undefined,
+    deps.onComparisonSettled,
   );
   deps.noteTaskFinished?.(record.id, task);
   deps.backgroundTasks.delete(record.id);

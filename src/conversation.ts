@@ -142,6 +142,22 @@ export function upsertTaskSessionHistory(
   writeTaskSessionHistory(piDir, entries);
 }
 
+/** Mark both durable sibling records after a comparison report is delivered. */
+export function markComparisonGroupDelivered(
+  piDir: string,
+  taskIds: readonly string[],
+): void {
+  const ids = new Set(taskIds);
+  const entries = readTaskSessionHistory(piDir);
+  let changed = false;
+  const updated = entries.map((entry) => {
+    if (!ids.has(entry.id) || entry.comparisonDelivered === true) return entry;
+    changed = true;
+    return { ...entry, comparisonDelivered: true };
+  });
+  if (changed) writeTaskSessionHistory(piDir, updated);
+}
+
 export function findTaskSessionHistory(
   piDir: string,
   taskId: string,

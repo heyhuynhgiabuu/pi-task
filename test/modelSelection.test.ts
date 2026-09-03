@@ -182,3 +182,19 @@ test("SDK subagents preserve an explicitly configured agent model", async () => 
 
   assert.equal(resolved, configured);
 });
+
+test("SDK subagents reject unavailable explicitly requested models", async () => {
+  const current = { id: "gpt-5", provider: { id: "openai" } };
+  const resolved = await resolveSdkModel(
+    {
+      model: current,
+      modelRegistry: {
+        find: () => undefined,
+        getAll: () => [{ id: "other", provider: { id: "other" } }],
+      },
+    },
+    "nonexistent/model",
+  );
+
+  assert.equal(resolved, undefined);
+});

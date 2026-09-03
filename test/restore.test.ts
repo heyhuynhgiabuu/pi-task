@@ -418,14 +418,25 @@ it("synthesizes the terminal history record for a receipt that lost its history 
   const backgroundTasks = new Map();
   restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true, () => {});
 
-  const history = readJson<Array<{ id: string; status: string; completedAt?: number }>>(
-    join(piDir, "task-session-history.json"),
-  );
+  const history = readJson<
+    Array<{
+      id: string;
+      status: string;
+      completedAt?: number;
+      comparisonModel?: string;
+      comparisonDescription?: string;
+    }>
+  >(join(piDir, "task-session-history.json"));
   const entry = history.find((e) => e.id === "task-receipt-only");
   assert.ok(entry, "terminal history record was synthesized");
   assert.equal(entry.status, "done", "phase comes from cleanupPhase");
   assert.equal(entry.comparisonGroupId, "grp-1", "comparison group copied");
   assert.equal(entry.comparisonModel, "zai/glm-5.3", "comparison model copied");
+  assert.equal(
+    entry.comparisonDescription,
+    "receipt sibling",
+    "comparison description copied",
+  );
   assert.ok(typeof entry.completedAt === "number", "completedAt recorded");
   assert.deepEqual(readJson<unknown[]>(join(piDir, "task-registry.json")), []);
 });

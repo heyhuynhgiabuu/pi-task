@@ -1,5 +1,6 @@
 import { upsertTaskSessionHistory } from "../conversation.js";
 import { assessTaskResult, parseResultXml } from "../helpers.js";
+import type { TaskSessionHistoryEntry } from "../types.js";
 
 export interface SdkBackgroundResult {
   output: string;
@@ -27,27 +28,45 @@ export interface SdkBackgroundTaskInput {
   now?: () => number;
 }
 
+/** Fields that vary between the launch/success/failure history writes. */
+type HistoryExtras = Partial<
+  Pick<
+    TaskSessionHistoryEntry,
+    "sessionRef" | "reportedStatus" | "rawStatus" | "resultValid" | "completedAt"
+  >
+>;
+
 export function startSdkBackgroundTask(input: SdkBackgroundTaskInput): void {
   const now = input.now ?? Date.now;
 
-  try {
+  // Shared durable-record shape; `extra` keys are spread so absent keys keep
+  // upsert's merge semantics (no accidental field clobbering).
+  const record = (
+    status: TaskSessionHistoryEntry["status"],
+    extra?: HistoryExtras,
+  ) => {
     upsertTaskSessionHistory(input.piDir, {
-    id: input.id,
-    agentType: input.agentType,
-    description: input.description,
-    sessionName: input.sessionName,
-    startedAt: input.startedAt,
-    piDir: input.piDir,
-    dir: input.artifactsDir,
-    cwd: input.cwd,
-    conversationId: input.conversationId,
-    status: "running",
-    background: true,
-    comparisonGroupId: input.comparisonGroupId,
-    comparisonModel: input.comparisonModel,
-    comparisonDescription: input.comparisonDescription,
-    comparisonIndex: input.comparisonIndex,
-  });
+      id: input.id,
+      agentType: input.agentType,
+      description: input.description,
+      sessionName: input.sessionName,
+      startedAt: input.startedAt,
+      piDir: input.piDir,
+      dir: input.artifactsDir,
+      cwd: input.cwd,
+      conversationId: input.conversationId,
+      status,
+      background: true,
+      comparisonGroupId: input.comparisonGroupId,
+      comparisonModel: input.comparisonModel,
+      comparisonDescription: input.comparisonDescription,
+      comparisonIndex: input.comparisonIndex,
+      ...extra,
+    });
+  };
+
+  try {
+    record("running");
   } catch {
     // A durable-write failure at launch must not prevent the task from
     // starting; the lifecycle handlers below keep their own guards.
@@ -55,36 +74,23 @@ export function startSdkBackgroundTask(input: SdkBackgroundTaskInput): void {
 
   // Promise.resolve().then defers input.run() so a synchronous throw is
   // routed through the failure path instead of escaping this function.
+  // Each step is guarded separately: a failed durable write must not skip
+  // the callbacks, and a completed task must never be rewritten as failed
+  // because its own notification threw.
   void Promise.resolve()
     .then(() => input.run())
     .then((result) => {
       const assessment = assessTaskResult(parseResultXml(result.output));
       try {
-        upsertTaskSessionHistory(input.piDir, {
-          id: input.id,
-          agentType: input.agentType,
-          description: input.description,
-          sessionName: input.sessionName,
-          startedAt: input.startedAt,
-          piDir: input.piDir,
-          dir: input.artifactsDir,
-          cwd: input.cwd,
-          conversationId: input.conversationId,
+        record("done", {
           sessionRef: result.sessionPath ?? undefined,
-          status: "done",
           reportedStatus: assessment.reportedStatus,
           rawStatus: assessment.rawStatus,
           resultValid: assessment.valid,
           completedAt: now(),
-          background: true,
-          comparisonGroupId: input.comparisonGroupId,
-          comparisonModel: input.comparisonModel,
-          comparisonDescription: input.comparisonDescription,
-          comparisonIndex: input.comparisonIndex,
         });
       } catch {
-        // A durable-write failure must not convert a completed task into a
-        // failed one; the completion callback still runs.
+        // See the step-guard note above.
       }
       try {
         input.onComplete?.(result);
@@ -94,24 +100,7 @@ export function startSdkBackgroundTask(input: SdkBackgroundTaskInput): void {
     })
     .catch((error: unknown) => {
       try {
-        upsertTaskSessionHistory(input.piDir, {
-          id: input.id,
-          agentType: input.agentType,
-          description: input.description,
-          sessionName: input.sessionName,
-          startedAt: input.startedAt,
-          piDir: input.piDir,
-          dir: input.artifactsDir,
-          cwd: input.cwd,
-          conversationId: input.conversationId,
-          status: "failed",
-          completedAt: now(),
-          background: true,
-          comparisonGroupId: input.comparisonGroupId,
-          comparisonModel: input.comparisonModel,
-          comparisonDescription: input.comparisonDescription,
-          comparisonIndex: input.comparisonIndex,
-        });
+        record("failed", { completedAt: now() });
       } catch {
         // Best-effort durable record of the failure.
       }

@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { isAbsolute } from "node:path";
 import type { HerdrTerminalHandle } from "../types.js";
 import {
+  CLI_TIMEOUT_MS,
   createDefaultCommandRunner,
   type CommandRunner,
   type CommandResult,
@@ -862,7 +863,7 @@ function syncRun(args: readonly string[], socketPath: string): string {
     encoding: "utf8",
     env: { ...process.env, HERDR_SOCKET_PATH: socketPath },
     stdio: ["ignore", "pipe", "pipe"],
-    timeout: 30_000,
+    timeout: CLI_TIMEOUT_MS,
     killSignal: "SIGKILL",
   });
 }

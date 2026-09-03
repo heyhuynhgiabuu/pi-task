@@ -149,11 +149,6 @@ export function completeTask(
     }
   }
 
-  // Record the id only after the durable writes and resource close have run:
-  // if a write threw earlier, the id must not be poisoned so a retry (e.g.
-  // polling's same-id retry path) can still complete and deliver.
-  completedTaskIds.add(id);
-
   const summaryText = parsed.summary?.trim()
     ? parsed.summary.trim()
     : content.replace(/\s+/g, " ").trim().slice(0, 240);

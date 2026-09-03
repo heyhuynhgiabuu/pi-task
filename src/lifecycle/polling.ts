@@ -40,6 +40,31 @@ export function startBackgroundPolling(
   let inFlight = false;
   const pollErrors = new Map<string, number>();
 
+  // Terminal settlement shared by the timeout, completed, failed, and
+  // poll-error paths: deliver durably, then retire the task from the maps.
+  const settle = (
+    id: string,
+    task: BackgroundTask,
+    content: string,
+    phase: "done" | "timeout" | "failed",
+  ): void => {
+    deps.completeTask(
+      deps.pi,
+      id,
+      task,
+      content,
+      phase,
+      deps.piDir,
+      undefined,
+      deps.deliveryGuard ? () => deps.deliveryGuard!(id) : undefined,
+      deps.onComparisonSettled,
+    );
+    deps.onTaskFinished?.(id, task);
+    deps.backgroundTasks.delete(id);
+    deps.clearTaskWidgetIfIdle();
+    pollErrors.delete(id);
+  };
+
   const tick = async () => {
     if (stopped || inFlight) return;
     inFlight = true;
@@ -51,20 +76,12 @@ export function startBackgroundPolling(
           const elapsed = Date.now() - task.startedAt;
           if (elapsed > deps.TASK_TIMEOUT_MS) {
             if (deps.backgroundTasks.get(id) !== task) continue;
-            deps.completeTask(
-              deps.pi,
+            settle(
               id,
               task,
               `Task timed out after ${Math.round(deps.TASK_TIMEOUT_MS / 1000)}s without producing a result.`,
               "timeout",
-              deps.piDir,
-              undefined,
-              deps.deliveryGuard ? () => deps.deliveryGuard!(id) : undefined,
-              deps.onComparisonSettled,
             );
-            deps.onTaskFinished?.(id, task);
-            deps.backgroundTasks.delete(id);
-            deps.clearTaskWidgetIfIdle();
             continue;
           }
 
@@ -83,28 +100,15 @@ export function startBackgroundPolling(
 
           if (snapshot.status === "completed") {
             if (deps.backgroundTasks.get(id) !== task) continue;
-            deps.completeTask(deps.pi, id, task, snapshot.content, "done", deps.piDir, undefined, deps.deliveryGuard ? () => deps.deliveryGuard!(id) : undefined, deps.onComparisonSettled);
-            deps.onTaskFinished?.(id, task);
-            deps.backgroundTasks.delete(id);
-            deps.clearTaskWidgetIfIdle();
-            pollErrors.delete(id);
+            settle(id, task, snapshot.content, "done");
           } else if (snapshot.status === "failed" || snapshot.status === "timeout") {
             if (deps.backgroundTasks.get(id) !== task) continue;
-            deps.completeTask(
-              deps.pi,
+            settle(
               id,
               task,
               snapshot.content,
               snapshot.status === "timeout" ? "timeout" : "failed",
-              deps.piDir,
-              undefined,
-              deps.deliveryGuard ? () => deps.deliveryGuard!(id) : undefined,
-              deps.onComparisonSettled,
             );
-            deps.onTaskFinished?.(id, task);
-            deps.backgroundTasks.delete(id);
-            deps.clearTaskWidgetIfIdle();
-            pollErrors.delete(id);
           }
         } catch (error) {
           if (error instanceof Error && error.name === "HerdrUnavailableError") {
@@ -115,16 +119,11 @@ export function startBackgroundPolling(
           if (count >= deps.MAX_POLL_ERRORS) {
             if (deps.backgroundTasks.get(id) !== task) continue;
             try {
-              deps.completeTask(
-                deps.pi,
+              settle(
                 id,
                 task,
                 `Background task polling failed: ${error instanceof Error ? error.message : String(error)}`,
                 "failed",
-                deps.piDir,
-                undefined,
-                deps.deliveryGuard ? () => deps.deliveryGuard!(id) : undefined,
-                deps.onComparisonSettled,
               );
             } catch {
               // A durable-write failure while reporting the poll failure must
@@ -132,10 +131,6 @@ export function startBackgroundPolling(
               // so a later tick can retry settlement.
               continue;
             }
-            deps.onTaskFinished?.(id, task);
-            deps.backgroundTasks.delete(id);
-            deps.clearTaskWidgetIfIdle();
-            pollErrors.delete(id);
           }
         }
       }

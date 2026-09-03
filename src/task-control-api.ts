@@ -182,9 +182,20 @@ export function handleTaskControl(
     undefined,
     deps.onComparisonSettled,
   );
-  deps.noteTaskFinished?.(record.id, task);
+  // Retirement must be unconditional once completion is durable: a throwing
+  // panel callback must not strand the task in the map (a retried completeTask
+  // is an idempotent no-op, so the zombie could never be recovered).
+  try {
+    deps.noteTaskFinished?.(record.id, task);
+  } catch {
+    // Panel notification is best-effort.
+  }
   deps.backgroundTasks.delete(record.id);
-  deps.clearTaskWidgetIfIdle();
+  try {
+    deps.clearTaskWidgetIfIdle();
+  } catch {
+    // Widget refresh is best-effort.
+  }
   if (!completion.cleanupSucceeded) {
     return errorResult(
       request,

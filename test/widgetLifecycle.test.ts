@@ -96,6 +96,20 @@ test("transcript view sig/read survive a hostile session dir", () => {
       recentCalls: [],
       backend: "tmux",
     });
+    // sdk transcriptDir is task.dir itself, so a FILE dir makes sig()/read()
+    // actually throw (ENOTDIR) through the guarded closures — the tmux task
+    // above only exercises the not-found short-circuit.
+    backgroundTasks.set("t-sdk", {
+      dir: hostileDir,
+      sessionName: "task-t-sdk",
+      agentType: "general",
+      description: "sdk hostile dir",
+      startedAt: Date.now(),
+      toolUses: 0,
+      turns: 0,
+      recentCalls: [],
+      backend: "sdk",
+    });
 
     const widgets = new Map<string, any>();
     let editorFactory: ((tui: any, theme: any, kb: any) => any) | undefined;
@@ -131,12 +145,19 @@ test("transcript view sig/read survive a hostile session dir", () => {
 
     const paneFactory = widgets.get("task-transcript");
     assert.ok(typeof paneFactory === "function", "transcript pane registered");
-    const pane = paneFactory(
-      fakeTui,
-      { fg: (_style: string, text: string) => text },
-    );
-    const lines = pane.render(80);
-    assert.ok(Array.isArray(lines), "pane renders without throwing");
+    const fakeTheme = { fg: (_style: string, text: string) => text };
+    const lines = paneFactory(fakeTui, fakeTheme).render(80);
+    assert.ok(Array.isArray(lines), "tmux not-found path renders");
+
+    const paneSdk = widgets.get("task-transcript");
+    assert.ok(typeof paneSdk === "function", "sdk transcript pane registered");
+    void paneSdk; // replaced per openView call; re-open for the sdk task
+    const editor2 = editorFactory!(fakeTui, { borderColor: "#000" }, {});
+    const host2 = (editor2 as unknown as { host: { onEnter(id: string | null): void } }).host;
+    host2.onEnter("t-sdk");
+    const paneFactorySdk = widgets.get("task-transcript");
+    const linesSdk = paneFactorySdk(fakeTui, fakeTheme).render(80);
+    assert.ok(Array.isArray(linesSdk), "sdk ENOTDIR path renders without throwing");
     controller.dispose();
   } finally {
     rmSync(root, { recursive: true, force: true });

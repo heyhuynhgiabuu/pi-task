@@ -66,6 +66,38 @@ export function restoreActiveBackgroundTasks(
         } else if (entry.handle?.backend === "herdr") {
           return;
         }
+        // completion writes the cleanup receipt BEFORE the history upsert, so
+        // a crash (or an unwritable history file) can leave a receipt without
+        // a terminal record. Synthesize it here: comparison grouping needs
+        // both siblings' history records, and a receipt-only task would
+        // otherwise vanish from history when its registry entry is removed.
+        const receiptSessionDirs = [join(entry.dir, "sessions", entry.id), entry.dir];
+        const receiptCompletedAt = receiptSessionDirs
+          .map((dir) =>
+            getLastMessageTimestampFromSessionDir(dir, entry.sessionName, entry.startedAt),
+          )
+          .find((ts) => ts !== undefined) ?? Date.now();
+        upsertTaskSessionHistory(piDir, {
+          id: entry.id,
+          status: entry.cleanupPhase ?? "failed",
+          background: true,
+          agentType: entry.agentType,
+          description: entry.description,
+          sessionName: entry.sessionName,
+          startedAt: entry.startedAt,
+          handle: entry.handle,
+          paneId: entry.paneId,
+          piDir: entry.piDir,
+          dir: entry.dir,
+          cwd: entry.cwd,
+          conversationId: entry.conversationId,
+          completedAt: receiptCompletedAt,
+          comparisonGroupId: entry.comparisonGroupId,
+          comparisonModel: entry.comparisonModel,
+          comparisonDescription: entry.comparisonDescription,
+          comparisonIndex: entry.comparisonIndex,
+          comparisonDelivered: entry.comparisonDelivered,
+        });
         staleIds.push(entry.id);
       } catch {
         // Keep the terminal cleanup receipt for a later retry.

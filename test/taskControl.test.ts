@@ -445,6 +445,57 @@ test("cancel control refuses an active SDK task explicitly", () => {
   assert.equal(backgroundTasks.has("task-sdk"), true);
 });
 
+test("cancel retires the active task even when the panel notification throws", () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-control-zombie-"));
+  writeRegistry(piDir, [{
+    id: "task-zombie",
+    agentType: "explore",
+    description: "zombie cancel",
+    sessionName: "task-zombie",
+    paneId: "%1",
+    piDir,
+    dir: join(piDir, "artifacts"),
+    startedAt: 100,
+  }]);
+  const backgroundTasks = new Map([
+    ["task-zombie", {
+      dir: join(piDir, "artifacts"),
+      agentType: "explore",
+      sessionName: "task-zombie",
+      paneId: "%1",
+      backend: "tmux" as const,
+      originalPane: null,
+      description: "zombie cancel",
+      startedAt: 100,
+      toolUses: 0,
+      turns: 0,
+      recentCalls: [],
+    }],
+  ]);
+
+  const result = handleTaskControl(
+    { operation: "cancel", taskId: "task-zombie" },
+    {
+      pi: { sendMessage: () => {} } as never,
+      piDir,
+      backgroundTasks,
+      registryEntryStatus: () => "alive",
+      clearTaskWidgetIfIdle: () => {},
+      completeTask: () => ({ cleanupSucceeded: true }),
+      noteTaskFinished: () => {
+        throw new Error("panel boom");
+      },
+    },
+  );
+
+  assert.equal(result.isError, undefined, "cancel itself succeeds");
+  assert.equal(
+    backgroundTasks.has("task-zombie"),
+    false,
+    "settled task retired despite the throwing notification",
+  );
+});
+
 test("cancel control delegates owned terminal cleanup and removes the active task", () => {
   const piDir = mkdtempSync(join(tmpdir(), "pi-task-control-cancel-"));
   writeRegistry(piDir, [{

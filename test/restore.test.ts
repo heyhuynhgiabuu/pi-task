@@ -390,6 +390,42 @@ describe("restoreActiveBackgroundTasks", () => {
   assert.deepEqual(readJson<unknown[]>(join(piDir, "task-registry.json")), []);
 });
 
+it("synthesizes the terminal history record for a receipt that lost its history entry", () => {
+  // completion.ts writes the cleanup receipt BEFORE the history upsert, so a
+  // crash (or an unwritable history file) can leave a receipt without a
+  // terminal record. Restore must synthesize it — comparison grouping needs
+  // both siblings' history records, and a receipt-only task would otherwise
+  // vanish from history when its registry entry is removed.
+  const piDir = makePiDir();
+  const taskDir = join(piDir, "artifacts", "sessions", "task-receipt-only");
+  mkdirSync(taskDir, { recursive: true });
+  writeJson(join(piDir, "task-registry.json"), [{
+    id: "task-receipt-only",
+    dir: taskDir,
+    sessionName: "task-task-receipt-only",
+    startedAt: Date.now() - 1000,
+    paneId: "%receipt",
+    agentType: "scout",
+    description: "receipt without history",
+    cleanupPending: true,
+    cleanupPhase: "done",
+    comparisonGroupId: "grp-1",
+    comparisonIndex: 0,
+  }]);
+
+  const backgroundTasks = new Map();
+  restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true, () => {});
+
+  const history = readJson<Array<{ id: string; status: string; completedAt?: number }>>(
+    join(piDir, "task-session-history.json"),
+  );
+  const entry = history.find((e) => e.id === "task-receipt-only");
+  assert.ok(entry, "terminal history record was synthesized");
+  assert.equal(entry.status, "done", "phase comes from cleanupPhase");
+  assert.ok(typeof entry.completedAt === "number", "completedAt recorded");
+  assert.deepEqual(readJson<unknown[]>(join(piDir, "task-registry.json")), []);
+});
+
 it("preserves terminal cleanup receipts when retry still fails", () => {
   const piDir = makePiDir();
   const taskDir = join(piDir, "artifacts", "sessions", "task-cleanup-fail");

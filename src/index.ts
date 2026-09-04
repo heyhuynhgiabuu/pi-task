@@ -33,6 +33,7 @@ import { registerTaskFastModeBridge } from "./fast-mode.js";
 export { createTaskFastModeStream, registerTaskFastModeBridge } from "./fast-mode.js";
 export type { TaskToolParameters } from "./tool/schema.js";
 import {
+  ensureTaskSessionRef,
   findJsonlSessionByName,
   normalizeConversationId,
   findTaskSessionHistory,
@@ -798,24 +799,9 @@ export default function (pi: ExtensionAPI) {
           findTaskSessionHistory(piDir, taskParams.task_id) ??
           findJsonlSessionByName(piDir, taskParams.task_id, agent.name);
 
-        // Older history entries were written before we stored the
-        // actual JSONL path needed by `pi --session`. Repair them by
-        // resolving the display session name to a session file.
-        if (entry && !entry.sessionRef) {
-          const discovered = findJsonlSessionByName(
-            piDir,
-            entry.sessionName,
-            entry.agentType,
-          );
-          if (discovered?.sessionRef) {
-            entry = { ...entry, sessionRef: discovered.sessionRef };
-            upsertTaskSessionHistory(piDir, {
-              ...entry,
-              status: "done",
-              background: false,
-            });
-          }
-        }
+        // Older history entries can have no JSONL path, or a stale one.
+        // Repair it before passing the path to `pi --session`.
+        if (entry) entry = ensureTaskSessionRef(piDir, entry);
         if (!entry) {
           taskParams = { ...taskParams, task_id: undefined };
           id = `${Date.now().toString(36)}-${randomUUID().slice(0, 4)}`;

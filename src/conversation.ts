@@ -178,36 +178,78 @@ function sessionFileMatches(file: string, sessionName: string): boolean {
   }
 }
 
+function readJsonlSessionFiles(taskDir: string): string[] {
+  try {
+    return readdirSync(taskDir)
+      .filter((entry) => entry.endsWith(".jsonl"))
+      .map((entry) => join(taskDir, entry));
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (
+      code === "ENOENT" ||
+      code === "ENOTDIR" ||
+      code === "EACCES" ||
+      code === "EPERM"
+    ) {
+      return [];
+    }
+    throw error;
+  }
+}
+
 export function findJsonlSessionByName(
   piDir: string,
   idOrSessionName: string,
   agentType?: string,
 ): TaskSessionHistoryEntry | null {
-  const sessionsRoot = join(getArtifactDir(piDir), "sessions");
-  if (!existsSync(sessionsRoot)) return null;
-  const history = readTaskSessionHistory(piDir);
+  const history = readTaskSessionHistory(piDir).filter((entry) => {
+    if (entry.id !== idOrSessionName && entry.sessionName !== idOrSessionName) return false;
+    return !agentType || entry.agentType === agentType;
+  });
 
-  for (const dirent of readdirSync(sessionsRoot, { withFileTypes: true })) {
-    if (!dirent.isDirectory()) continue;
-    const taskId = dirent.name;
-    const taskDir = join(sessionsRoot, taskId);
-    const historyEntry = history.find((entry) => entry.id === taskId);
-    if (!historyEntry) continue;
-    const sessionName = historyEntry.sessionName;
-    if (taskId !== idOrSessionName && sessionName !== idOrSessionName) continue;
-    if (agentType && historyEntry.agentType !== agentType) continue;
+  for (const historyEntry of history) {
+    const sessionRoots = [
+      join(historyEntry.dir, "sessions"),
+      join(getArtifactDir(piDir), "tasks", "sessions"),
+      join(getArtifactDir(piDir), "sessions"),
+    ];
 
-    const sessionRef = readdirSync(taskDir)
-      .filter((entry) => entry.endsWith(".jsonl"))
-      .map((entry) => join(taskDir, entry))
-      .find((file) => sessionFileMatches(file, sessionName));
-    if (!sessionRef) continue;
+    for (const sessionsRoot of new Set(sessionRoots)) {
+      const taskDir = join(sessionsRoot, historyEntry.id);
+      if (!existsSync(taskDir)) continue;
 
-    return {
-      ...historyEntry,
-      sessionRef,
-      dir: taskDir,
-    };
+      const sessionRef = readJsonlSessionFiles(taskDir)
+        .find((file) => sessionFileMatches(file, historyEntry.sessionName));
+      if (!sessionRef) continue;
+
+      return { ...historyEntry, sessionRef };
+    }
   }
   return null;
+}
+
+export function ensureTaskSessionRef(
+  piDir: string,
+  entry: TaskSessionHistoryEntry,
+): TaskSessionHistoryEntry;
+export function ensureTaskSessionRef(
+  piDir: string,
+  entry: RegistryEntry,
+): RegistryEntry;
+export function ensureTaskSessionRef(
+  piDir: string,
+  entry: RegistryEntry,
+): RegistryEntry {
+  if (entry.sessionRef && existsSync(entry.sessionRef)) return entry;
+
+  const discovered = findJsonlSessionByName(piDir, entry.sessionName, entry.agentType);
+  if (!discovered?.sessionRef) return { ...entry, sessionRef: undefined };
+
+  const current = findTaskSessionHistory(piDir, entry.id);
+  if (current) {
+    const resolved = { ...current, sessionRef: discovered.sessionRef };
+    upsertTaskSessionHistory(piDir, resolved);
+    if ("status" in entry && "background" in entry) return resolved;
+  }
+  return { ...entry, sessionRef: discovered.sessionRef };
 }

@@ -53,6 +53,7 @@ import {
       subscribeToolEvents,
   resolveTaskAgentPreflight,
   resolveTaskFastMode,
+  envTurnLimit,
   assessTaskResult,
   buildTaskEnvelope,
   structuredResultPayload,
@@ -498,6 +499,8 @@ export default function (pi: ExtensionAPI) {
       MAX_POLL_ERRORS,
       piDir,
       pi,
+      steerTask: (task, prompt) =>
+        steerRunningBackgroundTask(task.paneId, prompt, task.handle).ok,
     },
     BACKGROUND_CHECK_MS,
   );
@@ -753,6 +756,7 @@ export default function (pi: ExtensionAPI) {
             startedAt: entry.startedAt,
             toolUses: 0,
             turns: 0,
+            maxTurns: entry.maxTurns,
             conversationId,
             recentCalls: [],
           };
@@ -885,6 +889,7 @@ export default function (pi: ExtensionAPI) {
             startedAt: entry.startedAt,
             toolUses: 0,
             turns: 0,
+            maxTurns: entry.maxTurns,
             conversationId: entry.conversationId,
             recentCalls: [],
           };
@@ -1646,6 +1651,7 @@ Both subagents are running in background. Results will be compared and delivered
             startedAt: t.startedAt,
             toolUses: 0,
             turns: 0,
+            maxTurns: agent.maxTurns ?? envTurnLimit(),
             recentCalls: [],
             comparisonGroupId: groupId,
             comparisonModel: t.model,
@@ -1694,6 +1700,7 @@ Both subagents are running in background. Results will be compared and delivered
             piDir,
             dir: artifactsDir,
             cwd: taskCwd,
+            maxTurns: agent.maxTurns ?? envTurnLimit(),
             comparisonGroupId: groupId,
             comparisonModel: t.model,
             comparisonDescription: descText,
@@ -2177,6 +2184,7 @@ Both subagents are running in background. Results will be compared and delivered
         startedAt: Date.now(),
         toolUses: 0,
         turns: 0,
+        maxTurns: agent.maxTurns ?? envTurnLimit(),
         conversationId,
         recentCalls: [],
         backend: selectedBackend,
@@ -2199,6 +2207,7 @@ Both subagents are running in background. Results will be compared and delivered
         dir: artifactsDir,
         cwd: taskCwd,
         conversationId,
+        maxTurns: bgtask.maxTurns,
       };
 
       // Write to JSON registry for on-load restore

@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadAgentsFromDir, parseBool, parseModelList, parseModelSpecs, resolveTaskFastMode } from "../src/helpers.js";
+import { envTurnLimit, loadAgentsFromDir, parseBool, parseModelList, parseModelSpecs, resolveTaskFastMode, type AgentConfig } from "../src/helpers.js";
 
 {
   const t = "parseBool";
@@ -183,3 +183,57 @@ Body.`,
 }
 
 console.log("frontmatter.test.ts: all passed");
+{
+  const t = "loadAgentsFromDir parses max_turns";
+  const root = mkdtempSync(join(tmpdir(), "task-fm-turns-"));
+  try {
+    const dir = join(root, "agents");
+    mkdirSync(dir);
+    writeFileSync(
+      join(dir, "limited.md"),
+      `---\ndescription: Limited agent\nmax_turns: 40\n---\nBody.`,
+    );
+    writeFileSync(
+      join(dir, "badturns.md"),
+      `---\ndescription: Bad turns agent\nmax_turns: banana\n---\nBody.`,
+    );
+    writeFileSync(
+      join(dir, "noturns.md"),
+      `---\ndescription: No turns agent\n---\nBody.`,
+    );
+
+    const agents = loadAgentsFromDir(dir, "bundled");
+    const maxTurnsOf = (name: string): number | undefined =>
+      (agents.find((a) => a.name === name) as (AgentConfig & { maxTurns?: number }) | undefined)?.maxTurns;
+    assert.equal(maxTurnsOf("limited"), 40, t + " parsed");
+    assert.equal(maxTurnsOf("badturns"), undefined, t + " invalid value ignored");
+    assert.equal(maxTurnsOf("noturns"), undefined, t + " absent frontmatter stays undefined");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const t = "envTurnLimit: PI_TASK_MAX_TURNS global default with precedence to frontmatter";
+  const prev = process.env.PI_TASK_MAX_TURNS;
+  try {
+    delete process.env.PI_TASK_MAX_TURNS;
+    assert.equal(envTurnLimit(), undefined, t + " unset means unlimited");
+    process.env.PI_TASK_MAX_TURNS = "25";
+    assert.equal(envTurnLimit(), 25, t + " valid value parsed");
+    process.env.PI_TASK_MAX_TURNS = "banana";
+    assert.equal(envTurnLimit(), undefined, t + " invalid value ignored");
+    process.env.PI_TASK_MAX_TURNS = "0";
+    assert.equal(envTurnLimit(), undefined, t + " zero ignored");
+
+    const agentWithFrontmatter = { maxTurns: 40 } as AgentConfig & { maxTurns: number };
+    assert.equal(
+      agentWithFrontmatter.maxTurns ?? envTurnLimit(),
+      40,
+      t + " frontmatter beats env",
+    );
+  } finally {
+    if (prev === undefined) delete process.env.PI_TASK_MAX_TURNS;
+    else process.env.PI_TASK_MAX_TURNS = prev;
+  }
+}

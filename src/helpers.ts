@@ -81,6 +81,8 @@ export interface AgentConfig {
   modelSpecs?: AgentModelSpec[];
   /** Optional Fast Mode default from frontmatter `fast:`. */
   fast?: boolean;
+  /** Soft turn limit from frontmatter `max_turns:`; undefined = unlimited. */
+  maxTurns?: number;
   /** Skill names from frontmatter `skills:`; resolved to paths before launch. */
   skills?: string[];
   /** Explicit allowlist from frontmatter `tools:` */
@@ -649,6 +651,9 @@ export function loadAgentsFromDir(
       ...DEFAULT_DISALLOWED_TOOLS,
       ...(readonly ? READONLY_TOOL_DENY : []),
     ];
+    const maxTurnsRaw = Number(frontmatter.max_turns);
+    const maxTurns =
+      Number.isInteger(maxTurnsRaw) && maxTurnsRaw > 0 ? maxTurnsRaw : undefined;
     const merged = parseMergedDisallowedTools(withDefaults.join(","));
     const disallowedTools = merged.length > 0 ? merged : undefined;
     const tools = parseToolList(
@@ -678,6 +683,7 @@ export function loadAgentsFromDir(
       hidden,
       proactive,
       readonly,
+      maxTurns,
       body,
       source,
       path: filePath,
@@ -827,6 +833,16 @@ export function resolveTaskFastMode(
   agentFast: boolean | undefined,
 ): boolean {
   return taskFast ?? agentFast ?? false;
+}
+
+/**
+ * Global default turn limit from `PI_TASK_MAX_TURNS` (issue #19). Used when
+ * the agent frontmatter has no `max_turns:`; invalid or absent values mean
+ * unlimited (the wall-clock timeout remains the safety net).
+ */
+export function envTurnLimit(env: NodeJS.ProcessEnv = process.env): number | undefined {
+  const raw = Number(env.PI_TASK_MAX_TURNS);
+  return Number.isInteger(raw) && raw > 0 ? raw : undefined;
 }
 
 function isAgentHidden(agent: AgentConfig): boolean {

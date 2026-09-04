@@ -15,6 +15,9 @@
 
 import { strict as assert } from "node:assert";
 import { setTimeout as sleep } from "node:timers/promises";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { startBackgroundPolling } from "../src/lifecycle/polling.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -29,6 +32,7 @@ function makeDeps(
     MAX_POLL_ERRORS: number;
     piDir: string;
     pi: any;
+    steerTask: any;
   }> = {},
 ) {
   return {
@@ -396,4 +400,231 @@ console.log("ALL POLLING TESTS PASSED");
     false,
     t + ": settled task was retired despite the throwing callback",
   );
+}
+
+// ─── Turn-based soft limit (issue #19) ─────────────────────────────────────
+
+function writePartialSession(dir: string, sessionName: string, text: string): void {
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, `${sessionName}.jsonl`),
+    JSON.stringify({ type: "session_info", name: sessionName }) + "\n" +
+    JSON.stringify({
+      type: "message",
+      timestamp: new Date().toISOString(),
+      message: { role: "assistant", content: [{ type: "text", text }] },
+    }) + "\n",
+  );
+}
+
+function makeTurnTask(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    dir: "/tmp/pi-task-turn-limit",
+    sessionName: "task-lim",
+    agentType: "general",
+    description: "turn limit",
+    startedAt: Date.now() - 1000,
+    paneId: "%7",
+    backend: "tmux",
+    toolUses: 0,
+    turns: 12,
+    recentCalls: [],
+    ...overrides,
+  };
+}
+
+{
+  const t = "reaching the turn limit steers a wrap-up exactly once and does not settle";
+  const root = mkdtempSync(join(tmpdir(), "pi-task-poll-turns-"));
+  try {
+    const task = makeTurnTask({
+      dir: join(root, "artifacts"),
+      maxTurns: 12,
+    });
+    writePartialSession(join(root, "artifacts", "sessions", "t1"), "task-lim", "partial findings so far");
+    const backgroundTasks = new Map<string, any>([["t1", task]]);
+    const steeredPrompts: string[] = [];
+    let completions = 0;
+    const stop = startBackgroundPolling(
+      makeDeps({
+        backgroundTasks,
+        steerTask: (_task: any, prompt: string) => {
+          steeredPrompts.push(prompt);
+          return true;
+        },
+        checkTaskCompletion: async () => ({ status: "running", content: "" }),
+        completeTask: () => {
+          completions += 1;
+        },
+      }),
+      10,
+    );
+    try {
+      await sleep(60);
+    } finally {
+      stop();
+    }
+    assert.ok(steeredPrompts.length === 1, `${t}: wrap-up steered exactly once (got ${steeredPrompts.length})`);
+    assert.ok(steeredPrompts[0]!.includes("12"), `${t}: wrap-up mentions the limit`);
+    assert.equal(completions, 0, `${t}: task is not settled at the limit`);
+    assert.deepEqual(
+      (backgroundTasks.get("t1") as any).wrapUp,
+      { turnsAtStart: 12 },
+      `${t}: wrap-up anchor recorded`,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const t = "exhausted wrap-up grace settles with the child's partial result";
+  const root = mkdtempSync(join(tmpdir(), "pi-task-poll-grace-"));
+  try {
+    const task = makeTurnTask({
+      dir: join(root, "artifacts"),
+      maxTurns: 12,
+      turns: 30,
+      wrapUp: { turnsAtStart: 12 },
+    });
+    writePartialSession(join(root, "artifacts", "sessions", "t1"), "task-lim", "the partial findings text");
+    const backgroundTasks = new Map<string, any>([["t1", task]]);
+    let settledContent = "";
+    let settledPhase = "";
+    const stop = startBackgroundPolling(
+      makeDeps({
+        backgroundTasks,
+        checkTaskCompletion: async () => ({ status: "running", content: "" }),
+        completeTask: (_pi: any, _id: any, _task: any, content: string, phase: string) => {
+          settledContent = content;
+          settledPhase = phase;
+        },
+      }),
+      10,
+    );
+    try {
+      await sleep(60);
+    } finally {
+      stop();
+    }
+    assert.equal(settledPhase, "timeout", `${t}: settles as timeout`);
+    assert.ok(
+      settledContent.includes("the partial findings text"),
+      `${t}: partial result is delivered, not discarded: ${settledContent}`,
+    );
+    assert.ok(settledContent.includes("12-turn"), `${t}: limit note present`);
+    assert.equal(backgroundTasks.has("t1"), false, `${t}: settled task retired`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const t = "failed wrap-up steering settles immediately with the partial result";
+  const root = mkdtempSync(join(tmpdir(), "pi-task-poll-steerfail-"));
+  try {
+    const task = makeTurnTask({
+      dir: join(root, "artifacts"),
+      maxTurns: 12,
+    });
+    writePartialSession(join(root, "artifacts", "sessions", "t1"), "task-lim", "steer-fail partial text");
+    const backgroundTasks = new Map<string, any>([["t1", task]]);
+    let settleCount = 0;
+    let settledContent = "";
+    let settledPhase = "";
+    const stop = startBackgroundPolling(
+      makeDeps({
+        backgroundTasks,
+        steerTask: () => false,
+        checkTaskCompletion: async () => ({ status: "running", content: "" }),
+        completeTask: (_pi: any, _id: any, _task: any, content: string, phase: string) => {
+          settleCount += 1;
+          settledContent = content;
+          settledPhase = phase;
+        },
+      }),
+      10,
+    );
+    try {
+      await sleep(60);
+    } finally {
+      stop();
+    }
+    assert.equal(settleCount, 1, `${t}: settles immediately when steering fails`);
+    assert.equal(settledPhase, "timeout", `${t}: timeout phase`);
+    assert.ok(
+      settledContent.includes("steer-fail partial text"),
+      `${t}: partial result delivered: ${settledContent}`,
+    );
+    assert.equal(backgroundTasks.has("t1"), false, `${t}: task retired`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const t = "no turn limit means no steering and no settlement";
+  const backgroundTasks = new Map<string, any>([
+    ["t1", makeTurnTask({ turns: 500 })],
+  ]);
+  const steered: string[] = [];
+  let completions = 0;
+  const stop = startBackgroundPolling(
+    makeDeps({
+      backgroundTasks,
+      steerTask: (_task: any, prompt: string) => {
+        steered.push(prompt);
+        return true;
+      },
+      checkTaskCompletion: async () => ({ status: "running", content: "" }),
+      completeTask: () => {
+        completions += 1;
+      },
+    }),
+    10,
+  );
+  try {
+    await sleep(60);
+  } finally {
+    stop();
+  }
+  assert.equal(steered.length, 0, `${t}: no wrap-up without a limit`);
+  assert.equal(completions, 0, `${t}: task keeps running`);
+}
+
+{
+  const t = "a child that completes during wrap-up settles through the normal done path";
+  const backgroundTasks = new Map<string, any>([
+    [
+      "t1",
+      makeTurnTask({
+        maxTurns: 12,
+        turns: 13,
+        wrapUp: { turnsAtStart: 12 },
+      }),
+    ],
+  ]);
+  let settledPhase = "";
+  let settledContent = "";
+  const stop = startBackgroundPolling(
+    makeDeps({
+      backgroundTasks,
+      checkTaskCompletion: async () => ({
+        status: "completed",
+        content: "<task_result><summary>wrapped up cleanly</summary></task_result>",
+      }),
+      completeTask: (_pi: any, _id: any, _task: any, content: string, phase: string) => {
+        settledPhase = phase;
+        settledContent = content;
+      },
+    }),
+    10,
+  );
+  try {
+    await sleep(60);
+  } finally {
+    stop();
+  }
+  assert.equal(settledPhase, "done", `${t}: normal completion wins during wrap-up`);
+  assert.ok(settledContent.includes("wrapped up cleanly"), `${t}: real result delivered`);
 }

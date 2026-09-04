@@ -1,5 +1,7 @@
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { WRAP_UP_GRACE_TURNS, turnLimitWrapUpPrompt } from "../constants.js";
+import { getLastAssistantTextFromSessionDir } from "../session-text.js";
 import type { TaskCompletionSnapshot } from "../subagent/waitCompletion.js";
 import type { BackgroundTask } from "../types.js";
 import { completeTask, type ComparisonSettledHook } from "./completion.js";
@@ -29,6 +31,12 @@ export interface BackgroundPollingDeps {
   MAX_POLL_ERRORS: number;
   piDir: string;
   pi: ExtensionAPI;
+  /**
+   * Inject a user message into a running subagent (issue #19 wrap-up).
+   * Returns false when the injection fails (dead pane, herdr unavailable);
+   * the polling loop then settles the task immediately.
+   */
+  steerTask?: (task: BackgroundTask, prompt: string) => boolean;
 }
 
 export function startBackgroundPolling(
@@ -93,6 +101,45 @@ export function startBackgroundPolling(
               "timeout",
             );
             continue;
+          }
+
+          // Turn-based soft limit (issue #19): steer a wrap-up at the limit,
+          // allow a bounded grace of further turns, then settle with whatever
+          // the subagent produced instead of discarding it. SDK tasks are
+          // skipped above (no terminal session to steer).
+          if (task.maxTurns !== undefined) {
+            const readPartial = () =>
+              getLastAssistantTextFromSessionDir(
+                join(task.dir, "sessions", id),
+                task.sessionName,
+                task.startedAt,
+              );
+            if (!task.wrapUp && task.turns >= task.maxTurns) {
+              task.wrapUp = { turnsAtStart: task.turns };
+              const steered = deps.steerTask?.(task, turnLimitWrapUpPrompt(task.maxTurns)) ?? false;
+              if (!steered) {
+                if (deps.backgroundTasks.get(id) !== task) continue;
+                settle(
+                  id,
+                  task,
+                  `${readPartial() || "No assistant output captured."}\n\nTask reached the ${task.maxTurns}-turn limit; wrap-up steering failed.`,
+                  "timeout",
+                );
+                continue;
+              }
+            } else if (
+              task.wrapUp &&
+              task.turns >= task.wrapUp.turnsAtStart + WRAP_UP_GRACE_TURNS
+            ) {
+              if (deps.backgroundTasks.get(id) !== task) continue;
+              settle(
+                id,
+                task,
+                `${readPartial() || "No assistant output captured."}\n\nTask reached the ${task.maxTurns}-turn limit and did not wrap up within ${WRAP_UP_GRACE_TURNS} further turns.`,
+                "timeout",
+              );
+              continue;
+            }
           }
 
           const snapshot = await deps.checkTaskCompletion({

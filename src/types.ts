@@ -21,6 +21,14 @@ export interface BackgroundTask {
   startedAt: number;
   toolUses: number;
   turns: number;
+  /** Soft turn limit (issue #19); undefined = unlimited. */
+  maxTurns?: number;
+  /**
+   * Wrap-up phase (issue #19): anchored at the turn count observed when the
+   * limit was reached; the polling loop closes the task after
+   * WRAP_UP_GRACE_TURNS further completed turns.
+   */
+  wrapUp?: { turnsAtStart: number };
   conversationId?: string;
   /** Most recent tool calls (capped), updated every COUNT_POLL_MS. */
   recentCalls: ToolCallRecord[];
@@ -54,6 +62,8 @@ export interface RegistryEntry {
   cwd?: string;
   conversationId?: string;
   sessionRef?: string;
+  /** Soft turn limit persisted so restore keeps enforcing it (issue #19). */
+  maxTurns?: number;
   /** Terminal cleanup must be retried before this record is removed. */
   cleanupPending?: boolean;
   cleanupPhase?: "done" | "cancelled" | "timeout" | "failed";

@@ -32,6 +32,7 @@ export function restoreActiveBackgroundTasks(
       toolUses: 0,
       turns: 0,
       conversationId: entry.conversationId,
+      maxTurns: entry.maxTurns,
       recentCalls: [],
       comparisonGroupId: entry.comparisonGroupId,
       comparisonModel: entry.comparisonModel,

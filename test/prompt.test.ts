@@ -1,4 +1,5 @@
 import { strict as assert } from "node:assert";
+import { setTimeout as sleep } from "node:timers/promises";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -768,3 +769,131 @@ if (process.platform !== "win32") {
 }
 
 console.log("prompt.test.ts: all passed");
+if (process.platform !== "win32") {
+  const t = "live resume reattach keeps enforcing the agent turn limit";
+  const root = mkdtempSync(join(tmpdir(), "pi-task-resume-turns-"));
+  const originalPath = process.env.PATH;
+  const originalTmux = process.env.TMUX;
+  const originalBackend = process.env.PI_TASK_BACKEND;
+  let shutdown: (() => void) | undefined;
+  try {
+    mkdirSync(join(root, ".pi", "artifacts", "tasks"), { recursive: true });
+    const agentsDir = join(root, ".pi", "agents");
+    mkdirSync(agentsDir);
+    writeFileSync(
+      join(agentsDir, "limited.md"),
+      "---\ndescription: Turn limited agent\nmax_turns: 1\n---\n\n# Limited\n",
+    );
+
+    const binDir = join(root, "bin");
+    mkdirSync(binDir);
+    const tmuxLog = join(root, "tmux-args.log");
+    const tmux = join(binDir, "tmux");
+    // paste-buffer args carry no message text: the wrap-up prompt travels
+    // through `load-buffer` stdin, so capture stdin into the log.
+    writeFileSync(
+      tmux,
+      `#!/bin/sh\ncase "$1" in\n  -V) printf '%s\\\\n' 'tmux 3.4' ;;\n  load-buffer) cat >> '${tmuxLog}' ;;\n  display-message) case "$*" in *pane_width*) printf '%s\\\\n' '120 40' ;; *) printf '%s\\\\n' '%pane-1' ;; esac ;;\n  split-window) printf '%s\\\\n' '%pane-1' ;;\n  *) exit 0 ;;\nesac\n`,
+    );
+    chmodSync(tmux, 0o755);
+    process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+    process.env.TMUX = join(root, "tmux.sock");
+    process.env.PI_TASK_BACKEND = "tmux";
+
+    let tool: { execute: (...args: unknown[]) => Promise<{ isError?: boolean; details?: { task_id?: string } }> } | undefined;
+    taskExtension({
+      on(event: string, handler: () => void) {
+        if (event === "session_shutdown") shutdown = handler;
+      },
+      registerMessageRenderer() {},
+      registerFlag() {},
+      registerTool(value: typeof tool) {
+        tool = value;
+      },
+      registerCommand() {},
+      appendEntry() {},
+      getAllTools() {
+        return [];
+      },
+    } as never);
+    assert.ok(tool, t + " registration");
+
+    const base = {
+      agent_type: "limited",
+      prompt: "Do the work",
+      description: "Turn limited task",
+      background: true,
+    };
+    const first = await tool.execute(
+      "resume-turns-1",
+      { ...base, conversation_id: "conv-turns-1" },
+      undefined,
+      undefined,
+      { cwd: root, isProjectTrusted: () => true },
+    );
+    assert.equal(first.isError, undefined, t + " first launch");
+    const id = first.details?.task_id;
+    assert.ok(id, t + " task id");
+
+    // Simulate one completed assistant turn in the child session JSONL.
+    // The explicit conversation_id makes sessionName = conversationId.
+    const sessionDir = join(root, ".pi", "artifacts", "tasks", "sessions", id!);
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(
+      join(sessionDir, "conv-turns-1.jsonl"),
+      JSON.stringify({ type: "session_info", name: "conv-turns-1" }) + "\n" +
+      JSON.stringify({
+        type: "message",
+        timestamp: new Date().toISOString(),
+        message: { role: "assistant", content: [{ type: "text", text: "turn one" }] },
+      }) + "\n",
+    );
+
+    // Resume via conversation_id: the reattached tracker must restore
+    // maxTurns from the registry entry, so the polling loop steers a wrap-up
+    // once the recounted turn count reaches the limit.
+    const resumeOne = await tool.execute(
+      "resume-turns-2",
+      { ...base, conversation_id: "conv-turns-1" },
+      undefined,
+      undefined,
+      { cwd: root, isProjectTrusted: () => true },
+    );
+    assert.equal(resumeOne.isError, undefined, t + " conversation resume");
+    assert.equal(resumeOne.details?.task_id, id, t + " reattached to the same task");
+
+    await sleep(14000); // BACKGROUND_CHECK_MS tick + COUNT_POLL_MS recount
+
+    let log = readFileSync(tmuxLog, "utf8");
+    const steerOne = (log.match(/turn soft limit/g) ?? []).length;
+    assert.ok(steerOne >= 1, t + ` conversation resume enforces the limit (steer log: ${log.slice(-400)})`);
+
+    // Resume via task_id: second reattach site must restore maxTurns too.
+    const resumeTwo = await tool.execute(
+      "resume-turns-3",
+      { ...base, task_id: id },
+      undefined,
+      undefined,
+      { cwd: root, isProjectTrusted: () => true },
+    );
+    assert.equal(resumeTwo.isError, undefined, t + " task_id resume");
+
+    await sleep(14000);
+
+    log = readFileSync(tmuxLog, "utf8");
+    const steerTwo = (log.match(/turn soft limit/g) ?? []).length;
+    assert.ok(
+      steerTwo >= steerOne + 1,
+      t + ` task_id resume enforces the limit (steers: ${steerOne} -> ${steerTwo})`,
+    );
+  } finally {
+    shutdown?.();
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    if (originalTmux === undefined) delete process.env.TMUX;
+    else process.env.TMUX = originalTmux;
+    if (originalBackend === undefined) delete process.env.PI_TASK_BACKEND;
+    else process.env.PI_TASK_BACKEND = originalBackend;
+    rmSync(root, { recursive: true, force: true });
+  }
+}

@@ -4,6 +4,23 @@ All notable changes to `@heyhuynhgiabuu/pi-task` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] - 2026-09-05
+
+### Added
+
+- Turn-based soft limit for terminal subagents (opt-in): agent frontmatter `max_turns:` or `PI_TASK_MAX_TURNS` caps a child by completed assistant turns instead of only the 30-minute wall clock. At the limit the polling loop steers a wrap-up through the existing backend-aware steer (permission prompts stay open; turns do not advance while a human decides), allows a grace window, then settles with the child's partial assistant text plus a limit note instead of discarding local findings. The limit is resolved at launch and persisted on the registry entry, so restore and live-resume reattach keep enforcing it; foreground tasks keep wall-clock only.
+- Session-scoped background-task ownership: registry entries record the owning Pi session id and process pid. Another session's process no longer adopts, steers, times out, or delivers tasks it did not spawn — restore is gated on ownership, comparison replay from durable history skips groups owned elsewhere, and an explicit `conversation_id`/`task_id` resume transfers ownership to the resuming session. When the owning process is provably dead, recovery runs without adoption: finished tasks are settled from their session transcript, and an orphaned live pane with no consumer left is terminated and receipted (the timeout lives in the parent polling loop, so strict owner-only restore would leak crashed owners' children).
+
+### Fixed
+
+- Long subagent prompts no longer break the tmux backend: the system prompt travels via a prompt file and the task prompt is deferred past pane creation instead of being embedded in the `tmux split-window` command string (tmux rejects commands beyond its length limit, so panes were never created for large agent bodies).
+- `fast: true` agents now launch on the herdr backend (the herdr-managed state extension is passed only when child extensions are disabled), and single-path launch failures surface the underlying command failure message and stderr tail instead of a masked generic error.
+- Task session lookup resolves transcripts from the recorded artifact roots (issue #21): `findJsonlSessionByName` probed a legacy `<piDir>/artifacts/sessions` root no writer has used since the task-artifacts rework, returning null for every call — settlement never stamped `sessionRef` into history and task_id resume silently spawned a fresh session. The lookup is history-driven now, probing the entry's recorded root, the current tasks root, and the legacy root; all discovery (repair and settlement sites) is id-scoped so a session-name collision cannot adopt another task's transcript; persisted history records are validated at the read boundary (corrupt elements dropped, missing fields degrade to fallback probes instead of throwing); the resume repair merges only `sessionRef` so newer on-disk metadata wins; and the resume artifact-dir guard fires only when the recorded dir is gone and no usable transcript exists.
+
+### Changed
+
+- Peer/dev dependencies bumped to `@earendil-works/pi-ai` / `pi-coding-agent` / `pi-tui` `^0.85.0`; `test/conversation.test.ts` joined the default test script.
+
 ## [0.6.0] - 2026-09-03
 
 ### Added

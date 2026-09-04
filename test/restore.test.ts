@@ -546,3 +546,174 @@ it("preserves a dead HerdR record when identity-safe cleanup fails", () => {
     assert.equal(existsSync(join(piDir, "task-session-history.json")), false);
   });
 });
+
+describe("session ownership (issue #20)", () => {
+  function ownedEntry(piDir: string, over: Record<string, unknown>) {
+    const taskDir = join(piDir, "artifacts", "sessions", String(over.id));
+    writeSession(taskDir, `task-${over.id}`, over.stopReason);
+    return {
+      id: over.id,
+      dir: taskDir,
+      sessionName: `task-${over.id}`,
+      startedAt: Date.now() - 1000,
+      paneId: "%live",
+      agentType: "scout",
+      description: "owned task",
+      ...over,
+    };
+  }
+
+  it("skips live entries owned by another session with a live owner process", () => {
+    const piDir = makePiDir();
+    writeJson(join(piDir, "task-registry.json"), [
+      ownedEntry(piDir, { id: "task-foreign", ownerSessionId: "sess-a", ownerPid: 4242 }),
+    ]);
+
+    const backgroundTasks = new Map();
+    restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true, () => {}, {
+      sessionId: "sess-b",
+      isProcessAlive: () => true,
+    });
+
+    assert.equal(backgroundTasks.size, 0, "foreign task must not be adopted");
+    assert.equal(
+      readJson<Array<{ id: string }>>(join(piDir, "task-registry.json")).length,
+      1,
+      "registry entry left untouched for the owner",
+    );
+    assert.equal(
+      existsSync(join(piDir, "task-session-history.json")),
+      false,
+      "no receipt written for another session's task",
+    );
+  });
+
+  it("treats an owned entry without a pid as unverifiable and skips it", () => {
+    const piDir = makePiDir();
+    writeJson(join(piDir, "task-registry.json"), [
+      ownedEntry(piDir, { id: "task-nopid", ownerSessionId: "sess-a" }),
+    ]);
+
+    const backgroundTasks = new Map();
+    restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true, () => {}, {
+      sessionId: "sess-b",
+      isProcessAlive: () => false,
+    });
+
+    assert.equal(backgroundTasks.size, 0, "unverifiable owner is never overridden");
+    assert.equal(
+      readJson<Array<{ id: string }>>(join(piDir, "task-registry.json")).length,
+      1,
+      "registry entry retained",
+    );
+  });
+
+  it("restores entries owned by the current session", () => {
+    const piDir = makePiDir();
+    writeJson(join(piDir, "task-registry.json"), [
+      ownedEntry(piDir, { id: "task-own", ownerSessionId: "sess-b", ownerPid: 4242 }),
+    ]);
+
+    const backgroundTasks = new Map();
+    restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true, () => {}, {
+      sessionId: "sess-b",
+      isProcessAlive: () => true,
+    });
+
+    assert.equal(backgroundTasks.has("task-own"), true, "own live task restored");
+    assert.equal(
+      readJson<Array<{ id: string }>>(join(piDir, "task-registry.json")).length,
+      1,
+      "live entry stays registered",
+    );
+  });
+
+  it("terminates an orphaned live pane when the owning process is gone", () => {
+    const piDir = makePiDir();
+    writeJson(join(piDir, "task-registry.json"), [
+      ownedEntry(piDir, { id: "task-orphan", ownerSessionId: "sess-a", ownerPid: 4242 }),
+    ]);
+
+    let closeCount = 0;
+    const backgroundTasks = new Map();
+    restoreActiveBackgroundTasks(
+      piDir,
+      backgroundTasks,
+      () => true,
+      () => {
+        closeCount += 1;
+      },
+      { sessionId: "sess-b", isProcessAlive: () => false },
+    );
+
+    assert.equal(closeCount, 1, "orphaned pane terminated");
+    assert.equal(backgroundTasks.size, 0, "orphan is never adopted");
+    assert.deepEqual(
+      readJson<Array<{ id: string }>>(join(piDir, "task-registry.json")),
+      [],
+      "orphan entry settled and removed",
+    );
+    const history = readJson<Array<{ id: string; status: string }>>(
+      join(piDir, "task-session-history.json"),
+    );
+    assert.equal(history[0]?.status, "failed", "terminal receipt recorded");
+  });
+
+  it("records a finished orphan done when its owner is gone", () => {
+    const piDir = makePiDir();
+    writeJson(join(piDir, "task-registry.json"), [
+      ownedEntry(piDir, {
+        id: "task-orphan-done",
+        ownerSessionId: "sess-a",
+        ownerPid: 4242,
+        stopReason: "stop",
+      }),
+    ]);
+
+    const backgroundTasks = new Map();
+    restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true, () => {}, {
+      sessionId: "sess-b",
+      isProcessAlive: () => false,
+    });
+
+    assert.equal(backgroundTasks.size, 0);
+    const history = readJson<Array<{ id: string; status: string }>>(
+      join(piDir, "task-session-history.json"),
+    );
+    assert.equal(history[0]?.status, "done", "finished orphan keeps its result");
+  });
+
+  it("restores legacy entries without ownership information", () => {
+    const piDir = makePiDir();
+    writeJson(join(piDir, "task-registry.json"), [
+      ownedEntry(piDir, { id: "task-legacy" }),
+    ]);
+
+    const backgroundTasks = new Map();
+    restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true, () => {}, {
+      sessionId: "sess-b",
+      isProcessAlive: () => true,
+    });
+
+    assert.equal(backgroundTasks.has("task-legacy"), true, "legacy entry restores as before");
+  });
+
+  it("restores owned entries when the current session id is unknown", () => {
+    const piDir = makePiDir();
+    writeJson(join(piDir, "task-registry.json"), [
+      ownedEntry(piDir, { id: "task-unknown-host", ownerSessionId: "sess-a", ownerPid: 4242 }),
+    ]);
+
+    const backgroundTasks = new Map();
+    restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true, () => {}, {
+      sessionId: "",
+      isProcessAlive: () => true,
+    });
+
+    assert.equal(
+      backgroundTasks.has("task-unknown-host"),
+      true,
+      "unknown session id disables ownership scoping",
+    );
+  });
+});

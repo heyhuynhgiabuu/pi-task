@@ -499,3 +499,58 @@ test("a broken registry blocks terminal history writes so phases cannot flap", (
     "no durable terminal phase while the registry is broken",
   );
 });
+
+test("settlement carries the registry entry's session ownership into history", () => {
+  // A background comparison task gets a running record at spawn and its
+  // first REPLAYABLE (settled) record at settlement — running records never
+  // produce replay runs. The settle upsert must therefore copy the ownership
+  // from the registry entry (issue #20) — otherwise settled comparison
+  // history stays ownerless and the replay ownership filter is dead code.
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-completion-owner-"));
+  writeRegistry(piDir, [
+    {
+      id: "task-cmp-m0",
+      agentType: "reviewer",
+      description: "Review [model-a]",
+      sessionName: "task-task-cmp-m0",
+      startedAt: Date.now() - 1000,
+      paneId: "%cmp",
+      piDir,
+      dir: join(piDir, "artifacts", "tasks"),
+      ownerSessionId: "sess-a",
+      ownerPid: 4242,
+      comparisonGroupId: "cmp-group",
+      comparisonModel: "model-a",
+      comparisonDescription: "Review",
+      comparisonIndex: 0,
+    },
+  ]);
+  const task: BackgroundTask = {
+    dir: join(piDir, "artifacts", "tasks"),
+    agentType: "reviewer",
+    sessionName: "task-task-cmp-m0",
+    paneId: "%cmp",
+    originalPane: null,
+    description: "Review [model-a]",
+    startedAt: Date.now() - 1000,
+    toolUses: 0,
+    turns: 0,
+    comparisonGroupId: "cmp-group",
+    comparisonModel: "model-a",
+    comparisonDescription: "Review",
+    comparisonIndex: 0,
+  };
+
+  completeTask(
+    { sendMessage: () => {} } as never,
+    "task-cmp-m0",
+    task,
+    "<status>success</status>\n<summary>done</summary>",
+    "done",
+    piDir,
+  );
+
+  const history = readTaskSessionHistory(piDir);
+  assert.equal(history[0]?.ownerSessionId, "sess-a", "history records the owning session");
+  assert.equal(history[0]?.ownerPid, 4242, "history records the owning pid");
+});

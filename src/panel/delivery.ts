@@ -13,7 +13,7 @@ interface TaskParentContext {
   leafId: string | null;
 }
 
-interface SessionView {
+export interface SessionView {
   getSessionId(): string;
   getLeafId(): string | null;
   getBranch(): Array<{ id: string }>;

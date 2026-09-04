@@ -76,7 +76,9 @@ export function completeTask(
     task.agentType,
   )?.sessionRef;
 
-  const entries = readRegistry(piDir).filter((entry) => entry.id !== id);
+  const allEntries = readRegistry(piDir);
+  const priorEntry = allEntries.find((entry) => entry.id === id);
+  const entries = allEntries.filter((entry) => entry.id !== id);
   const cleanupEntry: RegistryEntry = {
     id,
     agentType: task.agentType,
@@ -97,6 +99,10 @@ export function completeTask(
     comparisonDescription: task.comparisonDescription,
     comparisonIndex: task.comparisonIndex,
     comparisonDelivered: task.comparisonDelivered,
+    ...(priorEntry?.ownerSessionId !== undefined
+      ? { ownerSessionId: priorEntry.ownerSessionId }
+      : {}),
+    ...(priorEntry?.ownerPid !== undefined ? { ownerPid: priorEntry.ownerPid } : {}),
   };
   // Keep a terminal cleanup receipt durable across a crash between the
   // state write and backend close. Restore retries it and removes it only
@@ -129,6 +135,10 @@ export function completeTask(
     comparisonDescription: task.comparisonDescription,
     comparisonIndex: task.comparisonIndex,
     comparisonDelivered: task.comparisonDelivered,
+    ...(priorEntry?.ownerSessionId !== undefined
+      ? { ownerSessionId: priorEntry.ownerSessionId }
+      : {}),
+    ...(priorEntry?.ownerPid !== undefined ? { ownerPid: priorEntry.ownerPid } : {}),
   });
 
   let cleanupSucceeded = true;

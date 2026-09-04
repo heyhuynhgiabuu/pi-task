@@ -64,6 +64,14 @@ export interface RegistryEntry {
   sessionRef?: string;
   /** Soft turn limit persisted so restore keeps enforcing it (issue #19). */
   maxTurns?: number;
+  /**
+   * Pi session that owns this task's lifecycle (issue #20): only it may
+   * restore, steer, time out, deliver, or remove the entry. Undefined on
+   * legacy entries and entries spawned before a session context existed.
+   */
+  ownerSessionId?: string;
+  /** OS pid of the owning Pi process; a dead pid lets others recover the task. */
+  ownerPid?: number;
   /** Terminal cleanup must be retried before this record is removed. */
   cleanupPending?: boolean;
   cleanupPhase?: "done" | "cancelled" | "timeout" | "failed";

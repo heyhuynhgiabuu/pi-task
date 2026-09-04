@@ -79,7 +79,7 @@ import {
   startBackgroundPolling,
   startToolStatsPolling,
 } from "./lifecycle/index.js";
-import { DeliveryGuard, sessionViewOf } from "./panel/delivery.js";
+import { DeliveryGuard, sessionViewOf, type SessionView } from "./panel/delivery.js";
 import { getLastAssistantTextFromSessionDir } from "./session-text.js";
 import { formatSdkBackgroundReceipt, startSdkBackgroundTask } from "./subagent/sdkBackground.js";
 import { runSdkSubagent } from "./subagent/runSdk.js";
@@ -200,6 +200,7 @@ export function restoreComparisonGroups(
   piDir: string,
   backgroundTasks: Map<string, BackgroundTask>,
   coordinator: ComparisonCoordinator,
+  currentSessionId?: string,
 ): ComparisonRunResult[] {
   const byGroup = new Map<string, Map<string, RestoredComparisonRecord>>();
   const add = (record: RestoredComparisonRecord): void => {
@@ -286,6 +287,16 @@ export function restoreComparisonGroups(
 
     for (const record of ordered) {
       if (!record.history || record.history.comparisonDelivered === true) continue;
+      // A group owned by another session (issue #20) is not replayed here:
+      // its owning process delivers it; this session can still read the
+      // results through durable-history lookups.
+      if (
+        currentSessionId &&
+        record.history.ownerSessionId !== undefined &&
+        record.history.ownerSessionId !== currentSessionId
+      ) {
+        continue;
+      }
       const run = comparisonRunFromHistory(record.history);
       if (run) pendingRuns.push(run);
     }
@@ -353,6 +364,35 @@ export default function (pi: ExtensionAPI) {
   // never delivered into a different conversation or branch.
   const deliveryGuard = new DeliveryGuard();
 
+  // Explicit resume moves lifecycle ownership (issue #20) to the resuming
+  // session: it now drives the pane, so the previous owner's process must
+  // stop restoring and controlling the task.
+  const transferTaskOwnership = (
+    registryEntry: RegistryEntry | undefined,
+    session: SessionView,
+  ): void => {
+    if (!registryEntry) return;
+    const sessionId = session.getSessionId();
+    // Without a session id ownership cannot be expressed; leave the entry as
+    // recorded rather than stripping it.
+    if (!sessionId) return;
+    if (
+      registryEntry.ownerSessionId === sessionId &&
+      registryEntry.ownerPid === process.pid
+    ) {
+      return;
+    }
+    const entries = readRegistry(piDir);
+    const idx = entries.findIndex((e) => e.id === registryEntry.id);
+    if (idx === -1) return;
+    entries[idx] = {
+      ...registryEntry,
+      ownerSessionId: sessionId,
+      ownerPid: process.pid,
+    };
+    writeRegistry(piDir, entries);
+  };
+
   // ── Restore active tasks from registry on load ──────────────────────────
 
   const syncHerdr = createSyncHerdrControl();
@@ -380,35 +420,6 @@ export default function (pi: ExtensionAPI) {
     }
     return registryEntryStatus(entry);
   };
-  try {
-    restoreActiveBackgroundTasks(
-      piDir,
-      backgroundTasks,
-      registryEntryAlive,
-      (entry) => {
-        if (entry.handle?.backend === "herdr") {
-          if (
-            entry.handle.foregroundProcessGroupId === undefined
-          ) {
-            throw new Error("HerdR restore cleanup requires persisted agent identity");
-          }
-          syncHerdr.close(entry.handle);
-        } else {
-          const paneId = entry.handle?.backend === "tmux"
-            ? entry.handle.resourceId
-            : entry.paneId;
-          if (paneId) killAgentPaneStrict(paneId, null);
-        }
-      },
-    );
-  } catch (error) {
-    // Restore must never abort extension registration; durable records stay
-    // on disk and the next load retries them.
-    console.error(
-      `[pi-task] background task restore failed: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-
 
   // ── Widget / timer setup ───────────────────────────────────────────────
 
@@ -422,11 +433,6 @@ export default function (pi: ExtensionAPI) {
   // ── Polling loop (background task completion, pane death, timeout) ──────
 
   const comparisonCoordinator = new ComparisonCoordinator();
-  const restoredComparisonRuns = restoreComparisonGroups(
-    piDir,
-    backgroundTasks,
-    comparisonCoordinator,
-  );
 
   const comparisonSettledHandler = (
     id: string,
@@ -461,22 +467,67 @@ export default function (pi: ExtensionAPI) {
     );
   };
 
-  for (const run of restoredComparisonRuns) {
-    // Load-time replay is best-effort: a non-stale send failure must not abort
-    // extension registration. The delivered marker stays unset, so the group
-    // is recovered and retried on the next extension load.
+  // Durable-task restore and comparison replay wait for the first
+  // session_start (issue #20): the owning session id only exists once a
+  // session context does, and restore decisions depend on it. Until then the
+  // maps stay empty; polling picks restored tasks up on its next tick.
+  let restoredLifecycleOnce = false;
+  pi.on("session_start", (_event, ctx) => {
+    if (restoredLifecycleOnce) return;
+    restoredLifecycleOnce = true;
+    const sessionId = sessionViewOf(ctx).getSessionId();
     try {
-      comparisonCoordinator.recordTaskSettled(
-        run.taskId,
-        run,
-        pi,
-        true,
-        (taskIds) => markComparisonGroupDelivered(piDir, taskIds),
+      restoreActiveBackgroundTasks(
+        piDir,
+        backgroundTasks,
+        registryEntryAlive,
+        (entry) => {
+          if (entry.handle?.backend === "herdr") {
+            if (
+              entry.handle.foregroundProcessGroupId === undefined
+            ) {
+              throw new Error("HerdR restore cleanup requires persisted agent identity");
+            }
+            syncHerdr.close(entry.handle);
+          } else {
+            const paneId = entry.handle?.backend === "tmux"
+              ? entry.handle.resourceId
+              : entry.paneId;
+            if (paneId) killAgentPaneStrict(paneId, null);
+          }
+        },
+        sessionId ? { sessionId } : undefined,
       );
-    } catch {
-      // Retry on next restart via durable history.
+    } catch (error) {
+      // Restore must never abort the session; durable records stay on disk
+      // and the next session_start retries them.
+      console.error(
+        `[pi-task] background task restore failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
-  }
+    const restoredComparisonRuns = restoreComparisonGroups(
+      piDir,
+      backgroundTasks,
+      comparisonCoordinator,
+      sessionId,
+    );
+    for (const run of restoredComparisonRuns) {
+      // Replay is best-effort: a non-stale send failure must not abort the
+      // session. The delivered marker stays unset, so the group is recovered
+      // and retried on the next extension load.
+      try {
+        comparisonCoordinator.recordTaskSettled(
+          run.taskId,
+          run,
+          pi,
+          true,
+          (taskIds) => markComparisonGroupDelivered(piDir, taskIds),
+        );
+      } catch {
+        // Retry on next restart via durable history.
+      }
+    }
+  });
 
   const stopBackgroundPolling = startBackgroundPolling(
     {
@@ -762,6 +813,7 @@ export default function (pi: ExtensionAPI) {
           };
                     backgroundTasks.set(id, bgtask);
                     deliveryGuard.track(id, sessionViewOf(ctx));
+                    transferTaskOwnership(entry, sessionViewOf(ctx));
           const steerResult = steerRunningBackgroundTask(
             bgtask.paneId,
             buildTaskFollowUpPrompt({
@@ -799,10 +851,11 @@ export default function (pi: ExtensionAPI) {
       } else if (taskParams.task_id) {
         // Look up active tasks first, then durable completed-session history.
         const entries = readRegistry(piDir);
+        const registryEntry = entries.find(
+          (e) => e.id === taskParams.task_id || e.sessionName === taskParams.task_id,
+        );
         let entry =
-          entries.find(
-            (e) => e.id === taskParams.task_id || e.sessionName === taskParams.task_id,
-          ) ??
+          registryEntry ??
           findTaskSessionHistory(piDir, taskParams.task_id) ??
           findJsonlSessionByName(piDir, taskParams.task_id, agent.name);
 
@@ -895,6 +948,7 @@ export default function (pi: ExtensionAPI) {
           };
           backgroundTasks.set(id, bgtask);
           deliveryGuard.track(id, sessionViewOf(ctx));
+          transferTaskOwnership(registryEntry, sessionViewOf(ctx));
           const steerResult = steerRunningBackgroundTask(
             bgtask.paneId,
             buildTaskFollowUpPrompt({
@@ -1528,6 +1582,8 @@ Both subagents are running in background. Results will be compared and delivered
                 cwd: taskCwd,
                 status: "running",
                 background: false,
+                ownerSessionId: sessionViewOf(ctx).getSessionId() || undefined,
+                ownerPid: process.pid,
                 comparisonGroupId: groupId,
                 comparisonModel: t.model,
                 comparisonDescription: descText,
@@ -1675,6 +1731,8 @@ Both subagents are running in background. Results will be compared and delivered
             cwd: taskCwd,
             status: "running",
             background: true,
+            ownerSessionId: sessionViewOf(ctx).getSessionId() || undefined,
+            ownerPid: process.pid,
             comparisonGroupId: groupId,
             comparisonModel: t.model,
             comparisonDescription: descText,
@@ -1702,6 +1760,8 @@ Both subagents are running in background. Results will be compared and delivered
             dir: artifactsDir,
             cwd: taskCwd,
             maxTurns,
+            ownerSessionId: sessionViewOf(ctx).getSessionId() || undefined,
+            ownerPid: process.pid,
             comparisonGroupId: groupId,
             comparisonModel: t.model,
             comparisonDescription: descText,
@@ -2061,6 +2121,8 @@ Both subagents are running in background. Results will be compared and delivered
           conversationId,
           status: "running",
           background: false,
+          ownerSessionId: sessionViewOf(ctx).getSessionId() || undefined,
+          ownerPid: process.pid,
         });
 
                         const stopProgress = startForegroundProgressPolling({
@@ -2209,6 +2271,8 @@ Both subagents are running in background. Results will be compared and delivered
         cwd: taskCwd,
         conversationId,
         maxTurns: bgtask.maxTurns,
+        ownerSessionId: sessionViewOf(ctx).getSessionId() || undefined,
+        ownerPid: process.pid,
       };
 
       // Write to JSON registry for on-load restore

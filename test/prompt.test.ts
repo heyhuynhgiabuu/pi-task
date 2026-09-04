@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { setTimeout as sleep } from "node:timers/promises";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -894,6 +894,171 @@ if (process.platform !== "win32") {
     else process.env.TMUX = originalTmux;
     if (originalBackend === undefined) delete process.env.PI_TASK_BACKEND;
     else process.env.PI_TASK_BACKEND = originalBackend;
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+if (process.platform !== "win32") {
+  const t = "background restore runs on the first session_start and respects session ownership";
+  const root = mkdtempSync(join(tmpdir(), "pi-task-ownership-"));
+  const originalPath = process.env.PATH;
+  const originalTmux = process.env.TMUX;
+  const originalBackend = process.env.PI_TASK_BACKEND;
+  const originalCwd = process.cwd();
+  let shutdown: (() => void) | undefined;
+  try {
+    mkdirSync(join(root, ".pi", "artifacts", "tasks"), { recursive: true });
+    const agentsDir = join(root, ".pi", "agents");
+    mkdirSync(agentsDir);
+    writeFileSync(
+      join(agentsDir, "scout.md"),
+      "---\ndescription: Scout agent\n---\n\n# Scout\n",
+    );
+
+    const binDir = join(root, "bin");
+    mkdirSync(binDir);
+    const tmux = join(binDir, "tmux");
+    writeFileSync(
+      tmux,
+      "#!/bin/sh\ncase \"$1\" in\n  -V) printf '%s\\n' 'tmux 3.4' ;;\n  display-message) case \"$*\" in *pane_width*) printf '%s\\n' '120 40' ;; *) printf '%s\\n' '%pane-1' ;; esac ;;\n  split-window) printf '%s\\n' '%pane-1' ;;\n  *) exit 0 ;;\nesac\n",
+    );
+    chmodSync(tmux, 0o755);
+    process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+    process.env.TMUX = join(root, "tmux.sock");
+    process.env.PI_TASK_BACKEND = "tmux";
+    // The extension resolves its registry piDir from process.cwd().
+    process.chdir(root);
+
+    // Registry fixture at extension load:
+    // A: owned by another live session — must stay untouched.
+    // B: owned by this session, already finished — recovered as done.
+    // C: legacy entry without ownership — restored as before.
+    const registry = [
+      {
+        id: "task-foreign",
+        dir: join(root, ".pi", "artifacts", "tasks"),
+        sessionName: "task-task-foreign",
+        startedAt: Date.now() - 1000,
+        paneId: "%pane-1",
+        agentType: "scout",
+        description: "foreign live task",
+        ownerSessionId: "sess-a",
+        ownerPid: process.pid,
+      },
+      {
+        id: "task-owned-done",
+        dir: join(root, ".pi", "artifacts", "tasks"),
+        sessionName: "task-task-owned-done",
+        startedAt: Date.now() - 1000,
+        paneId: "%pane-1",
+        agentType: "scout",
+        description: "own finished task",
+        ownerSessionId: "sess-host",
+        ownerPid: process.pid,
+      },
+      {
+        id: "task-legacy",
+        dir: join(root, ".pi", "artifacts", "tasks"),
+        sessionName: "task-task-legacy",
+        startedAt: Date.now() - 1000,
+        paneId: "%pane-1",
+        agentType: "scout",
+        description: "legacy live task",
+      },
+    ];
+    writeFileSync(join(root, ".pi", "task-registry.json"), JSON.stringify(registry));
+
+    const timestamp = new Date().toISOString();
+    const sessionDir = join(root, ".pi", "artifacts", "tasks", "sessions");
+    mkdirSync(join(sessionDir, "task-owned-done"), { recursive: true });
+    writeFileSync(
+      join(sessionDir, "task-owned-done", "task-owned-done.jsonl"),
+      JSON.stringify({ type: "session_info", timestamp, name: "task-task-owned-done" }) + "\n" +
+      JSON.stringify({
+        type: "message",
+        timestamp,
+        message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] },
+      }) + "\n",
+    );
+
+    const sessionStartHandlers: Array<(...args: unknown[]) => unknown> = [];
+    taskExtension({
+      on(event: string, handler: (...args: unknown[]) => unknown) {
+        if (event === "session_start") sessionStartHandlers.push(handler);
+        if (event === "session_shutdown") shutdown = handler as () => void;
+      },
+      registerMessageRenderer() {},
+      registerFlag() {},
+      registerTool() {},
+      registerCommand() {},
+      appendEntry() {},
+      getAllTools() {
+        return [];
+      },
+    } as never);
+
+    // No restore may run at registration time (issue #20): the session id
+    // does not exist yet, so nothing has been decided about ownership.
+    assert.equal(
+      existsSync(join(root, ".pi", "task-session-history.json")),
+      false,
+      t + " no durable restore before session_start",
+    );
+
+    const hostCtx = {
+      cwd: root,
+      isProjectTrusted: () => true,
+      sessionManager: {
+        getSessionId: () => "sess-host",
+        getLeafId: () => null,
+        getBranch: () => [],
+      },
+    };
+    for (const handler of sessionStartHandlers) {
+      handler({ type: "session_start", reason: "startup" }, hostCtx);
+    }
+
+    const readRegistryIds = (): string[] =>
+      JSON.parse(readFileSync(join(root, ".pi", "task-registry.json"), "utf8")).map(
+        (entry: { id: string }) => entry.id,
+      );
+    assert.deepEqual(
+      readRegistryIds().sort(),
+      ["task-foreign", "task-legacy"],
+      t + " foreign entry untouched, finished own entry recovered, legacy stays registered",
+    );
+    const history = JSON.parse(
+      readFileSync(join(root, ".pi", "task-session-history.json"), "utf8"),
+    ) as Array<{ id: string; status: string }>;
+    assert.equal(history.find((entry) => entry.id === "task-owned-done")?.status, "done", t + " own finished entry receipt");
+
+    // A later session switch must not re-run restore (once-guard).
+    const otherCtx = {
+      cwd: root,
+      isProjectTrusted: () => true,
+      sessionManager: {
+        getSessionId: () => "sess-other",
+        getLeafId: () => null,
+        getBranch: () => [],
+      },
+    };
+    for (const handler of sessionStartHandlers) {
+      handler({ type: "session_start", reason: "resume" }, otherCtx);
+    }
+    assert.equal(
+      readRegistryIds().includes("task-foreign"),
+      true,
+      t + " restore runs once; the foreign entry is not reconsidered",
+    );
+  } finally {
+    shutdown?.();
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    if (originalTmux === undefined) delete process.env.TMUX;
+    else process.env.TMUX = originalTmux;
+    if (originalBackend === undefined) delete process.env.PI_TASK_BACKEND;
+    else process.env.PI_TASK_BACKEND = originalBackend;
+    process.chdir(originalCwd);
     rmSync(root, { recursive: true, force: true });
   }
 }

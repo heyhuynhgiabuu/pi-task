@@ -14,6 +14,7 @@ export function restoreActiveBackgroundTasks(
   backgroundTasks: Map<string, BackgroundTask>,
   resourceExists?: (entry: RegistryEntry) => boolean,
   closeResource?: (entry: RegistryEntry) => void,
+  session?: { sessionId: string; isProcessAlive?: (pid: number) => boolean },
 ): void {
   const registry = readRegistry(piDir);
   const staleIds: string[] = [];
@@ -59,6 +60,23 @@ export function restoreActiveBackgroundTasks(
   }
 
   function restoreEntry(entry: RegistryEntry): void {
+    // Ownership gate (issue #20): a live task belongs to the session that
+    // spawned it — another session's process must not adopt, steer, time
+    // out, or deliver it. Only when the owning process is provably gone may
+    // this process recover the task, and recovery never adopts: an orphaned
+    // live pane is terminated because nobody is left to consume its result.
+    const foreign =
+      session !== undefined &&
+      session.sessionId !== "" &&
+      entry.ownerSessionId !== undefined &&
+      entry.ownerSessionId !== session.sessionId;
+    if (foreign && (entry.ownerPid === undefined || isOwnerAlive(entry.ownerPid))) {
+      // The owner is running elsewhere (or unverifiable): leave the entry
+      // untouched for that process.
+      return;
+    }
+    const orphaned = foreign;
+
     if (entry.cleanupPending) {
       try {
         if (closeResource) closeResource(entry);
@@ -191,7 +209,7 @@ export function restoreActiveBackgroundTasks(
     // Comparison siblings whose session is still running must remain active;
     // a sibling already finished above is recovered from durable history and
     // fed into the coordinator during extension startup.
-    if (entry.comparisonGroupId && entry.comparisonModel) {
+    if (entry.comparisonGroupId && entry.comparisonModel && !orphaned) {
       restoreTask(entry, paneId);
       return;
     }
@@ -233,6 +251,71 @@ export function restoreActiveBackgroundTasks(
       return;
     }
 
+    if (orphaned) {
+      // Owner gone, pane still alive, session unfinished: no consumer
+      // remains, so terminate the child and record a terminal receipt.
+      let cleanupSucceeded = true;
+      if (entry.handle?.backend === "herdr") {
+        if (!closeResource) cleanupSucceeded = false;
+        else {
+          try {
+            closeResource(entry);
+          } catch {
+            cleanupSucceeded = false;
+          }
+        }
+      } else if (paneId) {
+        try {
+          if (closeResource) closeResource(entry);
+          else killAgentPane(paneId, null);
+        } catch {
+          cleanupSucceeded = false;
+        }
+      }
+      if (!cleanupSucceeded) return;
+      upsertTaskSessionHistory(piDir, {
+        id: entry.id,
+        status: "failed",
+        background: true,
+        agentType: entry.agentType,
+        description: entry.description,
+        sessionName: entry.sessionName,
+        startedAt: entry.startedAt,
+        handle: entry.handle,
+        paneId: entry.paneId,
+        piDir: entry.piDir,
+        dir: entry.dir,
+        cwd: entry.cwd,
+        completedAt: Date.now(),
+        comparisonGroupId: entry.comparisonGroupId,
+        comparisonModel: entry.comparisonModel,
+        comparisonDescription: entry.comparisonDescription,
+        comparisonIndex: entry.comparisonIndex,
+        comparisonDelivered: entry.comparisonDelivered,
+      });
+      staleIds.push(entry.id);
+      return;
+    }
+
     restoreTask(entry, paneId);
+  }
+
+  function isOwnerAlive(pid: number): boolean {
+    const check = session?.isProcessAlive ?? defaultProcessAlive;
+    try {
+      return check(pid);
+    } catch {
+      return true;
+    }
+  }
+}
+
+function defaultProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    // EPERM means the process exists but is not signalable by this user.
+    return error instanceof Error && (error as NodeJS.ErrnoException).code === "EPERM";
   }
 }

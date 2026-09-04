@@ -372,3 +372,57 @@ test("ComparisonCoordinator respects deliveryGuard when delivery is refused", ()
   assert.equal(coordinator.isComparisonTask("task-3-m1"), false);
 });
 
+
+test("restoreComparisonGroups skips history runs owned by another session", () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-comparison-foreign-owner-"));
+  const taskDirA = join(piDir, "artifacts", "sessions", "task-m0");
+  const taskDirB = join(piDir, "artifacts", "sessions", "task-m1");
+  mkdirSync(taskDirA, { recursive: true });
+  mkdirSync(taskDirB, { recursive: true });
+  const timestamp = new Date().toISOString();
+  for (const [dir, name, model, index] of [
+    [taskDirA, "task-m0", "model-a", 0],
+    [taskDirB, "task-m1", "model-b", 1],
+  ] as const) {
+    writeFileSync(
+      join(dir, "session.jsonl"),
+      [
+        { type: "session_info", timestamp, name },
+        {
+          type: "message",
+          timestamp,
+          message: {
+            role: "assistant",
+            stopReason: "stop",
+            content: [{ type: "text", text: `<status>success</status>\n<summary>${name} result</summary>` }],
+          },
+        },
+      ].map((entry) => JSON.stringify(entry)).join("\n"),
+    );
+    upsertTaskSessionHistory(piDir, {
+      id: name,
+      agentType: "reviewer",
+      description: `Review [${model}]`,
+      sessionName: name,
+      startedAt: Date.now() - 1000,
+      handle: { backend: "tmux", resourceId: `%${name}` },
+      piDir,
+      dir: join(piDir, "artifacts"),
+      status: "done",
+      sessionRef: join(dir, "session.jsonl"),
+      completedAt: Date.now(),
+      background: true,
+      ownerSessionId: "sess-a",
+      comparisonGroupId: "compare-group",
+      comparisonModel: model,
+      comparisonDescription: "Review",
+      comparisonIndex: index as 0 | 1,
+    });
+  }
+
+  const foreign = restoreComparisonGroups(piDir, new Map(), new ComparisonCoordinator(), "sess-b");
+  assert.equal(foreign.length, 0, "a group owned by another session is not replayed");
+
+  const own = restoreComparisonGroups(piDir, new Map(), new ComparisonCoordinator(), "sess-a");
+  assert.equal(own.length, 2, "the owning session replays both siblings");
+});

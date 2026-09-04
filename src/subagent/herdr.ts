@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { isAbsolute } from "node:path";
+import { existsSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import type { HerdrTerminalHandle } from "../types.js";
 import {
   CLI_TIMEOUT_MS,
@@ -534,6 +535,31 @@ function requireHerdrHandle(
   if (handle.backend !== "herdr")
     throw new Error("HerdR backend cannot control a non-HerdR handle");
   return handle;
+}
+
+/**
+ * Resolve the herdr-managed Pi lifecycle integration extension path
+ * (herdr-agent-state.ts, installed by `herdr integration install pi`).
+ *
+ * Fast children run with `--no-extensions`, which disables extension
+ * discovery — including this file — leaving herdr without the lifecycle
+ * telemetry its `agent prompt --wait` confirmation depends on (issue: fast
+ * agents could not launch on the herdr backend). The path is a convention
+ * with an env override for non-standard installs; a missing file degrades
+ * to undefined (no extension) instead of hard-failing, because herdr may
+ * detect agent state natively in future versions. Do not copy or fork the
+ * file: it is herdr-managed and protocol-versioned (HERDR_INTEGRATION_VERSION).
+ */
+export function resolveHerdrPiIntegrationExtension(
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  const override = env.PI_TASK_HERDR_EXTENSION?.trim();
+  const home = env.HOME || env.USERPROFILE || "";
+  const candidates = [
+    ...(override ? [override] : []),
+    ...(home ? [join(home, ".pi", "agent", "extensions", "herdr-agent-state.ts")] : []),
+  ];
+  return candidates.find((candidate) => existsSync(candidate));
 }
 
 export interface HerdrTerminalBackendOptions {

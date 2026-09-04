@@ -87,6 +87,26 @@ class CommandFailedError extends Error {
   }
 }
 
+/**
+ * Human-readable failure reason for a backend launch error, including the
+ * CLI's stderr/stdout tail when available. Used by launch failure returns so
+ * the underlying cause (e.g. herdr's "no confirmed lifecycle transition")
+ * reaches the caller instead of being masked by a generic message.
+ */
+export function describeCommandFailure(error: unknown): string {
+  const parts: string[] = [];
+  if (error instanceof Error) {
+    parts.push(error.message);
+  }
+  if (error instanceof CommandFailedError) {
+    const output = (error.stderr.trim() || error.stdout.trim()).slice(-400);
+    if (output) parts.push(output);
+  } else if (parts.length === 0 && error !== undefined && error !== null) {
+    parts.push(String(error));
+  }
+  return parts.filter(Boolean).join(": ") || "unknown error";
+}
+
 export function createDefaultCommandRunner(): CommandRunner {
   return {
     run(command, args, options = {}) {

@@ -1,11 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { dirname, join } from "node:path";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 
 import {
   createHerdrTerminalBackend,
   createSyncHerdrControl,
+  resolveHerdrPiIntegrationExtension,
 } from "../src/subagent/herdr.js";
 import { buildPiArgs, type AgentConfig } from "../src/helpers.js";
+import { buildPiArgv, type BuildPiArgvOptions } from "../src/subagent/buildArgv.js";
 
 function processInfoResult(
   paneId = "w1:p2",
@@ -54,6 +59,82 @@ test("HerdR Pi argv defers the raw task prompt instead of using a file attachmen
   assert.ok(!args.some((arg) => arg.startsWith("@")));
   assert.ok(!args.includes("# Task\n\nReview the current diff."));
   assert.ok(!args.includes(agent.body));
+});
+
+test("Fast Pi argv explicitly loads required extensions even with --no-extensions", () => {
+  // Cast: the option is new; the test must fail at runtime (option ignored),
+  // not at compile time, to prove the behavior is genuinely missing.
+  const options = {
+    agent: {
+      name: "reviewer",
+      description: "Reviews code",
+      body: "# Reviewer\n\nInspect the diff.",
+      source: "user",
+    },
+    sessionName: "task-x",
+    sessionDir: "/repo/.pi/tasks/x",
+    promptContent: "Do the work.",
+    fast: true,
+    fastExtensionPath: "/bridge/pi-task.js",
+    requiredExtensions: ["/ext/herdr-agent-state.ts"],
+  } as unknown as BuildPiArgvOptions;
+  const args = buildPiArgv(options);
+  const extensionValues = args.flatMap((arg, index) =>
+    arg === "--extension" && args[index + 1] ? [args[index + 1]!] : [],
+  );
+  assert.ok(
+    extensionValues.includes("/ext/herdr-agent-state.ts"),
+    `required extension missing from argv: ${args.join(" ")}`,
+  );
+  assert.ok(extensionValues.includes("/bridge/pi-task.js"));
+  assert.ok(args.includes("--no-extensions"));
+});
+
+test("HerdR Pi integration extension resolver prefers an existing override and falls through a missing one", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-herdr-ext-"));
+  try {
+    const home = join(root, "home");
+    const convention = join(home, ".pi", "agent", "extensions", "herdr-agent-state.ts");
+    mkdirSync(dirname(convention), { recursive: true });
+    writeFileSync(convention, "// integration\n");
+    const existingOverride = join(root, "custom-integration.ts");
+    writeFileSync(existingOverride, "// custom\n");
+
+    assert.equal(
+      resolveHerdrPiIntegrationExtension({
+        HOME: home,
+        PI_TASK_HERDR_EXTENSION: existingOverride,
+      }),
+      existingOverride,
+      "existing override wins",
+    );
+    assert.equal(
+      resolveHerdrPiIntegrationExtension({
+        HOME: home,
+        PI_TASK_HERDR_EXTENSION: join(root, "missing.ts"),
+      }),
+      convention,
+      "set-but-missing override falls through to the convention path",
+    );
+    assert.equal(
+      resolveHerdrPiIntegrationExtension({
+        HOME: "",
+        USERPROFILE: home,
+      }),
+      convention,
+      "empty HOME falls through to USERPROFILE (repo convention: getGlobalAgentDir)",
+    );
+    assert.equal(
+      resolveHerdrPiIntegrationExtension({
+        HOME: join(root, "absent"),
+        USERPROFILE: join(root, "absent"),
+      }),
+      undefined,
+      "no integration file anywhere resolves to undefined",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("grouped HerdR launch starts Pi in the new workspace root pane", async () => {

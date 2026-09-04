@@ -929,6 +929,7 @@ function stripProactivePrefix(description: string): string {
       skillPaths?: string[],
       fast?: boolean,
       fastExtensionPath?: string,
+      requiredExtensions?: string[],
     ): string[] {
       return buildPiArgv({
         agent,
@@ -943,6 +944,7 @@ function stripProactivePrefix(description: string): string {
         skillPaths,
         fast,
         fastExtensionPath,
+        requiredExtensions,
       });
     }
 

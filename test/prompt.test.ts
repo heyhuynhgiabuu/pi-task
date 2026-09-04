@@ -404,6 +404,326 @@ if (process.platform !== "win32") {
   }
 }
 
+if (process.platform !== "win32") {
+  const t = "fast herdr launch loads the herdr integration extension and surfaces launch failures";
+  const root = mkdtempSync(join(tmpdir(), "pi-task-herdr-fast-"));
+  const home = mkdtempSync(join(tmpdir(), "pi-task-herdr-home-"));
+  const originalPath = process.env.PATH;
+  const originalHome = process.env.HOME;
+  const originalHerdrEnv = process.env.HERDR_ENV;
+  const originalHerdrPane = process.env.HERDR_PANE_ID;
+  const originalHerdrSocket = process.env.HERDR_SOCKET_PATH;
+  const originalBackend = process.env.PI_TASK_BACKEND;
+  const originalHerdrExtension = process.env.PI_TASK_HERDR_EXTENSION;
+  let shutdown: (() => void) | undefined;
+  try {
+    mkdirSync(join(root, ".pi", "artifacts", "tasks"), { recursive: true });
+    const agentsDir = join(root, ".pi", "agents");
+    mkdirSync(agentsDir);
+    writeFileSync(
+      join(agentsDir, "fastaudit.md"),
+      "---\ndescription: Fast audit agent\nfast: true\n---\n\n# Fast audit\n",
+    );
+
+    const binDir = join(root, "bin");
+    mkdirSync(binDir);
+    const herdrLog = join(root, "herdr-args.log");
+    const herdr = join(binDir, "herdr");
+    writeFileSync(
+      herdr,
+      `#!/bin/sh\necho "$*" >> '${herdrLog}'\ncase "$1 $2" in\n  "status server") exit 0 ;;\n  "pane current") exit 0 ;;\n  "pane split") echo '{"pane":{"pane_id":"w9:p2","terminal_id":"term-9"}}' ;;\n  "agent start") echo 'agent start exploded: fake-herdr-failure-9137' >&2; exit 1 ;;\n  *) exit 0 ;;\nesac\n`,
+    );
+    chmodSync(herdr, 0o755);
+    const integrationPath = join(home, ".pi", "agent", "extensions", "herdr-agent-state.ts");
+    mkdirSync(join(home, ".pi", "agent", "extensions"), { recursive: true });
+    writeFileSync(integrationPath, "// fake herdr integration\n");
+
+    process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+    process.env.HOME = home;
+    process.env.HERDR_ENV = "1";
+    process.env.HERDR_PANE_ID = "w9:p1";
+    process.env.HERDR_SOCKET_PATH = join(root, "herdr.sock");
+    process.env.PI_TASK_BACKEND = "herdr";
+    delete process.env.PI_TASK_HERDR_EXTENSION;
+
+    let tool: { execute: (...args: unknown[]) => Promise<{ isError?: boolean; content?: Array<{ type: string; text: string }>; details?: { reason?: string } }> } | undefined;
+    taskExtension({
+      on(event: string, handler: () => void) {
+        if (event === "session_shutdown") shutdown = handler;
+      },
+      registerMessageRenderer() {},
+      registerFlag() {},
+      registerTool(value: typeof tool) {
+        tool = value;
+      },
+      registerCommand() {},
+      appendEntry() {},
+      getAllTools() {
+        return [];
+      },
+    } as never);
+    assert.ok(tool, t + " registration");
+
+    const result = await tool.execute(
+      "herdr-fast-1",
+      {
+        agent_type: "fastaudit",
+        prompt: "Audit the diff",
+        description: "Fast audit",
+        background: false,
+      },
+      undefined,
+      undefined,
+      { cwd: root, isProjectTrusted: () => true },
+    );
+    assert.equal(result.isError, true, t + " launch fails at agent start");
+    const log = readFileSync(herdrLog, "utf8");
+    const startLine = log.split("\n").find((line) => line.startsWith("agent start "));
+    assert.ok(startLine, t + " agent start was invoked");
+    assert.ok(
+      startLine!.includes("--extension"),
+      t + " fast herdr argv carries explicit --extension flags",
+    );
+    assert.ok(
+      startLine!.includes(integrationPath),
+      t + ` herdr integration extension loaded explicitly; argv: ${startLine}`,
+    );
+    const text = result.content?.[0]?.text ?? "";
+    assert.ok(
+      text.includes("fake-herdr-failure-9137"),
+      t + ` underlying launch failure surfaces: ${JSON.stringify(result.content)}`,
+    );
+    assert.ok(
+      (result.details?.reason ?? "").includes("fake-herdr-failure-9137"),
+      t + " details.reason carries the underlying failure",
+    );
+  } finally {
+    shutdown?.();
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    if (originalHerdrEnv === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = originalHerdrEnv;
+    if (originalHerdrPane === undefined) delete process.env.HERDR_PANE_ID;
+    else process.env.HERDR_PANE_ID = originalHerdrPane;
+    if (originalHerdrSocket === undefined) delete process.env.HERDR_SOCKET_PATH;
+    else process.env.HERDR_SOCKET_PATH = originalHerdrSocket;
+    if (originalBackend === undefined) delete process.env.PI_TASK_BACKEND;
+    else process.env.PI_TASK_BACKEND = originalBackend;
+    if (originalHerdrExtension === undefined) delete process.env.PI_TASK_HERDR_EXTENSION;
+    else process.env.PI_TASK_HERDR_EXTENSION = originalHerdrExtension;
+    rmSync(root, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+if (process.platform !== "win32") {
+  const t = "fast herdr compare launch carries the integration extension on every sibling";
+  const root = mkdtempSync(join(tmpdir(), "pi-task-herdr-compare-"));
+  const home = mkdtempSync(join(tmpdir(), "pi-task-herdr-compare-home-"));
+  const originalPath = process.env.PATH;
+  const originalHome = process.env.HOME;
+  const originalHerdrEnv = process.env.HERDR_ENV;
+  const originalHerdrPane = process.env.HERDR_PANE_ID;
+  const originalHerdrSocket = process.env.HERDR_SOCKET_PATH;
+  const originalBackend = process.env.PI_TASK_BACKEND;
+  const originalHerdrExtension = process.env.PI_TASK_HERDR_EXTENSION;
+  let shutdown: (() => void) | undefined;
+  try {
+    mkdirSync(join(root, ".pi", "artifacts", "tasks"), { recursive: true });
+    const agentsDir = join(root, ".pi", "agents");
+    mkdirSync(agentsDir);
+    writeFileSync(
+      join(agentsDir, "fastcmp.md"),
+      "---\ndescription: Fast compare agent\nfast: true\ntools: read, grep, find, ls\nmodels:\n  - zai/glm-5.3\n  - openai-codex/gpt-5.6-sol\n---\n\n# Fast compare\n",
+    );
+
+    const binDir = join(root, "bin");
+    mkdirSync(binDir);
+    const herdrLog = join(root, "herdr-args.log");
+    const herdr = join(binDir, "herdr");
+    writeFileSync(
+      herdr,
+      `#!/bin/sh\necho "$*" >> '${herdrLog}'\ncase "$1 $2" in\n  "status server") exit 0 ;;\n  "pane current") exit 0 ;;\n  "pane split") echo '{"pane":{"pane_id":"w9:p2","terminal_id":"term-9"}}' ;;\n  "pane process-info") echo '{"process_info":{"pane_id":"w9:p2","foreground_process_group_id":42}}' ;;\n  "agent get") echo '{"agent":{"pane_id":"w9:p2","terminal_id":"term-9","name":"pi-task","agent":"pi","agent_status":"idle","state_change_seq":10}}' ;;\n  "agent start") echo '{"agent":{"pane_id":"w9:p2","terminal_id":"term-9"}}' ;;\n  "agent prompt") echo '{"agent":{"pane_id":"w9:p2","terminal_id":"term-9"}}' ;;\n  *) exit 0 ;;\nesac\n`,
+    );
+    chmodSync(herdr, 0o755);
+    const integrationPath = join(home, ".pi", "agent", "extensions", "herdr-agent-state.ts");
+    mkdirSync(join(home, ".pi", "agent", "extensions"), { recursive: true });
+    writeFileSync(integrationPath, "// fake herdr integration\n");
+
+    process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+    process.env.HOME = home;
+    process.env.HERDR_ENV = "1";
+    process.env.HERDR_PANE_ID = "w9:p1";
+    process.env.HERDR_SOCKET_PATH = join(root, "herdr.sock");
+    process.env.PI_TASK_BACKEND = "herdr";
+    delete process.env.PI_TASK_HERDR_EXTENSION;
+
+    let tool: { execute: (...args: unknown[]) => Promise<{ isError?: boolean; content?: Array<{ type: string; text: string }> }> } | undefined;
+    taskExtension({
+      on(event: string, handler: () => void) {
+        if (event === "session_shutdown") shutdown = handler;
+      },
+      registerMessageRenderer() {},
+      registerFlag() {},
+      registerTool(value: typeof tool) {
+        tool = value;
+      },
+      registerCommand() {},
+      appendEntry() {},
+      getAllTools() {
+        return [];
+      },
+    } as never);
+    assert.ok(tool, t + " registration");
+
+    const result = await tool.execute(
+      "herdr-compare-1",
+      {
+        agent_type: "fastcmp",
+        prompt: "Compare outputs",
+        description: "Fast compare",
+        compare: true,
+      },
+      undefined,
+      undefined,
+      { cwd: root, isProjectTrusted: () => true },
+    );
+    assert.equal(result.isError, undefined, t + " compare launches: " + JSON.stringify(result.details));
+    const startLines = readFileSync(herdrLog, "utf8")
+      .split("\n")
+      .filter((line) => line.startsWith("agent start "));
+    assert.equal(startLines.length, 2, t + ` both siblings start: ${startLines.join(" | ")}`);
+    for (const startLine of startLines) {
+      assert.ok(
+        startLine.includes(integrationPath),
+        t + ` sibling argv carries the integration extension: ${startLine}`,
+      );
+    }
+  } finally {
+    shutdown?.();
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    if (originalHerdrEnv === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = originalHerdrEnv;
+    if (originalHerdrPane === undefined) delete process.env.HERDR_PANE_ID;
+    else process.env.HERDR_PANE_ID = originalHerdrPane;
+    if (originalHerdrSocket === undefined) delete process.env.HERDR_SOCKET_PATH;
+    else process.env.HERDR_SOCKET_PATH = originalHerdrSocket;
+    if (originalBackend === undefined) delete process.env.PI_TASK_BACKEND;
+    else process.env.PI_TASK_BACKEND = originalBackend;
+    if (originalHerdrExtension === undefined) delete process.env.PI_TASK_HERDR_EXTENSION;
+    else process.env.PI_TASK_HERDR_EXTENSION = originalHerdrExtension;
+    rmSync(root, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
+if (process.platform !== "win32") {
+  // Decision pin: a missing herdr integration file must degrade the fast
+  // launch (no --extension) instead of hard-failing — herdr may detect agent
+  // state natively in future versions.
+  const t = "fast herdr launch degrades without the integration file";
+  const root = mkdtempSync(join(tmpdir(), "pi-task-herdr-degrade-"));
+  const home = mkdtempSync(join(tmpdir(), "pi-task-herdr-degrade-home-"));
+  const originalPath = process.env.PATH;
+  const originalHome = process.env.HOME;
+  const originalHerdrEnv = process.env.HERDR_ENV;
+  const originalHerdrPane = process.env.HERDR_PANE_ID;
+  const originalHerdrSocket = process.env.HERDR_SOCKET_PATH;
+  const originalBackend = process.env.PI_TASK_BACKEND;
+  const originalHerdrExtension = process.env.PI_TASK_HERDR_EXTENSION;
+  let shutdown: (() => void) | undefined;
+  try {
+    mkdirSync(join(root, ".pi", "artifacts", "tasks"), { recursive: true });
+    const agentsDir = join(root, ".pi", "agents");
+    mkdirSync(agentsDir);
+    writeFileSync(
+      join(agentsDir, "fastaudit.md"),
+      "---\ndescription: Fast audit agent\nfast: true\n---\n\n# Fast audit\n",
+    );
+
+    const binDir = join(root, "bin");
+    mkdirSync(binDir);
+    const herdrLog = join(root, "herdr-args.log");
+    const herdr = join(binDir, "herdr");
+    writeFileSync(
+      herdr,
+      `#!/bin/sh\necho "$*" >> '${herdrLog}'\ncase "$1 $2" in\n  "status server") exit 0 ;;\n  "pane current") exit 0 ;;\n  "pane split") echo '{"pane":{"pane_id":"w9:p2","terminal_id":"term-9"}}' ;;\n  "agent start") echo 'agent start exploded: fake-herdr-failure-9137' >&2; exit 1 ;;\n  *) exit 0 ;;\nesac\n`,
+    );
+    chmodSync(herdr, 0o755);
+    // HOME exists but no .pi/agent/extensions/herdr-agent-state.ts.
+
+    process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+    process.env.HOME = home;
+    process.env.HERDR_ENV = "1";
+    process.env.HERDR_PANE_ID = "w9:p1";
+    process.env.HERDR_SOCKET_PATH = join(root, "herdr.sock");
+    process.env.PI_TASK_BACKEND = "herdr";
+    delete process.env.PI_TASK_HERDR_EXTENSION;
+
+    let tool: { execute: (...args: unknown[]) => Promise<{ isError?: boolean; content?: Array<{ type: string; text: string }> }> } | undefined;
+    taskExtension({
+      on(event: string, handler: () => void) {
+        if (event === "session_shutdown") shutdown = handler;
+      },
+      registerMessageRenderer() {},
+      registerFlag() {},
+      registerTool(value: typeof tool) {
+        tool = value;
+      },
+      registerCommand() {},
+      appendEntry() {},
+      getAllTools() {
+        return [];
+      },
+    } as never);
+    assert.ok(tool, t + " registration");
+
+    await tool.execute(
+      "herdr-degrade-1",
+      {
+        agent_type: "fastaudit",
+        prompt: "Audit the diff",
+        description: "Fast audit",
+        background: false,
+      },
+      undefined,
+      undefined,
+      { cwd: root, isProjectTrusted: () => true },
+    );
+    const startLine = readFileSync(herdrLog, "utf8")
+      .split("\n")
+      .find((line) => line.startsWith("agent start "));
+    assert.ok(startLine, t + " agent start was invoked");
+    assert.ok(
+      !startLine!.includes("herdr-agent-state.ts"),
+      t + " missing integration file degrades without adding a bogus --extension",
+    );
+  } finally {
+    shutdown?.();
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    if (originalHerdrEnv === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = originalHerdrEnv;
+    if (originalHerdrPane === undefined) delete process.env.HERDR_PANE_ID;
+    else process.env.HERDR_PANE_ID = originalHerdrPane;
+    if (originalHerdrSocket === undefined) delete process.env.HERDR_SOCKET_PATH;
+    else process.env.HERDR_SOCKET_PATH = originalHerdrSocket;
+    if (originalBackend === undefined) delete process.env.PI_TASK_BACKEND;
+    else process.env.PI_TASK_BACKEND = originalBackend;
+    if (originalHerdrExtension === undefined) delete process.env.PI_TASK_HERDR_EXTENSION;
+    else process.env.PI_TASK_HERDR_EXTENSION = originalHerdrExtension;
+    rmSync(root, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+}
+
 {
   const t = "TASK_PROMPT_INSTRUCTIONS aligned with XML";
   assert.ok(

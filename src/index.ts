@@ -83,8 +83,12 @@ import { getLastAssistantTextFromSessionDir } from "./session-text.js";
 import { formatSdkBackgroundReceipt, startSdkBackgroundTask } from "./subagent/sdkBackground.js";
 import { runSdkSubagent } from "./subagent/runSdk.js";
 import { resolveAgentSkillPaths } from "./subagent/skills.js";
-import { createDefaultHerdrTerminalBackend, createSyncHerdrControl } from "./subagent/herdr.js";
-import { selectTerminalBackend } from "./subagent/terminalBackend.js";
+import {
+  createDefaultHerdrTerminalBackend,
+  createSyncHerdrControl,
+  resolveHerdrPiIntegrationExtension,
+} from "./subagent/herdr.js";
+import { describeCommandFailure, selectTerminalBackend } from "./subagent/terminalBackend.js";
 import { steerRunningBackgroundTask } from "./subagent/steer.js";
 import {
   checkTaskCompletion,
@@ -1377,6 +1381,10 @@ Both subagents are running in background. Results will be compared and delivered
 
         // Terminal backend (tmux / HerdR)
         const terminalTasks: Array<(typeof siblings)[number] & { handle: TerminalHandle; paneId: string; originalPane: string | null; startedAt: number }> = [];
+        const herdrRequiredExtension =
+          selectedBackend === "herdr"
+            ? resolveHerdrPiIntegrationExtension()
+            : undefined;
         try {
           for (const s of siblings) {
             const startedAt = Date.now();
@@ -1402,6 +1410,7 @@ Both subagents are running in background. Results will be compared and delivered
               skillPaths,
               effectiveFast,
               TASK_EXTENSION_PATH,
+              herdrRequiredExtension ? [herdrRequiredExtension] : undefined,
             );
 
             let handle: TerminalHandle;
@@ -1724,6 +1733,10 @@ Both subagents are running in background. Results will be compared and delivered
         };
         await writeFile(promptLaunch.systemPromptPath, agent.body, "utf8");
       }
+      const herdrRequiredExtension =
+        selectedBackend === "herdr"
+          ? resolveHerdrPiIntegrationExtension()
+          : undefined;
       const piArgs = buildPiArgs(
         agent,
         sessionName,
@@ -1737,6 +1750,7 @@ Both subagents are running in background. Results will be compared and delivered
         skillPaths,
         effectiveFast,
         TASK_EXTENSION_PATH,
+        herdrRequiredExtension ? [herdrRequiredExtension] : undefined,
       );
       const useSdkBackend = selectedBackend === "sdk";
 
@@ -2006,17 +2020,18 @@ Both subagents are running in background. Results will be compared and delivered
         } else if (selectedBackend === "tmux") {
           setPaneSelfDestruct(paneId, true);
         }
-      } catch {
+      } catch (error) {
         foregroundTasks.delete(id);
         clearTaskWidgetIfIdle();
+        const reason = describeCommandFailure(error);
         return {
           content: [
             {
               type: "text" as const,
-              text: `Failed to create ${selectedBackend} execution pane for the agent.`,
+              text: `Failed to create ${selectedBackend} execution pane for the agent: ${reason}`,
             },
           ],
-          details: { phase: "failed" as const, error: `${selectedBackend} launch failed` },
+          details: { phase: "failed" as const, error: `${selectedBackend} launch failed`, reason },
           isError: true,
         };
       }

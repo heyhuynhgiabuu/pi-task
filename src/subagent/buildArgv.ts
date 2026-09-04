@@ -24,6 +24,12 @@ export interface BuildPiArgvOptions {
   skillPaths?: string[];
   fast?: boolean;
   fastExtensionPath?: string;
+  /**
+   * Extensions that must load even when discovery is disabled (--no-extensions).
+   * Pushed only alongside --no-extensions so discovery-enabled launches keep
+   * loading extensions through their normal mechanism.
+   */
+  requiredExtensions?: string[];
 }
 
 export function buildPiArgv(opts: BuildPiArgvOptions): string[] {
@@ -37,7 +43,9 @@ export function buildPiArgv(opts: BuildPiArgvOptions): string[] {
   });
 
   const args: string[] = [];
-  if (opts.fast || process.env.PI_TASK_CHILD_NO_EXTENSIONS === "1") {
+  const noDiscovery =
+    opts.fast || process.env.PI_TASK_CHILD_NO_EXTENSIONS === "1";
+  if (noDiscovery) {
     args.push("--no-extensions");
   }
   if (opts.fast) {
@@ -45,6 +53,11 @@ export function buildPiArgv(opts: BuildPiArgvOptions): string[] {
       throw new Error("Fast task launch requires the pi-task extension path");
     }
     args.push("--extension", opts.fastExtensionPath, "--fast");
+  }
+  if (noDiscovery) {
+    for (const extensionPath of opts.requiredExtensions ?? []) {
+      args.push("--extension", extensionPath);
+    }
   }
   if (agent.model) args.push("--model", agent.model);
   if (agent.thinking) args.push("--thinking", agent.thinking);

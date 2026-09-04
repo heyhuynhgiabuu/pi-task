@@ -1,4 +1,6 @@
 import { execFileSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { buildTmuxSplitWindowArgs, chooseTmuxSplitDirection } from "../helpers.js";
 
 export type TmuxSplitResult = {
@@ -192,11 +194,11 @@ function sessionWatcherScript(sessionFilePath: string): string {
 ) & watcher_pid=$!`;
 }
 
-export function wrapWithPaneExitWatcher(
+function buildPaneExitWatcherScript(
   sessionFilePath: string,
   command: string,
 ): string {
-  const script = `tmux set-option -p -t "$TMUX_PANE" remain-on-exit on 2>/dev/null || true
+  return `tmux set-option -p -t "$TMUX_PANE" remain-on-exit on 2>/dev/null || true
 ${sessionWatcherScript(sessionFilePath)}
 ${command}
 exit_code=$?
@@ -208,7 +210,32 @@ if [ "$exit_code" -eq 0 ]; then
   tmux kill-pane -t "$TMUX_PANE" 2>/dev/null || true
 fi
 exit "$exit_code"`;
-  return `sh -c ${shellQuote(script)}`;
+}
+
+/**
+ * Write the pane launch command to a script file and return a short
+ * `sh <path>` command for `tmux split-window`.
+ *
+ * tmux rejects commands over its input-buffer limit (~16 KB on tmux 3.7c;
+ * lower on older versions, issue #18), so the full subagent launch —
+ * including the system-prompt file path, the initial prompt, and the
+ * exit watcher — must never travel inside the tmux command string. The
+ * script file has no such limit; the command handed to tmux stays short.
+ * The script stays in the per-task session dir: the pane shell reads it
+ * at start, so deleting it immediately would be racy.
+ */
+export function writePaneLaunchScript(
+  sessionDir: string,
+  sessionFilePath: string,
+  command: string,
+): string {
+  const scriptPath = join(sessionDir, "pane-launch.sh");
+  writeFileSync(
+    scriptPath,
+    buildPaneExitWatcherScript(sessionFilePath, command),
+    { mode: 0o700 },
+  );
+  return `sh ${shellQuote(scriptPath)}`;
 }
 
 

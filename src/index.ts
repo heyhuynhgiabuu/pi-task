@@ -98,7 +98,7 @@ import {
   setPaneRemainOnExit,
   setPaneSelfDestruct,
   splitWindowPane,
-  wrapWithPaneExitWatcher,
+  writePaneLaunchScript,
 } from "./subagent/tmux.js";
 import {
   buildTaskFollowUpPrompt,
@@ -1422,7 +1422,7 @@ Both subagents are running in background. Results will be compared and delivered
               const shellCommand = `PI_TASK_TOOL_DISABLED=1 pi ${piArgs.map((a) => shellQuote(a)).join(" ")}`;
               const sessionFile = join(s.sessionDir, s.sessionName + ".jsonl");
               const childCommand = `cd ${shellQuote(taskCwd)} && ${shellCommand}`;
-              const terminalCommand = wrapWithPaneExitWatcher(sessionFile, childCommand);
+              const terminalCommand = writePaneLaunchScript(s.sessionDir, sessionFile, childCommand);
               const splitResult = splitWindowPane(taskCwd, terminalCommand);
               paneId = splitResult.paneId;
               originalPane = splitResult.originalPane;
@@ -1991,7 +1991,7 @@ Both subagents are running in background. Results will be compared and delivered
           const shellCommand = `PI_TASK_TOOL_DISABLED=1 pi ${piArgs.map((a) => shellQuote(a)).join(" ")}`;
           const sessionFile = join(sessionDir, sessionName + ".jsonl");
           const childCommand = `cd ${shellQuote(taskCwd)} && ${shellCommand}`;
-          const terminalCommand = wrapWithPaneExitWatcher(sessionFile, childCommand);
+          const terminalCommand = writePaneLaunchScript(sessionDir, sessionFile, childCommand);
           const splitResult = splitWindowPane(taskCwd, terminalCommand);
           paneId = splitResult.paneId;
           originalPane = splitResult.originalPane;

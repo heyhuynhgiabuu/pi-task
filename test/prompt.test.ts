@@ -311,6 +311,99 @@ if (process.platform !== "win32") {
   }
 }
 
+if (process.platform !== "win32") {
+  const t = "tmux launch keeps long subagent prompts out of the tmux command string";
+  const root = mkdtempSync(join(tmpdir(), "pi-task-long-prompt-"));
+  const piDir = join(root, ".pi");
+  const originalPath = process.env.PATH;
+  const originalTmux = process.env.TMUX;
+  const originalBackend = process.env.PI_TASK_BACKEND;
+  let shutdown: (() => void) | undefined;
+  try {
+    mkdirSync(join(piDir, "artifacts", "tasks"), { recursive: true });
+    const agentsDir = join(piDir, "agents");
+    mkdirSync(agentsDir);
+    const bodyMarker = "PROMPT_BODY_MARKER_" + "x".repeat(20000);
+    writeFileSync(
+      join(agentsDir, "huge.md"),
+      `---\ndescription: Agent with an oversized body\n---\n\n${bodyMarker}\n`,
+    );
+
+    const binDir = join(root, "bin");
+    mkdirSync(binDir);
+    const tmuxLog = join(root, "tmux-args.log");
+    const tmux = join(binDir, "tmux");
+    writeFileSync(
+      tmux,
+      `#!/bin/sh\ncase "$1" in\n  -V) printf '%s\\n' 'tmux 3.4' ;;\n  display-message) case "$*" in *pane_width*) printf '%s\\n' '120 40' ;; *) printf '%s\\n' '%pane-1' ;; esac ;;\n  split-window) printf '%s\\n' '%pane-1'; printf '%s\\n' "$*" | tr '\\n' ' ' >> '${tmuxLog}'; printf '\\n' >> '${tmuxLog}' ;;\n  *) exit 0 ;;\nesac\n`,
+    );
+    chmodSync(tmux, 0o755);
+    process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+    process.env.TMUX = join(root, "tmux.sock");
+    process.env.PI_TASK_BACKEND = "tmux";
+
+    let tool: { execute: (...args: unknown[]) => Promise<{ isError?: boolean; details?: { error?: string; task_id?: string } }> } | undefined;
+    taskExtension({
+      on(event: string, handler: () => void) {
+        if (event === "session_shutdown") shutdown = handler;
+      },
+      registerMessageRenderer() {},
+      registerFlag() {},
+      registerTool(value: typeof tool) {
+        tool = value;
+      },
+      registerCommand() {},
+      appendEntry() {},
+      getAllTools() {
+        return [];
+      },
+    } as never);
+    assert.ok(tool, t + " registration");
+
+    const result = await tool.execute(
+      "long-prompt-1",
+      {
+        agent_type: "huge",
+        prompt: "Check the huge prompt launch",
+        description: "Long prompt launch",
+        background: true,
+      },
+      undefined,
+      undefined,
+      { cwd: root, isProjectTrusted: () => true },
+    );
+    assert.equal(result.isError, undefined, t + " launch succeeds: " + JSON.stringify(result.details));
+
+    const log = readFileSync(tmuxLog, "utf8").trim();
+    const splitLine = log.split("\n").at(-1) ?? "";
+    assert.ok(splitLine.startsWith("split-window "), t + " split-window was invoked");
+    const command = splitLine.split(" ").at(-1) ?? "";
+    assert.ok(
+      command.length < 1000,
+      t + ` split-window command stays short (got ${command.length} chars)`,
+    );
+    assert.ok(
+      !log.includes("x".repeat(1000)),
+      t + " body text never crosses the tmux protocol",
+    );
+    // The command must be a script invocation whose file carries the full
+    // launch (system prompt path, initial prompt, watcher) instead.
+    const scriptPath = command.replace(/^'/, "").replace(/'$/, "");
+    const script = readFileSync(scriptPath, "utf8");
+    assert.ok(script.includes("--append-system-prompt"), t + " script contains pi argv");
+    assert.ok(script.includes("Check the huge prompt launch"), t + " script contains the task prompt");
+  } finally {
+    shutdown?.();
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    if (originalTmux === undefined) delete process.env.TMUX;
+    else process.env.TMUX = originalTmux;
+    if (originalBackend === undefined) delete process.env.PI_TASK_BACKEND;
+    else process.env.PI_TASK_BACKEND = originalBackend;
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 {
   const t = "TASK_PROMPT_INSTRUCTIONS aligned with XML";
   assert.ok(

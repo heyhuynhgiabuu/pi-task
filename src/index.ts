@@ -1517,6 +1517,9 @@ Both subagents are running in background. Results will be compared and delivered
           };
         }
 
+        // Ownership (issue #20) is stamped identically on every record this
+        // compare run persists (history spawn records and registry entries).
+        const ownerSessionId = sessionViewOf(ctx).getSessionId() || undefined;
         if (!isBackground) {
           for (const t of terminalTasks) {
             foregroundTasks.set(t.id, {
@@ -1582,7 +1585,7 @@ Both subagents are running in background. Results will be compared and delivered
                 cwd: taskCwd,
                 status: "running",
                 background: false,
-                ownerSessionId: sessionViewOf(ctx).getSessionId() || undefined,
+                ownerSessionId,
                 ownerPid: process.pid,
                 comparisonGroupId: groupId,
                 comparisonModel: t.model,
@@ -1731,7 +1734,7 @@ Both subagents are running in background. Results will be compared and delivered
             cwd: taskCwd,
             status: "running",
             background: true,
-            ownerSessionId: sessionViewOf(ctx).getSessionId() || undefined,
+            ownerSessionId,
             ownerPid: process.pid,
             comparisonGroupId: groupId,
             comparisonModel: t.model,
@@ -1760,7 +1763,7 @@ Both subagents are running in background. Results will be compared and delivered
             dir: artifactsDir,
             cwd: taskCwd,
             maxTurns,
-            ownerSessionId: sessionViewOf(ctx).getSessionId() || undefined,
+            ownerSessionId,
             ownerPid: process.pid,
             comparisonGroupId: groupId,
             comparisonModel: t.model,
@@ -2105,6 +2108,7 @@ Both subagents are running in background. Results will be compared and delivered
       }
 
       // ── FOREGROUND MODE: block until result, return directly ────────────
+      const ownerSessionId = sessionViewOf(ctx).getSessionId() || undefined;
       if (!isBackground) {
         const startedAt = foregroundTask?.startedAt ?? Date.now();
         upsertTaskSessionHistory(piDir, {
@@ -2121,7 +2125,7 @@ Both subagents are running in background. Results will be compared and delivered
           conversationId,
           status: "running",
           background: false,
-          ownerSessionId: sessionViewOf(ctx).getSessionId() || undefined,
+          ownerSessionId,
           ownerPid: process.pid,
         });
 
@@ -2271,7 +2275,7 @@ Both subagents are running in background. Results will be compared and delivered
         cwd: taskCwd,
         conversationId,
         maxTurns: bgtask.maxTurns,
-        ownerSessionId: sessionViewOf(ctx).getSessionId() || undefined,
+        ownerSessionId,
         ownerPid: process.pid,
       };
 

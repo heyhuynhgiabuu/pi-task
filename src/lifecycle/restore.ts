@@ -18,6 +18,59 @@ export function restoreActiveBackgroundTasks(
 ): void {
   const registry = readRegistry(piDir);
   const staleIds: string[] = [];
+  const ownerAlive = session?.isProcessAlive ?? defaultProcessAlive;
+  const terminalReceipt = (
+    entry: RegistryEntry,
+    status: "done" | "failed",
+    completedAt: number,
+  ): void => {
+    upsertTaskSessionHistory(piDir, {
+      id: entry.id,
+      status,
+      background: true,
+      agentType: entry.agentType,
+      description: entry.description,
+      sessionName: entry.sessionName,
+      startedAt: entry.startedAt,
+      handle: entry.handle,
+      paneId: entry.paneId,
+      piDir: entry.piDir,
+      dir: entry.dir,
+      cwd: entry.cwd,
+      completedAt,
+      comparisonGroupId: entry.comparisonGroupId,
+      comparisonModel: entry.comparisonModel,
+      comparisonDescription: entry.comparisonDescription,
+      comparisonIndex: entry.comparisonIndex,
+      comparisonDelivered: entry.comparisonDelivered,
+    });
+  };
+  // Best-effort terminal cleanup. HerdR resources always need an explicit
+  // close (with the persisted identity for it); a tmux pane is killed only
+  // when it may still be alive.
+  const closeEntryResource = (
+    entry: RegistryEntry,
+    paneId: string | undefined,
+    killPane: boolean,
+  ): boolean => {
+    if (entry.handle?.backend === "herdr") {
+      if (!closeResource) return false;
+      try {
+        closeResource(entry);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    if (!killPane || !paneId) return true;
+    try {
+      if (closeResource) closeResource(entry);
+      else killAgentPane(paneId, null);
+      return true;
+    } catch {
+      return false;
+    }
+  };
   const restoreTask = (entry: RegistryEntry, paneId: string | undefined): void => {
     backgroundTasks.set(entry.id, {
       dir: entry.dir,
@@ -70,12 +123,13 @@ export function restoreActiveBackgroundTasks(
       session.sessionId !== "" &&
       entry.ownerSessionId !== undefined &&
       entry.ownerSessionId !== session.sessionId;
-    if (foreign && (entry.ownerPid === undefined || isOwnerAlive(entry.ownerPid))) {
+    if (foreign && (entry.ownerPid === undefined || ownerAlive(entry.ownerPid))) {
       // The owner is running elsewhere (or unverifiable): leave the entry
       // untouched for that process.
       return;
     }
-    const orphaned = foreign;
+    // Past the gate, `foreign` means the owning process is provably gone —
+    // an orphan this process may recover but never adopt.
 
     if (entry.cleanupPending) {
       try {
@@ -163,150 +217,36 @@ export function restoreActiveBackgroundTasks(
           getLastMessageTimestampFromSessionDir(dir, entry.sessionName, entry.startedAt),
         )
         .find((ts) => ts !== undefined) ?? Date.now();
-      upsertTaskSessionHistory(piDir, {
-        id: entry.id,
-        status: "done",
-        background: true,
-        agentType: entry.agentType,
-        description: entry.description,
-        sessionName: entry.sessionName,
-        startedAt: entry.startedAt,
-        handle: entry.handle,
-        paneId: entry.paneId,
-        piDir: entry.piDir,
-        dir: entry.dir,
-        cwd: entry.cwd,
-        completedAt,
-        comparisonGroupId: entry.comparisonGroupId,
-        comparisonModel: entry.comparisonModel,
-        comparisonDescription: entry.comparisonDescription,
-        comparisonIndex: entry.comparisonIndex,
-        comparisonDelivered: entry.comparisonDelivered,
-      });
-      let cleanupSucceeded = true;
-      if (entry.handle?.backend === "herdr") {
-        if (!closeResource) cleanupSucceeded = false;
-        else {
-          try {
-            closeResource(entry);
-          } catch {
-            cleanupSucceeded = false;
-          }
-        }
-      } else if (paneAlive && paneId) {
-        try {
-          if (closeResource) closeResource(entry);
-          else killAgentPane(paneId, null);
-        } catch {
-          cleanupSucceeded = false;
-        }
-      }
-
-      if (cleanupSucceeded) staleIds.push(entry.id);
+      terminalReceipt(entry, "done", completedAt);
+      if (closeEntryResource(entry, paneId, paneAlive)) staleIds.push(entry.id);
       return;
     }
 
     // Comparison siblings whose session is still running must remain active;
     // a sibling already finished above is recovered from durable history and
     // fed into the coordinator during extension startup.
-    if (entry.comparisonGroupId && entry.comparisonModel && !orphaned) {
+    if (entry.comparisonGroupId && entry.comparisonModel && !foreign) {
       restoreTask(entry, paneId);
       return;
     }
 
     if (!paneAlive) {
-      let cleanupSucceeded = true;
-      if (entry.handle?.backend === "herdr") {
-        if (!closeResource) cleanupSucceeded = false;
-        else {
-          try {
-            closeResource(entry);
-          } catch {
-            cleanupSucceeded = false;
-          }
-        }
-      }
-      if (!cleanupSucceeded) return;
-      upsertTaskSessionHistory(piDir, {
-        id: entry.id,
-        status: "failed",
-        background: true,
-        agentType: entry.agentType,
-        description: entry.description,
-        sessionName: entry.sessionName,
-        startedAt: entry.startedAt,
-        handle: entry.handle,
-        paneId: entry.paneId,
-        piDir: entry.piDir,
-        dir: entry.dir,
-        cwd: entry.cwd,
-        completedAt: Date.now(),
-        comparisonGroupId: entry.comparisonGroupId,
-        comparisonModel: entry.comparisonModel,
-        comparisonDescription: entry.comparisonDescription,
-        comparisonIndex: entry.comparisonIndex,
-        comparisonDelivered: entry.comparisonDelivered,
-      });
+      if (!closeEntryResource(entry, paneId, false)) return;
+      terminalReceipt(entry, "failed", Date.now());
       staleIds.push(entry.id);
       return;
     }
 
-    if (orphaned) {
+    if (foreign) {
       // Owner gone, pane still alive, session unfinished: no consumer
       // remains, so terminate the child and record a terminal receipt.
-      let cleanupSucceeded = true;
-      if (entry.handle?.backend === "herdr") {
-        if (!closeResource) cleanupSucceeded = false;
-        else {
-          try {
-            closeResource(entry);
-          } catch {
-            cleanupSucceeded = false;
-          }
-        }
-      } else if (paneId) {
-        try {
-          if (closeResource) closeResource(entry);
-          else killAgentPane(paneId, null);
-        } catch {
-          cleanupSucceeded = false;
-        }
-      }
-      if (!cleanupSucceeded) return;
-      upsertTaskSessionHistory(piDir, {
-        id: entry.id,
-        status: "failed",
-        background: true,
-        agentType: entry.agentType,
-        description: entry.description,
-        sessionName: entry.sessionName,
-        startedAt: entry.startedAt,
-        handle: entry.handle,
-        paneId: entry.paneId,
-        piDir: entry.piDir,
-        dir: entry.dir,
-        cwd: entry.cwd,
-        completedAt: Date.now(),
-        comparisonGroupId: entry.comparisonGroupId,
-        comparisonModel: entry.comparisonModel,
-        comparisonDescription: entry.comparisonDescription,
-        comparisonIndex: entry.comparisonIndex,
-        comparisonDelivered: entry.comparisonDelivered,
-      });
+      if (!closeEntryResource(entry, paneId, true)) return;
+      terminalReceipt(entry, "failed", Date.now());
       staleIds.push(entry.id);
       return;
     }
 
     restoreTask(entry, paneId);
-  }
-
-  function isOwnerAlive(pid: number): boolean {
-    const check = session?.isProcessAlive ?? defaultProcessAlive;
-    try {
-      return check(pid);
-    } catch {
-      return true;
-    }
   }
 }
 

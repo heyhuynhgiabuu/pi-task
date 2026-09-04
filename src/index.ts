@@ -36,6 +36,7 @@ import {
   findJsonlSessionByName,
   normalizeConversationId,
   findTaskSessionHistory,
+  repairTaskSessionRef,
   markComparisonGroupDelivered,
   readRegistry,
   readTaskSessionHistory,
@@ -859,24 +860,10 @@ export default function (pi: ExtensionAPI) {
           findTaskSessionHistory(piDir, taskParams.task_id) ??
           findJsonlSessionByName(piDir, taskParams.task_id, agent.name);
 
-        // Older history entries were written before we stored the
-        // actual JSONL path needed by `pi --session`. Repair them by
-        // resolving the display session name to a session file.
-        if (entry && !entry.sessionRef) {
-          const discovered = findJsonlSessionByName(
-            piDir,
-            entry.sessionName,
-            entry.agentType,
-          );
-          if (discovered?.sessionRef) {
-            entry = { ...entry, sessionRef: discovered.sessionRef };
-            upsertTaskSessionHistory(piDir, {
-              ...entry,
-              status: "done",
-              background: false,
-            });
-          }
-        }
+        // Older history entries can lack the JSONL path needed by
+        // `pi --session`, or hold a stale one. Repair it (and the durable
+        // record) before the spawn reuses it.
+        if (entry) entry = repairTaskSessionRef(piDir, entry);
         if (!entry) {
           taskParams = { ...taskParams, task_id: undefined };
           id = `${Date.now().toString(36)}-${randomUUID().slice(0, 4)}`;
@@ -890,7 +877,12 @@ export default function (pi: ExtensionAPI) {
             isError: true,
           };
         }
-        if (!existsSync(entry.dir)) {
+        // repairTaskSessionRef ran above: a present sessionRef implies the
+        // file exists (valid refs are kept, stale ones re-discovered). A
+        // stale recorded dir must not block resume when the transcript is
+        // discoverable — the spawn writes runtime files under the current
+        // artifacts root and heals the record.
+        if (!existsSync(entry.dir) && !entry.sessionRef) {
           return {
             content: [
               {
@@ -1617,7 +1609,7 @@ Both subagents are running in background. Results will be compared and delivered
               const phase = completion.status === "completed" ? "done" : completion.status === "cancelled" ? "cancelled" : "failed";
               const completedSessionRef = findJsonlSessionByName(
                 piDir,
-                t.sessionName,
+                t.id,
                 agent.name,
               )?.sessionRef;
               upsertTaskSessionHistory(piDir, {
@@ -2167,7 +2159,7 @@ Both subagents are running in background. Results will be compared and delivered
               : "failed";
         const completedSessionRef = findJsonlSessionByName(
           piDir,
-          sessionName,
+          id,
           agent.name,
         )?.sessionRef;
         upsertTaskSessionHistory(piDir, {

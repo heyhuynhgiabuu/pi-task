@@ -118,7 +118,13 @@ function getTaskSessionHistoryPath(piDir: string): string {
 
 export function readTaskSessionHistory(piDir: string): TaskSessionHistoryEntry[] {
   const parsed = readJsonFile<unknown>(getTaskSessionHistoryPath(piDir), []);
-  return Array.isArray(parsed) ? (parsed as TaskSessionHistoryEntry[]) : [];
+  if (!Array.isArray(parsed)) return [];
+  // The history file is persisted state: drop corrupt elements (null,
+  // non-objects) at this single ingest point so every consumer is safe.
+  return parsed.filter(
+    (entry): entry is TaskSessionHistoryEntry =>
+      Boolean(entry) && typeof entry === "object",
+  );
 }
 
 function writeTaskSessionHistory(
@@ -165,6 +171,41 @@ export function findTaskSessionHistory(
   return readTaskSessionHistory(piDir).find((entry) => entry.id === taskId);
 }
 
+export interface TaskSessionRefSubject {
+  id: string;
+  sessionName: string;
+  agentType: string;
+  sessionRef?: string;
+}
+
+/**
+ * Resolve a usable transcript path for a task record before handing it to
+ * `pi --session`. A stale or missing ref is re-discovered by session name and
+ * repaired in durable history — only the ref is written; status and other
+ * recorded metadata keep their values.
+ */
+export function repairTaskSessionRef<T extends TaskSessionRefSubject>(
+  piDir: string,
+  entry: T,
+): T {
+  if (entry.sessionRef && existsSync(entry.sessionRef)) return entry;
+  // Discover by task id, never by session name: probe roots are id-scoped
+  // directories, and a session-name collision (one conversation re-spawned
+  // under a new task id) must not adopt the other task's transcript.
+  const discovered = findJsonlSessionByName(piDir, entry.id, entry.agentType);
+  if (!discovered?.sessionRef) {
+    // Nothing discoverable: a stale ref must not survive (existence guards
+    // downstream key on sessionRef truthiness and would wave a dead path
+    // through to a silent fresh-session resume).
+    return { ...entry, sessionRef: undefined } as T;
+  }
+  const current = findTaskSessionHistory(piDir, entry.id);
+  if (current) {
+    upsertTaskSessionHistory(piDir, { ...current, sessionRef: discovered.sessionRef });
+  }
+  return { ...entry, sessionRef: discovered.sessionRef } as T;
+}
+
 
 function sessionFileMatches(file: string, sessionName: string): boolean {
   try {
@@ -183,31 +224,51 @@ export function findJsonlSessionByName(
   idOrSessionName: string,
   agentType?: string,
 ): TaskSessionHistoryEntry | null {
-  const sessionsRoot = join(getArtifactDir(piDir), "sessions");
-  if (!existsSync(sessionsRoot)) return null;
-  const history = readTaskSessionHistory(piDir);
+  // Records from older versions can miss fields the type promises
+  // (validated here, not in readTaskSessionHistory, because absence is
+  // field-specific): require id/sessionName, treat a missing dir as "no
+  // recorded root" so the fallback probes take over instead of
+  // join(undefined) throwing and killing the whole lookup.
+  const history = readTaskSessionHistory(piDir).filter(
+    (entry): entry is TaskSessionHistoryEntry =>
+      typeof entry.id === "string" &&
+      typeof entry.sessionName === "string" &&
+      (entry.id === idOrSessionName || entry.sessionName === idOrSessionName) &&
+      (!agentType || entry.agentType === agentType),
+  );
 
-  for (const dirent of readdirSync(sessionsRoot, { withFileTypes: true })) {
-    if (!dirent.isDirectory()) continue;
-    const taskId = dirent.name;
-    const taskDir = join(sessionsRoot, taskId);
-    const historyEntry = history.find((entry) => entry.id === taskId);
-    if (!historyEntry) continue;
-    const sessionName = historyEntry.sessionName;
-    if (taskId !== idOrSessionName && sessionName !== idOrSessionName) continue;
-    if (agentType && historyEntry.agentType !== agentType) continue;
+  for (const historyEntry of history) {
+    // Probe the artifact root recorded on the entry first, then the current
+    // task layout (issue #21: writers use <piDir>/artifacts/tasks/sessions),
+    // then the pre-task-ui legacy root.
+    const taskDirs = [
+      typeof historyEntry.dir === "string"
+        ? join(historyEntry.dir, "sessions", historyEntry.id)
+        : undefined,
+      join(getArtifactDir(piDir), "tasks", "sessions", historyEntry.id),
+      join(getArtifactDir(piDir), "sessions", historyEntry.id),
+    ].filter((dir): dir is string => dir !== undefined);
+    const uniqueDirs = taskDirs.filter((dir, index) => taskDirs.indexOf(dir) === index);
 
-    const sessionRef = readdirSync(taskDir)
-      .filter((entry) => entry.endsWith(".jsonl"))
-      .map((entry) => join(taskDir, entry))
-      .find((file) => sessionFileMatches(file, sessionName));
-    if (!sessionRef) continue;
+    for (const taskDir of uniqueDirs) {
+      if (!existsSync(taskDir)) continue;
+      let files: string[];
+      try {
+        files = readdirSync(taskDir).filter((name) => name.endsWith(".jsonl"));
+      } catch {
+        // An unreadable directory must not abort the lookup.
+        continue;
+      }
+      const sessionRef = files
+        .map((name) => join(taskDir, name))
+        .find((file) => sessionFileMatches(file, historyEntry.sessionName));
+      if (!sessionRef) continue;
 
-    return {
-      ...historyEntry,
-      sessionRef,
-      dir: taskDir,
-    };
+      return {
+        ...historyEntry,
+        sessionRef,
+      };
+    }
   }
   return null;
 }

@@ -8,6 +8,7 @@ import taskExtension from "../src/index.js";
 import { TASK_PROMPT_INSTRUCTIONS } from "../src/helpers.js";
 import { buildTaskFollowUpPrompt, buildTaskPrompt, taskParametersSchema } from "../src/tool/index.js";
 import { resolveTaskCwd } from "../src/task-cwd.js";
+import { upsertTaskSessionHistory } from "../src/conversation.js";
 
 // Delegated pi-task children disable recursive registration; this test exercises host registration.
 const inheritedTaskToolDisabled = process.env.PI_TASK_TOOL_DISABLED;
@@ -1062,3 +1063,164 @@ if (process.platform !== "win32") {
     rmSync(root, { recursive: true, force: true });
   }
 }
+
+// Issue #21 Major (reviewer round 5): a history record whose recorded dir is
+// stale must not block resume when the transcript is discoverable under the
+// current tasks root — the artifact-dir guard may only fire when there is no
+// usable session ref either.
+if (process.platform !== "win32") {
+  const t = "task_id resume proceeds when recorded dir is stale";
+  const root = mkdtempSync(join(tmpdir(), "pi-task-resume-stale-dir-"));
+  const originalPath = process.env.PATH;
+  const originalTmux = process.env.TMUX;
+  const originalBackend = process.env.PI_TASK_BACKEND;
+  const originalCwd = process.cwd();
+  let shutdown: (() => void) | undefined;
+  try {
+    const piDir = join(root, ".pi");
+    const tasksRoot = join(piDir, "artifacts", "tasks");
+    mkdirSync(join(tasksRoot, "sessions"), { recursive: true });
+    const agentsDir = join(piDir, "agents");
+    mkdirSync(agentsDir);
+    writeFileSync(
+      join(agentsDir, "resumeagent.md"),
+      "---\ndescription: Resume agent\n---\n\n# Resume\n",
+    );
+
+    const binDir = join(root, "bin");
+    mkdirSync(binDir);
+    const spawnLog = join(root, "spawn-args.log");
+    const tmux = join(binDir, "tmux");
+    writeFileSync(
+      tmux,
+      `#!/bin/sh\ncase "$1" in\n  -V) printf '%s\\n' 'tmux 3.4' ;;\n  display-message) printf '%s\\n' '%pane-1' ;;\n  split-window) printf '%s\\n' "$*" >> '${spawnLog}'; printf '%s\\n' '%pane-1' ;;\n  *) exit 0 ;;\nesac\n`,
+    );
+    chmodSync(tmux, 0o755);
+    process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+    process.env.TMUX = join(root, "tmux.sock");
+    process.env.PI_TASK_BACKEND = "tmux";
+
+    // Settled task: recorded dir is gone, transcript lives under the CURRENT
+    // tasks root (probe 2 of the rewritten lookup).
+    const id = "stale-dir-task";
+    const sessionName = "stale-dir-sess";
+    const sessionDir = join(tasksRoot, "sessions", id);
+    mkdirSync(sessionDir, { recursive: true });
+    const sessionRef = join(sessionDir, `${sessionName}.jsonl`);
+    writeFileSync(
+      sessionRef,
+      JSON.stringify({ type: "session_info", name: sessionName }) + "\n",
+      "utf-8",
+    );
+    process.chdir(root);
+    upsertTaskSessionHistory(piDir, {
+      id,
+      agentType: "resumeagent",
+      description: "stale dir resume",
+      sessionName,
+      startedAt: Date.now(),
+      piDir,
+      dir: join(root, "gone"),
+      cwd: root,
+      status: "done",
+      background: true,
+    });
+
+    let tool: { execute: (...args: unknown[]) => Promise<{ isError?: boolean; details?: { task_id?: string } }> } | undefined;
+    taskExtension({
+      on(event: string, handler: () => void) {
+        if (event === "session_shutdown") shutdown = handler;
+      },
+      registerMessageRenderer() {},
+      registerFlag() {},
+      registerTool(value: typeof tool) {
+        tool = value;
+      },
+      registerCommand() {},
+      appendEntry() {},
+      getAllTools() {
+        return [];
+      },
+    } as never);
+    assert.ok(tool, t + " registration");
+
+    const resumed = await tool.execute(
+      "resume-stale-dir-1",
+      {
+        agent_type: "resumeagent",
+        prompt: "Continue",
+        description: "stale dir resume",
+        background: true,
+        task_id: id,
+      },
+      undefined,
+      undefined,
+      { cwd: root, isProjectTrusted: () => true },
+    );
+    assert.equal(resumed.isError, undefined, t + " resume proceeds");
+    assert.equal(resumed.details?.task_id, id, t + " same task id");
+    const spawnArgs = readFileSync(spawnLog, "utf8");
+    assert.ok(
+      spawnArgs.includes("pane-launch.sh"),
+      t + " spawn launched via pane script",
+    );
+    const launcher = readFileSync(
+      join(tasksRoot, "sessions", id, "pane-launch.sh"),
+      "utf8",
+    );
+    assert.ok(
+      launcher.includes(sessionRef),
+      t + ` spawn resumes the discovered transcript (launcher: ${launcher.slice(-500)})`,
+    );
+
+    // Counter-scenario for the same guard: stale dir AND a dead ref with
+    // nothing discoverable must produce the informative error, not a
+    // silent fresh-session resume.
+    const deadId = "stale-dir-dead-ref-task";
+    upsertTaskSessionHistory(piDir, {
+      id: deadId,
+      agentType: "resumeagent",
+      description: "dead ref",
+      sessionName: `task-${deadId}`,
+      startedAt: Date.now(),
+      piDir,
+      dir: join(root, "gone"),
+      cwd: root,
+      sessionRef: join(root, "gone.jsonl"),
+      status: "done",
+      background: true,
+    });
+    const deadResume = await tool.execute(
+      "resume-stale-dir-2",
+      {
+        agent_type: "resumeagent",
+        prompt: "Continue",
+        description: "dead ref",
+        background: true,
+        task_id: deadId,
+      },
+      undefined,
+      undefined,
+      { cwd: root, isProjectTrusted: () => true },
+    );
+    assert.equal(deadResume.isError, true, t + " dead ref + stale dir errors");
+    const deadText = JSON.stringify(deadResume);
+    assert.ok(
+      deadText.includes("artifact directory no longer exists") ||
+        deadText.includes("gone.jsonl"),
+      t + ` informative error (got: ${deadText.slice(0, 300)})`,
+    );
+  } finally {
+    shutdown?.();
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    if (originalTmux === undefined) delete process.env.TMUX;
+    else process.env.TMUX = originalTmux;
+    if (originalBackend === undefined) delete process.env.PI_TASK_BACKEND;
+    else process.env.PI_TASK_BACKEND = originalBackend;
+    process.chdir(originalCwd);
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+console.log("prompt.test.ts: stale-dir resume passed");

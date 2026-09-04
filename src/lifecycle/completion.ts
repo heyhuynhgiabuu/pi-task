@@ -70,9 +70,11 @@ export function completeTask(
   // finished-linger) render the correct status/icon instead of defaulting
   // failed/timeout/cancelled to a green "done".
   task.status = phase;
+  // Discover by task id, never session name: probe roots are id-scoped, so
+  // a session-name collision cannot stamp another task's transcript here.
   const completedSessionRef = findJsonlSessionByName(
     piDir,
-    task.sessionName,
+    id,
     task.agentType,
   )?.sessionRef;
 

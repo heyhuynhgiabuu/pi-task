@@ -94,17 +94,14 @@ class CommandFailedError extends Error {
  * reaches the caller instead of being masked by a generic message.
  */
 export function describeCommandFailure(error: unknown): string {
-  const parts: string[] = [];
-  if (error instanceof Error) {
-    parts.push(error.message);
+  if (!(error instanceof Error)) {
+    return error === undefined || error === null ? "unknown error" : String(error);
   }
   if (error instanceof CommandFailedError) {
     const output = (error.stderr.trim() || error.stdout.trim()).slice(-400);
-    if (output) parts.push(output);
-  } else if (parts.length === 0 && error !== undefined && error !== null) {
-    parts.push(String(error));
+    if (output) return `${error.message}: ${output}`;
   }
-  return parts.filter(Boolean).join(": ") || "unknown error";
+  return error.message;
 }
 
 export function createDefaultCommandRunner(): CommandRunner {

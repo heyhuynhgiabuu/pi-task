@@ -10,7 +10,7 @@ import {
   resolveHerdrPiIntegrationExtension,
 } from "../src/subagent/herdr.js";
 import { buildPiArgs, type AgentConfig } from "../src/helpers.js";
-import { buildPiArgv, type BuildPiArgvOptions } from "../src/subagent/buildArgv.js";
+import { buildPiArgv } from "../src/subagent/buildArgv.js";
 
 function processInfoResult(
   paneId = "w1:p2",
@@ -62,9 +62,7 @@ test("HerdR Pi argv defers the raw task prompt instead of using a file attachmen
 });
 
 test("Fast Pi argv explicitly loads required extensions even with --no-extensions", () => {
-  // Cast: the option is new; the test must fail at runtime (option ignored),
-  // not at compile time, to prove the behavior is genuinely missing.
-  const options = {
+  const args = buildPiArgv({
     agent: {
       name: "reviewer",
       description: "Reviews code",
@@ -77,8 +75,7 @@ test("Fast Pi argv explicitly loads required extensions even with --no-extension
     fast: true,
     fastExtensionPath: "/bridge/pi-task.js",
     requiredExtensions: ["/ext/herdr-agent-state.ts"],
-  } as unknown as BuildPiArgvOptions;
-  const args = buildPiArgv(options);
+  });
   const extensionValues = args.flatMap((arg, index) =>
     arg === "--extension" && args[index + 1] ? [args[index + 1]!] : [],
   );

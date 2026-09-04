@@ -47,17 +47,15 @@ export function buildPiArgv(opts: BuildPiArgvOptions): string[] {
     opts.fast || process.env.PI_TASK_CHILD_NO_EXTENSIONS === "1";
   if (noDiscovery) {
     args.push("--no-extensions");
+    for (const extensionPath of opts.requiredExtensions ?? []) {
+      args.push("--extension", extensionPath);
+    }
   }
   if (opts.fast) {
     if (!opts.fastExtensionPath) {
       throw new Error("Fast task launch requires the pi-task extension path");
     }
     args.push("--extension", opts.fastExtensionPath, "--fast");
-  }
-  if (noDiscovery) {
-    for (const extensionPath of opts.requiredExtensions ?? []) {
-      args.push("--extension", extensionPath);
-    }
   }
   if (agent.model) args.push("--model", agent.model);
   if (agent.thinking) args.push("--thinking", agent.thinking);

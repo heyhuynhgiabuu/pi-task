@@ -555,11 +555,12 @@ export function resolveHerdrPiIntegrationExtension(
 ): string | undefined {
   const override = env.PI_TASK_HERDR_EXTENSION?.trim();
   const home = env.HOME || env.USERPROFILE || "";
-  const candidates = [
-    ...(override ? [override] : []),
-    ...(home ? [join(home, ".pi", "agent", "extensions", "herdr-agent-state.ts")] : []),
-  ];
-  return candidates.find((candidate) => existsSync(candidate));
+  if (override && existsSync(override)) return override;
+  if (home) {
+    const convention = join(home, ".pi", "agent", "extensions", "herdr-agent-state.ts");
+    if (existsSync(convention)) return convention;
+  }
+  return undefined;
 }
 
 export interface HerdrTerminalBackendOptions {

@@ -1637,6 +1637,7 @@ Both subagents are running in background. Results will be compared and delivered
           [modelA, modelB],
         );
 
+        const maxTurns = agent.maxTurns ?? envTurnLimit();
         for (const t of terminalTasks) {
           const bg: BackgroundTask = {
             dir: artifactsDir,
@@ -1651,7 +1652,7 @@ Both subagents are running in background. Results will be compared and delivered
             startedAt: t.startedAt,
             toolUses: 0,
             turns: 0,
-            maxTurns: agent.maxTurns ?? envTurnLimit(),
+            maxTurns,
             recentCalls: [],
             comparisonGroupId: groupId,
             comparisonModel: t.model,
@@ -1700,7 +1701,7 @@ Both subagents are running in background. Results will be compared and delivered
             piDir,
             dir: artifactsDir,
             cwd: taskCwd,
-            maxTurns: agent.maxTurns ?? envTurnLimit(),
+            maxTurns,
             comparisonGroupId: groupId,
             comparisonModel: t.model,
             comparisonDescription: descText,

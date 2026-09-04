@@ -107,24 +107,27 @@ export function startBackgroundPolling(
           // allow a bounded grace of further turns, then settle with whatever
           // the subagent produced instead of discarding it. SDK tasks are
           // skipped above (no terminal session to steer).
+          const sessionDir = join(task.dir, "sessions", id);
           if (task.maxTurns !== undefined) {
             const readPartial = () =>
               getLastAssistantTextFromSessionDir(
-                join(task.dir, "sessions", id),
+                sessionDir,
                 task.sessionName,
                 task.startedAt,
+              );
+            const settleAtLimit = (reason: string) =>
+              settle(
+                id,
+                task,
+                `${readPartial() || "No assistant output captured."}\n\nTask reached the ${task.maxTurns}-turn limit${reason}`,
+                "timeout",
               );
             if (!task.wrapUp && task.turns >= task.maxTurns) {
               task.wrapUp = { turnsAtStart: task.turns };
               const steered = deps.steerTask?.(task, turnLimitWrapUpPrompt(task.maxTurns)) ?? false;
               if (!steered) {
                 if (deps.backgroundTasks.get(id) !== task) continue;
-                settle(
-                  id,
-                  task,
-                  `${readPartial() || "No assistant output captured."}\n\nTask reached the ${task.maxTurns}-turn limit; wrap-up steering failed.`,
-                  "timeout",
-                );
+                settleAtLimit("; wrap-up steering failed.");
                 continue;
               }
             } else if (
@@ -132,18 +135,13 @@ export function startBackgroundPolling(
               task.turns >= task.wrapUp.turnsAtStart + WRAP_UP_GRACE_TURNS
             ) {
               if (deps.backgroundTasks.get(id) !== task) continue;
-              settle(
-                id,
-                task,
-                `${readPartial() || "No assistant output captured."}\n\nTask reached the ${task.maxTurns}-turn limit and did not wrap up within ${WRAP_UP_GRACE_TURNS} further turns.`,
-                "timeout",
-              );
+              settleAtLimit(` and did not wrap up within ${WRAP_UP_GRACE_TURNS} further turns.`);
               continue;
             }
           }
 
           const snapshot = await deps.checkTaskCompletion({
-            sessionDir: join(task.dir, "sessions", id),
+            sessionDir,
             sessionName: task.sessionName,
             paneId: task.paneId,
             artifactsDir: task.dir,

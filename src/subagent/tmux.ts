@@ -233,6 +233,40 @@ export function killAgentPane(paneId: string, originalPane?: string | null): voi
   tmuxCmdQuiet(["kill-pane", "-t", paneId]);
 }
 
+export async function killAgentPaneStrictAsync(
+  paneId: string,
+  originalPane: string | null = null,
+  run: AsyncTmuxCommand = defaultAsyncTmuxCommand,
+): Promise<void> {
+  if (originalPane) {
+    try {
+      await run(["select-pane", "-t", originalPane]);
+    } catch {
+      // Original pane may have been closed; still try to kill the agent pane.
+    }
+  }
+  let existingPane: string;
+  try {
+    existingPane = (await run([
+      "display-message",
+      "-p",
+      "-t",
+      paneId,
+      "#{pane_id}",
+    ])).trim();
+  } catch (error) {
+    if (isMissingPaneError(error)) return;
+    throw error;
+  }
+  if (existingPane !== paneId) throw new Error(`tmux pane identity mismatch: ${paneId}`);
+  try {
+    await run(["kill-pane", "-t", paneId]);
+  } catch (error) {
+    if (isMissingPaneError(error)) return;
+    throw error;
+  }
+}
+
 /** Close a task pane while distinguishing an unavailable tmux server from an already-gone pane. */
 export function killAgentPaneStrict(paneId: string, originalPane?: string | null): void {
   if (originalPane) {

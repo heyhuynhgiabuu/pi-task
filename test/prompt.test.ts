@@ -1106,9 +1106,11 @@ if (process.platform !== "win32") {
         getBranch: () => [],
       },
     };
-    for (const handler of sessionStartHandlers) {
-      handler({ type: "session_start", reason: "startup" }, hostCtx);
-    }
+    await Promise.all(
+      sessionStartHandlers.map((handler) =>
+        handler({ type: "session_start", reason: "startup" }, hostCtx),
+      ),
+    );
 
     const readRegistryIds = (): string[] =>
       JSON.parse(readFileSync(join(root, ".pi", "task-registry.json"), "utf8")).map(
@@ -1134,9 +1136,11 @@ if (process.platform !== "win32") {
         getBranch: () => [],
       },
     };
-    for (const handler of sessionStartHandlers) {
-      handler({ type: "session_start", reason: "resume" }, otherCtx);
-    }
+    await Promise.all(
+      sessionStartHandlers.map((handler) =>
+        handler({ type: "session_start", reason: "resume" }, otherCtx),
+      ),
+    );
     assert.equal(
       readRegistryIds().includes("task-foreign"),
       true,

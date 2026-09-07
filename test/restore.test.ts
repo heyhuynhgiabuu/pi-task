@@ -36,7 +36,7 @@ function writeSession(dir: string, sessionName: string, stopReason?: string) {
 }
 
 describe("restoreActiveBackgroundTasks", () => {
-  it("marks completed registry entries done and removes them from registry", () => {
+  it("marks completed registry entries done and removes them from registry", async () => {
     const piDir = makePiDir();
     const taskDir = join(piDir, "artifacts", "sessions", "task-1");
     writeSession(taskDir, "task-task-1", "stop");
@@ -57,7 +57,7 @@ describe("restoreActiveBackgroundTasks", () => {
     ]);
 
     const backgroundTasks = new Map();
-    restoreActiveBackgroundTasks(piDir, backgroundTasks, () => false);
+    await restoreActiveBackgroundTasks(piDir, backgroundTasks, () => false);
 
     assert.equal(backgroundTasks.size, 0);
     assert.deepEqual(readJson<unknown[]>(join(piDir, "task-registry.json")), []);
@@ -68,7 +68,7 @@ describe("restoreActiveBackgroundTasks", () => {
 
   });
 
-  it("records provider error sessions as failed during restore", () => {
+  it("records provider error sessions as failed during restore", async () => {
     const piDir = makePiDir();
     const taskDir = join(piDir, "artifacts", "sessions", "task-error");
     writeSession(taskDir, "task-task-error", "error");
@@ -83,7 +83,7 @@ describe("restoreActiveBackgroundTasks", () => {
     }]);
 
     const backgroundTasks = new Map();
-    restoreActiveBackgroundTasks(piDir, backgroundTasks, () => false);
+    await restoreActiveBackgroundTasks(piDir, backgroundTasks, () => false);
 
     const history = readJson<Array<{ id: string; status: string }>>(
       join(piDir, "task-session-history.json"),
@@ -91,7 +91,7 @@ describe("restoreActiveBackgroundTasks", () => {
     assert.equal(history[0]?.status, "failed");
   });
 
-  it("keeps an error row pending while the child resource is still alive", () => {
+  it("keeps an error row pending while the child resource is still alive", async () => {
     const piDir = makePiDir();
     const taskDir = join(piDir, "artifacts", "sessions", "task-retry");
     writeSession(taskDir, "task-task-retry", "error");
@@ -106,13 +106,69 @@ describe("restoreActiveBackgroundTasks", () => {
     }]);
 
     const backgroundTasks = new Map();
-    restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true);
+    await restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true);
 
     assert.equal(backgroundTasks.has("task-retry"), true);
     assert.equal(readJson<unknown[]>(join(piDir, "task-registry.json")).length, 1);
   });
 
-  it("preserves durable records during a temporary backend outage", () => {
+  it("awaits asynchronous liveness probes during restore", async () => {
+    const piDir = makePiDir();
+    const taskDir = join(piDir, "artifacts", "sessions", "task-async");
+    mkdirSync(taskDir, { recursive: true });
+    writeJson(join(piDir, "task-registry.json"), [{
+      id: "task-async",
+      dir: taskDir,
+      sessionName: "task-task-async",
+      startedAt: Date.now() - 1000,
+      paneId: "%async",
+      agentType: "scout",
+      description: "async restore",
+      background: true,
+    }]);
+
+    const backgroundTasks = new Map();
+    await restoreActiveBackgroundTasks(
+      piDir,
+      backgroundTasks,
+      async () => false,
+    );
+
+    assert.equal(backgroundTasks.size, 0);
+    assert.equal(readJson<unknown[]>(join(piDir, "task-registry.json")).length, 0);
+  });
+
+  it("awaits asynchronous cleanup before removing restored terminal records", async () => {
+    const piDir = makePiDir();
+    const taskDir = join(piDir, "artifacts", "sessions", "task-async-close");
+    writeSession(taskDir, "task-task-async-close", "stop");
+    writeJson(join(piDir, "task-registry.json"), [{
+      id: "task-async-close",
+      dir: taskDir,
+      sessionName: "task-task-async-close",
+      startedAt: Date.now() - 1000,
+      paneId: "%async-close",
+      agentType: "scout",
+      description: "async cleanup",
+      background: true,
+    }]);
+
+    let closed = false;
+    await restoreActiveBackgroundTasks(
+      piDir,
+      new Map(),
+      async () => true,
+      async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        closed = true;
+      },
+    );
+
+    assert.equal(closed, true);
+    assert.deepEqual(readJson<unknown[]>(join(piDir, "task-registry.json")), []);
+  });
+
+  it("preserves durable records during a temporary backend outage", async () => {
     const piDir = makePiDir();
     const taskDir = join(piDir, "artifacts", "sessions", "task-herdr");
     writeSession(taskDir, "task-task-herdr");
@@ -135,7 +191,7 @@ describe("restoreActiveBackgroundTasks", () => {
     writeJson(join(piDir, "task-registry.json"), [entry]);
 
     const backgroundTasks = new Map();
-    restoreActiveBackgroundTasks(piDir, backgroundTasks, () => {
+    await restoreActiveBackgroundTasks(piDir, backgroundTasks, () => {
       const error = new Error("connection refused");
       error.name = "HerdrUnavailableError";
       throw error;
@@ -145,7 +201,7 @@ describe("restoreActiveBackgroundTasks", () => {
     assert.equal(readJson<Array<{ id: string }>>(join(piDir, "task-registry.json"))[0]?.id, "task-herdr");
   });
 
-  it("preserves an isolated child cwd while restoring a live task", () => {
+  it("preserves an isolated child cwd while restoring a live task", async () => {
     const piDir = makePiDir();
     const taskDir = join(piDir, "artifacts", "sessions", "task-live");
     const childCwd = join(piDir, "worktrees", "task-live");
@@ -164,12 +220,12 @@ describe("restoreActiveBackgroundTasks", () => {
     }]);
 
     const backgroundTasks = new Map();
-    restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true);
+    await restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true);
 
     assert.equal(backgroundTasks.get("task-live")?.cwd, childCwd);
   });
 
-  it("restores comparison metadata on live sibling tasks", () => {
+  it("restores comparison metadata on live sibling tasks", async () => {
     const piDir = makePiDir();
     const taskDir = join(piDir, "artifacts", "sessions", "task-compare-m0");
     mkdirSync(taskDir, { recursive: true });
@@ -188,7 +244,7 @@ describe("restoreActiveBackgroundTasks", () => {
     }]);
 
     const backgroundTasks = new Map();
-    restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true);
+    await restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true);
 
     const restored = backgroundTasks.get("task-compare-m0") as {
       comparisonGroupId?: string;
@@ -202,7 +258,7 @@ describe("restoreActiveBackgroundTasks", () => {
     assert.equal(restored?.comparisonIndex, 0);
   });
 
-  it("persists finished comparison siblings for grouped restore", () => {
+  it("persists finished comparison siblings for grouped restore", async () => {
     const piDir = makePiDir();
     const taskDirA = join(piDir, "artifacts", "sessions", "task-compare-m0");
     const taskDirB = join(piDir, "artifacts", "sessions", "task-compare-m1");
@@ -238,7 +294,7 @@ describe("restoreActiveBackgroundTasks", () => {
     ]);
 
     const backgroundTasks = new Map();
-    restoreActiveBackgroundTasks(piDir, backgroundTasks, () => false);
+    await restoreActiveBackgroundTasks(piDir, backgroundTasks, () => false);
 
     assert.equal(backgroundTasks.size, 1);
     assert.equal(backgroundTasks.has("task-compare-m1"), true);
@@ -250,7 +306,7 @@ describe("restoreActiveBackgroundTasks", () => {
     assert.equal(history.find((entry) => entry.id === "task-compare-m0")?.comparisonModel, "model-a");
   });
 
-  it("detects a comparison sibling finished during a long outage in the production session layout", () => {
+  it("detects a comparison sibling finished during a long outage in the production session layout", async () => {
     // Production layout: dir is the artifacts root and the session JSONL lives
     // under dir/sessions/<id>/ — restore must look there, not only at dir.
     const piDir = makePiDir();
@@ -290,7 +346,7 @@ describe("restoreActiveBackgroundTasks", () => {
 
     const backgroundTasks = new Map();
     // Sibling A finished while Pi was offline (pane gone); sibling B is live.
-    restoreActiveBackgroundTasks(piDir, backgroundTasks, (entry) => entry.id === "task-compare-m1");
+    await restoreActiveBackgroundTasks(piDir, backgroundTasks, (entry) => entry.id === "task-compare-m1");
 
     // The finished sibling must be persisted done and dropped from polling,
     // not restored as running where the global timeout would misreport it.
@@ -306,7 +362,7 @@ describe("restoreActiveBackgroundTasks", () => {
     assert.equal(finished?.comparisonModel, "model-a");
   });
 
-  it("persists restored finished tasks with the session's last message timestamp", () => {
+  it("persists restored finished tasks with the session's last message timestamp", async () => {
     // A sibling that finished while Pi was offline must record completedAt
     // from its session JSONL, not from restore time — recovered comparison
     // reports otherwise show durations inflated by the outage.
@@ -341,7 +397,7 @@ describe("restoreActiveBackgroundTasks", () => {
       comparisonIndex: 0,
     }]);
 
-    restoreActiveBackgroundTasks(piDir, new Map(), () => false);
+    await restoreActiveBackgroundTasks(piDir, new Map(), () => false);
 
     const history = readJson<Array<{ id: string; status: string; completedAt?: number }>>(
       join(piDir, "task-session-history.json"),
@@ -351,7 +407,7 @@ describe("restoreActiveBackgroundTasks", () => {
     assert.equal(entry?.completedAt, finishedAt);
   });
 
-  it("retains entries and never throws when a durable write fails during restore", () => {
+  it("retains entries and never throws when a durable write fails during restore", async () => {
     // A restore-time I/O failure (e.g. history file occupied by a directory)
     // must not abort extension registration or destroy the durable record.
     const piDir = makePiDir();
@@ -370,15 +426,15 @@ describe("restoreActiveBackgroundTasks", () => {
     mkdirSync(join(piDir, "task-session-history.json"), { recursive: true });
 
     const backgroundTasks = new Map();
-    assert.doesNotThrow(() =>
-      restoreActiveBackgroundTasks(piDir, backgroundTasks, () => false),
+    await assert.doesNotReject(async () =>
+      await restoreActiveBackgroundTasks(piDir, backgroundTasks, () => false),
     );
     // The entry could not be settled durably, so it must be retained.
     const registry = readJson<Array<{ id: string }>>(join(piDir, "task-registry.json"));
     assert.equal(registry.some((entry) => entry.id === "task-unwritable"), true);
   });
 
-  it("marks non-terminal entries failed when their pane is gone", () => {
+  it("marks non-terminal entries failed when their pane is gone", async () => {
     const piDir = makePiDir();
     const taskDir = join(piDir, "artifacts", "sessions", "task-2");
     writeSession(taskDir, "task-task-2");
@@ -397,7 +453,7 @@ describe("restoreActiveBackgroundTasks", () => {
     ]);
 
     const backgroundTasks = new Map();
-    restoreActiveBackgroundTasks(piDir, backgroundTasks, () => false);
+    await restoreActiveBackgroundTasks(piDir, backgroundTasks, () => false);
 
     assert.equal(backgroundTasks.size, 0);
     assert.deepEqual(readJson<unknown[]>(join(piDir, "task-registry.json")), []);
@@ -407,7 +463,7 @@ describe("restoreActiveBackgroundTasks", () => {
     assert.equal(history[0]?.status, "failed");
   });
 
-  it("retries terminal cleanup receipts without restoring them as running tasks", () => {
+  it("retries terminal cleanup receipts without restoring them as running tasks", async () => {
   const piDir = makePiDir();
   const taskDir = join(piDir, "artifacts", "sessions", "task-cleanup");
   mkdirSync(taskDir, { recursive: true });
@@ -425,7 +481,7 @@ describe("restoreActiveBackgroundTasks", () => {
 
   let closeCount = 0;
   const backgroundTasks = new Map();
-  restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true, () => {
+  await restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true, () => {
     closeCount += 1;
   });
 
@@ -434,7 +490,7 @@ describe("restoreActiveBackgroundTasks", () => {
   assert.deepEqual(readJson<unknown[]>(join(piDir, "task-registry.json")), []);
 });
 
-it("synthesizes the terminal history record for a receipt that lost its history entry", () => {
+it("synthesizes the terminal history record for a receipt that lost its history entry", async () => {
   // completion.ts writes the cleanup receipt BEFORE the history upsert, so a
   // crash (or an unwritable history file) can leave a receipt without a
   // terminal record. Restore must synthesize it — comparison grouping needs
@@ -460,7 +516,7 @@ it("synthesizes the terminal history record for a receipt that lost its history 
   }]);
 
   const backgroundTasks = new Map();
-  restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true, () => {});
+  await restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true, () => {});
 
   const history = readJson<
     Array<{
@@ -485,7 +541,7 @@ it("synthesizes the terminal history record for a receipt that lost its history 
   assert.deepEqual(readJson<unknown[]>(join(piDir, "task-registry.json")), []);
 });
 
-it("receipt synthesis never clobbers an already-delivered comparison marker", () => {
+it("receipt synthesis never clobbers an already-delivered comparison marker", async () => {
   // A delivered group is marked comparisonDelivered: true in history; if the
   // registry-removal write then failed, the receipt still sits in the
   // registry WITHOUT the marker. Synthesizing naively would clobber true back
@@ -513,7 +569,7 @@ it("receipt synthesis never clobbers an already-delivered comparison marker", ()
     comparisonDelivered: true,
   }]);
 
-  restoreActiveBackgroundTasks(piDir, new Map(), () => true, () => {});
+  await restoreActiveBackgroundTasks(piDir, new Map(), () => true, () => {});
 
   const history = readJson<Array<{ id: string; comparisonDelivered?: boolean }>>(
     join(piDir, "task-session-history.json"),
@@ -526,7 +582,7 @@ it("receipt synthesis never clobbers an already-delivered comparison marker", ()
   );
 });
 
-it("preserves terminal cleanup receipts when retry still fails", () => {
+it("preserves terminal cleanup receipts when retry still fails", async () => {
   const piDir = makePiDir();
   const taskDir = join(piDir, "artifacts", "sessions", "task-cleanup-fail");
   mkdirSync(taskDir, { recursive: true });
@@ -543,14 +599,14 @@ it("preserves terminal cleanup receipts when retry still fails", () => {
   };
   writeJson(join(piDir, "task-registry.json"), [entry]);
 
-  restoreActiveBackgroundTasks(piDir, new Map(), () => true, () => {
+  await restoreActiveBackgroundTasks(piDir, new Map(), () => true, () => {
     throw new Error("backend unavailable");
   });
 
   assert.deepEqual(readJson<unknown[]>(join(piDir, "task-registry.json")), [entry]);
 });
 
-it("preserves a dead HerdR record when identity-safe cleanup fails", () => {
+it("preserves a dead HerdR record when identity-safe cleanup fails", async () => {
     const piDir = makePiDir();
     const taskDir = join(piDir, "artifacts", "sessions", "task-herdr-dead");
     writeSession(taskDir, "task-task-herdr-dead");
@@ -575,8 +631,8 @@ it("preserves a dead HerdR record when identity-safe cleanup fails", () => {
       },
     ]);
 
-    assert.doesNotThrow(() => {
-      restoreActiveBackgroundTasks(
+    await assert.doesNotReject(async () => {
+      await restoreActiveBackgroundTasks(
         piDir,
         new Map(),
         () => false,
@@ -607,14 +663,14 @@ describe("session ownership (issue #20)", () => {
     };
   }
 
-  it("skips live entries owned by another session with a live owner process", () => {
+  it("skips live entries owned by another session with a live owner process", async () => {
     const piDir = makePiDir();
     writeJson(join(piDir, "task-registry.json"), [
       ownedEntry(piDir, { id: "task-foreign", ownerSessionId: "sess-a", ownerPid: 4242 }),
     ]);
 
     const backgroundTasks = new Map();
-    restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true, () => {}, {
+    await restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true, () => {}, {
       sessionId: "sess-b",
       isProcessAlive: () => true,
     });
@@ -632,14 +688,14 @@ describe("session ownership (issue #20)", () => {
     );
   });
 
-  it("treats an owned entry without a pid as unverifiable and skips it", () => {
+  it("treats an owned entry without a pid as unverifiable and skips it", async () => {
     const piDir = makePiDir();
     writeJson(join(piDir, "task-registry.json"), [
       ownedEntry(piDir, { id: "task-nopid", ownerSessionId: "sess-a" }),
     ]);
 
     const backgroundTasks = new Map();
-    restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true, () => {}, {
+    await restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true, () => {}, {
       sessionId: "sess-b",
       isProcessAlive: () => false,
     });
@@ -652,14 +708,14 @@ describe("session ownership (issue #20)", () => {
     );
   });
 
-  it("restores entries owned by the current session", () => {
+  it("restores entries owned by the current session", async () => {
     const piDir = makePiDir();
     writeJson(join(piDir, "task-registry.json"), [
       ownedEntry(piDir, { id: "task-own", ownerSessionId: "sess-b", ownerPid: 4242 }),
     ]);
 
     const backgroundTasks = new Map();
-    restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true, () => {}, {
+    await restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true, () => {}, {
       sessionId: "sess-b",
       isProcessAlive: () => true,
     });
@@ -672,7 +728,7 @@ describe("session ownership (issue #20)", () => {
     );
   });
 
-  it("terminates an orphaned live pane when the owning process is gone", () => {
+  it("terminates an orphaned live pane when the owning process is gone", async () => {
     const piDir = makePiDir();
     writeJson(join(piDir, "task-registry.json"), [
       ownedEntry(piDir, { id: "task-orphan", ownerSessionId: "sess-a", ownerPid: 4242 }),
@@ -680,7 +736,7 @@ describe("session ownership (issue #20)", () => {
 
     let closeCount = 0;
     const backgroundTasks = new Map();
-    restoreActiveBackgroundTasks(
+    await restoreActiveBackgroundTasks(
       piDir,
       backgroundTasks,
       () => true,
@@ -703,7 +759,7 @@ describe("session ownership (issue #20)", () => {
     assert.equal(history[0]?.status, "failed", "terminal receipt recorded");
   });
 
-  it("records a finished orphan done when its owner is gone", () => {
+  it("records a finished orphan done when its owner is gone", async () => {
     const piDir = makePiDir();
     writeJson(join(piDir, "task-registry.json"), [
       ownedEntry(piDir, {
@@ -715,7 +771,7 @@ describe("session ownership (issue #20)", () => {
     ]);
 
     const backgroundTasks = new Map();
-    restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true, () => {}, {
+    await restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true, () => {}, {
       sessionId: "sess-b",
       isProcessAlive: () => false,
     });
@@ -727,14 +783,14 @@ describe("session ownership (issue #20)", () => {
     assert.equal(history[0]?.status, "done", "finished orphan keeps its result");
   });
 
-  it("restores legacy entries without ownership information", () => {
+  it("restores legacy entries without ownership information", async () => {
     const piDir = makePiDir();
     writeJson(join(piDir, "task-registry.json"), [
       ownedEntry(piDir, { id: "task-legacy" }),
     ]);
 
     const backgroundTasks = new Map();
-    restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true, () => {}, {
+    await restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true, () => {}, {
       sessionId: "sess-b",
       isProcessAlive: () => true,
     });
@@ -742,14 +798,14 @@ describe("session ownership (issue #20)", () => {
     assert.equal(backgroundTasks.has("task-legacy"), true, "legacy entry restores as before");
   });
 
-  it("restores owned entries when the current session id is unknown", () => {
+  it("restores owned entries when the current session id is unknown", async () => {
     const piDir = makePiDir();
     writeJson(join(piDir, "task-registry.json"), [
       ownedEntry(piDir, { id: "task-unknown-host", ownerSessionId: "sess-a", ownerPid: 4242 }),
     ]);
 
     const backgroundTasks = new Map();
-    restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true, () => {}, {
+    await restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true, () => {}, {
       sessionId: "",
       isProcessAlive: () => true,
     });

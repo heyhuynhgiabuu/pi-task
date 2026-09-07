@@ -112,6 +112,7 @@ import {
   hasTmux,
   killAgentPane,
   killAgentPaneStrict,
+  killAgentPaneStrictAsync,
   probePane,
   probePaneAsync,
   setPaneRemainOnExit,
@@ -460,6 +461,7 @@ export default function (pi: ExtensionAPI) {
   // ── Restore active tasks from registry on load ──────────────────────────
 
   const syncHerdr = createSyncHerdrControl();
+  const asyncHerdr = createDefaultHerdrTerminalBackend();
   const registryEntryStatus = (entry: RegistryEntry): "alive" | "missing" | "unavailable" => {
     if (entry.handle?.backend === "herdr") {
       try {
@@ -475,10 +477,29 @@ export default function (pi: ExtensionAPI) {
     if (!paneId) return "missing";
     return probePane(paneId).state;
   };
-  const registryEntryAlive = (entry: RegistryEntry): boolean => {
-    const status = registryEntryStatus(entry);
+  const registryEntryStatusAsync = async (
+    entry: RegistryEntry,
+  ): Promise<"alive" | "missing" | "unavailable"> => {
+    if (entry.handle?.backend === "herdr") {
+      try {
+        return (await asyncHerdr.isAlive(entry.handle)) ? "alive" : "missing";
+      } catch (error) {
+        if (error instanceof Error && error.name === "HerdrUnavailableError") {
+          return "unavailable";
+        }
+        throw error;
+      }
+    }
+    const paneId = entry.handle?.backend === "tmux"
+      ? entry.handle.resourceId
+      : entry.paneId;
+    if (!paneId) return "missing";
+    return (await probePaneAsync(paneId)).state;
+  };
+  const registryEntryAliveAsync = async (entry: RegistryEntry): Promise<boolean> => {
+    const status = await registryEntryStatusAsync(entry);
     if (status === "unavailable") {
-      throw new Error("tmux backend temporarily unavailable");
+      throw new Error("terminal backend temporarily unavailable");
     }
     return status === "alive";
   };
@@ -552,29 +573,29 @@ export default function (pi: ExtensionAPI) {
   // session context does, and restore decisions depend on it. Until then the
   // maps stay empty; polling picks restored tasks up on its next tick.
   let restoredLifecycleOnce = false;
-  pi.on("session_start", (_event, ctx) => {
+  pi.on("session_start", async (_event, ctx) => {
     if (restoredLifecycleOnce) return;
     restoredLifecycleOnce = true;
     const sessionId = sessionViewOf(ctx).getSessionId();
     try {
       reconcileStaleSdkBackgroundTasks(piDir);
-      restoreActiveBackgroundTasks(
+      await restoreActiveBackgroundTasks(
         piDir,
         backgroundTasks,
-        registryEntryAlive,
-        (entry) => {
+        registryEntryAliveAsync,
+        async (entry) => {
           if (entry.handle?.backend === "herdr") {
             if (
               entry.handle.foregroundProcessGroupId === undefined
             ) {
               throw new Error("HerdR restore cleanup requires persisted agent identity");
             }
-            syncHerdr.close(entry.handle);
+            await asyncHerdr.close(entry.handle);
           } else {
             const paneId = entry.handle?.backend === "tmux"
               ? entry.handle.resourceId
               : entry.paneId;
-            if (paneId) killAgentPaneStrict(paneId, null);
+            if (paneId) await killAgentPaneStrictAsync(paneId, null);
           }
         },
         sessionId ? { sessionId } : undefined,

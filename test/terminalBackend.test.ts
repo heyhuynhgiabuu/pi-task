@@ -10,6 +10,7 @@ import {
   createTmuxTerminalBackend,
 } from "../src/subagent/terminalBackend.js";
 import {
+  killAgentPaneStrictAsync,
   probePane,
   probePaneAsync,
   tmuxSteerPaneAsync,
@@ -99,6 +100,19 @@ test("async tmux pane probes preserve missing versus unavailable", async () => {
   mode = "unavailable";
   const unavailable = await probePaneAsync("%42", run);
   assert.equal(unavailable.state, "unavailable");
+});
+
+test("async strict tmux cleanup verifies pane identity before killing", async () => {
+  const calls: string[][] = [];
+  await killAgentPaneStrictAsync("%42", null, async (args) => {
+    calls.push([...args]);
+    return "%42";
+  });
+
+  assert.deepEqual(calls, [
+    ["display-message", "-p", "-t", "%42", "#{pane_id}"],
+    ["kill-pane", "-t", "%42"],
+  ]);
 });
 
 test("async tmux steering uses argument-safe command calls", async () => {

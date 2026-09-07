@@ -9,16 +9,19 @@ import {
   getLastAssistantResultFromSessionDir,
   getLastMessageTimestampFromSessionDir,
 } from "../session-text.js";
-import { killAgentPane, probePane } from "../subagent/tmux.js";
+import {
+  killAgentPaneStrictAsync,
+  probePaneAsync,
+} from "../subagent/tmux.js";
 import type { BackgroundTask, RegistryEntry } from "../types.js";
 
-export function restoreActiveBackgroundTasks(
+export async function restoreActiveBackgroundTasks(
   piDir: string,
   backgroundTasks: Map<string, BackgroundTask>,
-  resourceExists?: (entry: RegistryEntry) => boolean,
-  closeResource?: (entry: RegistryEntry) => void,
+  resourceExists?: (entry: RegistryEntry) => boolean | Promise<boolean>,
+  closeResource?: (entry: RegistryEntry) => void | Promise<void>,
   session?: { sessionId: string; isProcessAlive?: (pid: number) => boolean },
-): void {
+): Promise<void> {
   const registry = readRegistry(piDir);
   const staleIds: string[] = [];
   const ownerAlive = session?.isProcessAlive ?? defaultProcessAlive;
@@ -54,15 +57,15 @@ export function restoreActiveBackgroundTasks(
   // Best-effort terminal cleanup. HerdR resources always need an explicit
   // close (with the persisted identity for it); a tmux pane is killed only
   // when it may still be alive.
-  const closeEntryResource = (
+  const closeEntryResource = async (
     entry: RegistryEntry,
     paneId: string | undefined,
     killPane: boolean,
-  ): boolean => {
+  ): Promise<boolean> => {
     if (entry.handle?.backend === "herdr") {
       if (!closeResource) return false;
       try {
-        closeResource(entry);
+        await closeResource(entry);
         return true;
       } catch {
         return false;
@@ -70,8 +73,8 @@ export function restoreActiveBackgroundTasks(
     }
     if (!killPane || !paneId) return true;
     try {
-      if (closeResource) closeResource(entry);
-      else killAgentPane(paneId, null);
+      if (closeResource) await closeResource(entry);
+      else await killAgentPaneStrictAsync(paneId, null);
       return true;
     } catch {
       return false;
@@ -105,7 +108,7 @@ export function restoreActiveBackgroundTasks(
 
   for (const entry of registry) {
     try {
-      restoreEntry(entry);
+      await restoreEntry(entry);
     } catch {
       // A failed durable write or unreadable session during restore must not
       // abort extension registration; retain the entry for a later attempt.
@@ -118,7 +121,7 @@ export function restoreActiveBackgroundTasks(
     );
   }
 
-  function restoreEntry(entry: RegistryEntry): void {
+  async function restoreEntry(entry: RegistryEntry): Promise<void> {
     // Ownership gate (issue #20): a live task belongs to the session that
     // spawned it — another session's process must not adopt, steer, time
     // out, or deliver it. Only when the owning process is provably gone may
@@ -139,9 +142,9 @@ export function restoreActiveBackgroundTasks(
 
     if (entry.cleanupPending) {
       try {
-        if (closeResource) closeResource(entry);
+        if (closeResource) await closeResource(entry);
         else if (entry.handle?.backend !== "herdr" && (entry.handle?.resourceId ?? entry.paneId)) {
-          killAgentPane(entry.handle?.resourceId ?? entry.paneId!, null);
+          await killAgentPaneStrictAsync(entry.handle?.resourceId ?? entry.paneId!, null);
         } else if (entry.handle?.backend === "herdr") {
           return;
         }
@@ -214,12 +217,12 @@ export function restoreActiveBackgroundTasks(
     let paneAlive: boolean;
     try {
       paneAlive = resourceExists
-        ? resourceExists(entry)
+        ? await resourceExists(entry)
         : entry.handle?.backend === "herdr"
           ? false
-          : (() => {
+          : await (async () => {
               if (!paneId) return false;
-              const probe = probePane(paneId);
+              const probe = await probePaneAsync(paneId);
               if (probe.state === "unavailable") throw probe.error;
               return probe.state === "alive";
             })();
@@ -245,7 +248,7 @@ export function restoreActiveBackgroundTasks(
         sessionResult.status === "failed" ? "failed" : "done",
         completedAt,
       );
-      if (closeEntryResource(entry, paneId, paneAlive)) staleIds.push(entry.id);
+      if (await closeEntryResource(entry, paneId, paneAlive)) staleIds.push(entry.id);
       return;
     }
 
@@ -258,7 +261,7 @@ export function restoreActiveBackgroundTasks(
     }
 
     if (!paneAlive) {
-      if (!closeEntryResource(entry, paneId, false)) return;
+      if (!await closeEntryResource(entry, paneId, false)) return;
       terminalReceipt(entry, "failed", Date.now());
       staleIds.push(entry.id);
       return;
@@ -267,7 +270,7 @@ export function restoreActiveBackgroundTasks(
     if (foreign) {
       // Owner gone, pane still alive, session unfinished: no consumer
       // remains, so terminate the child and record a terminal receipt.
-      if (!closeEntryResource(entry, paneId, true)) return;
+      if (!await closeEntryResource(entry, paneId, true)) return;
       terminalReceipt(entry, "failed", Date.now());
       staleIds.push(entry.id);
       return;

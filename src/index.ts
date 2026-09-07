@@ -90,6 +90,7 @@ import {
   startToolStatsPolling,
   durableParentOf,
   transferTaskOwnership,
+  createRegistryEntryStatus,
 } from "./lifecycle/index.js";
 import { DeliveryGuard, sessionViewOf } from "./panel/delivery.js";
 import {
@@ -120,7 +121,6 @@ import {
   hasTmux,
   killAgentPane,
   killAgentPaneStrictAsync,
-  probePane,
   probePaneAsync,
   setPaneRemainOnExit,
   setPaneSelfDestruct,
@@ -250,56 +250,11 @@ export default function (pi: ExtensionAPI) {
   // ── Restore active tasks from registry on load ──────────────────────────
 
   const syncHerdr = createSyncHerdrControl();
-  const registryEntryStatus = (entry: RegistryEntry): "alive" | "missing" | "unavailable" => {
-    if (entry.handle?.backend === "herdr") {
-      try {
-        return syncHerdr.exists(entry.handle) ? "alive" : "missing";
-      } catch (error) {
-        if (error instanceof Error && error.name === "HerdrUnavailableError") return "unavailable";
-        throw error;
-      }
-    }
-    const paneId = entry.handle?.backend === "tmux"
-      ? entry.handle.resourceId
-      : entry.paneId;
-    if (!paneId) return "missing";
-    return probePane(paneId).state;
-  };
-  const registryEntryStatusAsync = async (
-    entry: RegistryEntry,
-  ): Promise<"alive" | "missing" | "unavailable"> => {
-    if (entry.handle?.backend === "herdr") {
-      try {
-        return (await asyncHerdr.isAlive(entry.handle)) ? "alive" : "missing";
-      } catch (error) {
-        if (error instanceof Error && error.name === "HerdrUnavailableError") {
-          return "unavailable";
-        }
-        throw error;
-      }
-    }
-    const paneId = entry.handle?.backend === "tmux"
-      ? entry.handle.resourceId
-      : entry.paneId;
-    if (!paneId) return "missing";
-    return (await probePaneAsync(paneId)).state;
-  };
-  const registryEntryAliveAsync = async (entry: RegistryEntry): Promise<boolean> => {
-    const status = await registryEntryStatusAsync(entry);
-    if (status === "unavailable") {
-      throw new Error("terminal backend temporarily unavailable");
-    }
-    return status === "alive";
-  };
-  const registryEntryCancellationStatus = (entry: RegistryEntry): "alive" | "missing" | "unavailable" => {
-    if (
-      entry.handle?.backend === "herdr" &&
-      entry.handle.foregroundProcessGroupId === undefined
-    ) {
-      return "unavailable";
-    }
-    return registryEntryStatus(entry);
-  };
+  const {
+    registryEntryStatus,
+    registryEntryAliveAsync,
+    registryEntryCancellationStatus,
+  } = createRegistryEntryStatus(syncHerdr, asyncHerdr);
 
   // ── Widget / timer setup ───────────────────────────────────────────────
 

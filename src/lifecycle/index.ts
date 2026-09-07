@@ -8,3 +8,4 @@ export { restoreActiveBackgroundTasks } from "./restore.js";
 export { startToolStatsPolling } from "./toolStats.js";
 export { createTaskWidgetController } from "./widget.js";
 export { durableParentOf, transferTaskOwnership } from "./ownership.js";
+export { createRegistryEntryStatus } from "./registry-status.js";

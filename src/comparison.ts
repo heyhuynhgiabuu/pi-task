@@ -8,6 +8,16 @@ import {
 import { ignoreStaleExtensionCtx } from "./stale-ctx.js";
 import type { BackgroundTask, TaskSessionHistoryEntry } from "./types.js";
 
+export const DEFAULT_COMPARISON_JOIN_WINDOW_MS = 30_000;
+const DEFAULT_PARTIAL_GROUP_RETENTION_MS = 5 * 60_000;
+
+export interface ComparisonCoordinatorOptions {
+  /** Maximum time to wait for the second sibling after the first settles. */
+  joinWindowMs?: number;
+  /** How long to consume a late sibling after a partial report. */
+  partialRetentionMs?: number;
+}
+
 export interface ComparisonGroup {
   groupId: string;
   baseId: string;
@@ -16,11 +26,42 @@ export interface ComparisonGroup {
   taskIds: [string, string];
   models: [string, string];
   results: Map<string, ComparisonRunResult>;
+  startedAt: number;
+  partialDelivered?: boolean;
+  deadlineTimer?: ReturnType<typeof setTimeout>;
+  cleanupTimer?: ReturnType<typeof setTimeout>;
+}
+
+type DeliveryGuardCheck = () => boolean;
+
+function positiveDuration(value: number | undefined, fallback: number): number {
+  return value !== undefined && Number.isFinite(value) && value > 0
+    ? value
+    : fallback;
+}
+
+function unrefTimer(timer: ReturnType<typeof setTimeout>): void {
+  if (typeof timer === "object" && timer !== null && "unref" in timer) {
+    (timer as { unref?: () => void }).unref?.();
+  }
 }
 
 export class ComparisonCoordinator {
-  private groups = new Map<string, ComparisonGroup>();
-  private taskToGroup = new Map<string, string>();
+  private readonly groups = new Map<string, ComparisonGroup>();
+  private readonly taskToGroup = new Map<string, string>();
+  private readonly joinWindowMs: number;
+  private readonly partialRetentionMs: number;
+
+  constructor(options: ComparisonCoordinatorOptions = {}) {
+    this.joinWindowMs = positiveDuration(
+      options.joinWindowMs,
+      DEFAULT_COMPARISON_JOIN_WINDOW_MS,
+    );
+    this.partialRetentionMs = positiveDuration(
+      options.partialRetentionMs,
+      DEFAULT_PARTIAL_GROUP_RETENTION_MS,
+    );
+  }
 
   registerGroup(
     groupId: string,
@@ -30,6 +71,7 @@ export class ComparisonCoordinator {
     taskIds: [string, string],
     models: [string, string],
   ): void {
+    this.clearGroup(groupId);
     const group: ComparisonGroup = {
       groupId,
       baseId,
@@ -38,6 +80,7 @@ export class ComparisonCoordinator {
       taskIds,
       models,
       results: new Map(),
+      startedAt: Date.now(),
     };
     this.groups.set(groupId, group);
     this.taskToGroup.set(taskIds[0], groupId);
@@ -48,6 +91,124 @@ export class ComparisonCoordinator {
     return this.taskToGroup.has(taskId);
   }
 
+  private clearGroup(groupId: string): void {
+    const group = this.groups.get(groupId);
+    if (!group) return;
+    if (group.deadlineTimer) clearTimeout(group.deadlineTimer);
+    if (group.cleanupTimer) clearTimeout(group.cleanupTimer);
+    this.groups.delete(groupId);
+    this.taskToGroup.delete(group.taskIds[0]);
+    this.taskToGroup.delete(group.taskIds[1]);
+  }
+
+  private deliverReport(
+    group: ComparisonGroup,
+    runs: [ComparisonRunResult, ComparisonRunResult],
+    pi: ExtensionAPI,
+    deliveryGuardAllowed: boolean,
+    onDelivered: ((taskIds: [string, string]) => void) | undefined,
+    partial: boolean,
+  ): void {
+    if (!deliveryGuardAllowed) return;
+    const report = formatComparisonReport({
+      agentType: group.agentType,
+      description: group.description,
+      runs,
+    });
+    const deliveryOptions = completionDeliveryOptions(
+      process.env.PI_TASK_COMPLETION_DELIVERY,
+    );
+    let delivered = false;
+    ignoreStaleExtensionCtx(() => {
+      pi.sendMessage(
+        {
+          customType: "task-complete",
+          content: report,
+          display: true,
+          details: {
+            compare: true,
+            partial,
+            agent_type: group.agentType,
+            description: group.description,
+            phase: partial ? "partial" : "done",
+            execution_phase: partial ? "partial" : "done",
+            models: group.models,
+            task_ids: group.taskIds,
+            runs,
+          },
+        },
+        deliveryOptions,
+      );
+      delivered = true;
+    });
+    if (delivered && !partial) onDelivered?.(group.taskIds);
+  }
+
+  private expireGroup(
+    groupId: string,
+    pi: ExtensionAPI,
+    deliveryGuardAllowed: boolean,
+    onDelivered: ((taskIds: [string, string]) => void) | undefined,
+    deliveryGuardCheck: DeliveryGuardCheck | undefined,
+  ): void {
+    const group = this.groups.get(groupId);
+    if (!group || group.partialDelivered || group.results.size !== 1) return;
+    const settledId = group.taskIds.find((id) => group.results.has(id));
+    if (!settledId) return;
+    const missingId = group.taskIds.find((id) => id !== settledId);
+    if (!missingId) return;
+    const missingIndex = group.taskIds[0] === missingId ? 0 : 1;
+    const missingRun: ComparisonRunResult = {
+      model: group.models[missingIndex],
+      taskId: missingId,
+      status: "failure",
+      rawStatus: "comparison_timeout",
+      summary: "Comparison sibling did not settle before the join deadline.",
+      findings: "",
+      evidence: "",
+      files: "",
+      caveats: "The comparison report contains only the sibling that settled in time.",
+      nextSteps: "",
+      toolUses: 0,
+      durationMs: Date.now() - group.startedAt,
+      error: `Comparison sibling ${missingId} did not settle within ${this.joinWindowMs}ms.`,
+    };
+    group.results.set(missingId, missingRun);
+    group.partialDelivered = true;
+    group.deadlineTimer = undefined;
+    this.deliverReport(
+      group,
+      [group.results.get(group.taskIds[0])!, group.results.get(group.taskIds[1])!],
+      pi,
+      deliveryGuardCheck?.() ?? deliveryGuardAllowed,
+      onDelivered,
+      true,
+    );
+    group.cleanupTimer = setTimeout(() => this.clearGroup(groupId), this.partialRetentionMs);
+    unrefTimer(group.cleanupTimer);
+  }
+
+  private armDeadline(
+    group: ComparisonGroup,
+    pi: ExtensionAPI,
+    deliveryGuardAllowed: boolean,
+    onDelivered: ((taskIds: [string, string]) => void) | undefined,
+    deliveryGuardCheck: DeliveryGuardCheck | undefined,
+  ): void {
+    if (group.deadlineTimer) return;
+    group.deadlineTimer = setTimeout(
+      () => this.expireGroup(
+        group.groupId,
+        pi,
+        deliveryGuardAllowed,
+        onDelivered,
+        deliveryGuardCheck,
+      ),
+      this.joinWindowMs,
+    );
+    unrefTimer(group.deadlineTimer);
+  }
+
   /** Seed a completed sibling recovered from durable session history. */
   recordTaskSettled(
     taskId: string,
@@ -55,6 +216,7 @@ export class ComparisonCoordinator {
     pi: ExtensionAPI,
     deliveryGuardAllowed: boolean = true,
     onDelivered?: (taskIds: [string, string]) => void,
+    deliveryGuardCheck?: DeliveryGuardCheck,
   ): boolean {
     const groupId = this.taskToGroup.get(taskId);
     if (!groupId) return false;
@@ -63,50 +225,28 @@ export class ComparisonCoordinator {
     if (!group) return false;
 
     group.results.set(taskId, runResult);
+    if (group.partialDelivered) {
+      if (group.results.has(group.taskIds[0]) && group.results.has(group.taskIds[1])) {
+        this.clearGroup(groupId);
+      }
+      return true;
+    }
 
     if (group.results.size >= 2) {
       const run0 = group.results.get(group.taskIds[0]);
       const run1 = group.results.get(group.taskIds[1]);
-
-      this.groups.delete(groupId);
-      this.taskToGroup.delete(group.taskIds[0]);
-      this.taskToGroup.delete(group.taskIds[1]);
-
-      if (run0 && run1 && deliveryGuardAllowed) {
-        const report = formatComparisonReport({
-          agentType: group.agentType,
-          description: group.description,
-          runs: [run0, run1],
-        });
-
-        const deliveryOptions = completionDeliveryOptions(
-          process.env.PI_TASK_COMPLETION_DELIVERY,
-        );
-
-        let delivered = false;
-        ignoreStaleExtensionCtx(() => {
-          pi.sendMessage(
-            {
-              customType: "task-complete",
-              content: report,
-              display: true,
-              details: {
-                compare: true,
-                agent_type: group.agentType,
-                description: group.description,
-                phase: "done",
-                execution_phase: "done",
-                models: group.models,
-                task_ids: group.taskIds,
-                runs: [run0, run1],
-              },
-            },
-            deliveryOptions,
-          );
-          delivered = true;
-        });
-        if (delivered) onDelivered?.(group.taskIds);
+      this.clearGroup(groupId);
+      if (run0 && run1) {
+        this.deliverReport(group, [run0, run1], pi, deliveryGuardAllowed, onDelivered, false);
       }
+    } else {
+      this.armDeadline(
+        group,
+        pi,
+        deliveryGuardAllowed,
+        onDelivered,
+        deliveryGuardCheck,
+      );
     }
 
     return true;

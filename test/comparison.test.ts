@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { setTimeout as sleep } from "node:timers/promises";
 import {
   markComparisonGroupDelivered,
   readTaskSessionHistory,
@@ -106,6 +107,58 @@ test("ComparisonCoordinator waits for both sibling tasks before delivering repor
   // Group cleaned up
   assert.equal(coordinator.isComparisonTask("task-1-m0"), false);
   assert.equal(coordinator.isComparisonTask("task-1-m1"), false);
+});
+
+test("ComparisonCoordinator delivers a bounded partial report for a straggler", async () => {
+  const coordinator = new ComparisonCoordinator({ joinWindowMs: 10 });
+  coordinator.registerGroup(
+    "group-partial",
+    "base-partial",
+    "reviewer",
+    "Review auth code",
+    ["task-partial-a", "task-partial-b"],
+    ["model-a", "model-b"],
+  );
+
+  const sentMessages: any[] = [];
+  const fakePi: any = {
+    sendMessage: (message: any) => sentMessages.push(message),
+  };
+  const runA: ComparisonRunResult = {
+    model: "model-a",
+    taskId: "task-partial-a",
+    status: "success",
+    rawStatus: "done",
+    summary: "Completed model A",
+    findings: "Finding A",
+    evidence: "Evidence A",
+    files: "src/a.ts",
+    caveats: "",
+    nextSteps: "",
+    toolUses: 1,
+    durationMs: 20,
+  };
+
+  coordinator.recordTaskSettled("task-partial-a", runA, fakePi);
+  await sleep(30);
+
+  assert.equal(sentMessages.length, 1, "the straggler deadline emits one report");
+  assert.match(sentMessages[0]?.content ?? "", /model-b/);
+  assert.match(sentMessages[0]?.content ?? "", /did not settle/);
+  assert.equal(sentMessages[0]?.details.partial, true);
+
+  const lateRun: ComparisonRunResult = {
+    ...runA,
+    model: "model-b",
+    taskId: "task-partial-b",
+    summary: "Completed model B late",
+  };
+  assert.equal(
+    coordinator.recordTaskSettled("task-partial-b", lateRun, fakePi),
+    true,
+    "late sibling completion remains consumed by the comparison group",
+  );
+  assert.equal(sentMessages.length, 1, "late sibling does not emit a duplicate report");
 });
 
 test("restores a grouped report when one sibling is only in history", () => {

@@ -525,6 +525,10 @@ export default function (pi: ExtensionAPI) {
       pi,
       allowed,
       (taskIds) => markComparisonGroupDelivered(piDir, taskIds),
+      () => {
+        const current = taskWidget.getContext();
+        return current ? deliveryGuard.allows(sessionViewOf(current), id) : true;
+      },
     );
   };
 
@@ -1461,6 +1465,11 @@ export default function (pi: ExtensionAPI) {
                   },
                   pi,
                   deliveryGuard.allows(sessionViewOf(ctx), s.id),
+                  undefined,
+                  () => {
+                    const current = taskWidget.getContext();
+                    return current ? deliveryGuard.allows(sessionViewOf(current), s.id) : true;
+                  },
                 );
               },
               onFailed: (error) => {
@@ -1484,6 +1493,11 @@ export default function (pi: ExtensionAPI) {
                   },
                   pi,
                   deliveryGuard.allows(sessionViewOf(ctx), s.id),
+                  undefined,
+                  () => {
+                    const current = taskWidget.getContext();
+                    return current ? deliveryGuard.allows(sessionViewOf(current), s.id) : true;
+                  },
                 );
               },
               onSettled: () => {

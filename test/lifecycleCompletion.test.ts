@@ -8,7 +8,10 @@ import {
   readTaskSessionHistory,
   writeRegistry,
 } from "../src/conversation.js";
-import { completeTask } from "../src/lifecycle/completion.js";
+import {
+  completeTask,
+  createCompletionDeliveryQueue,
+} from "../src/lifecycle/completion.js";
 import type { BackgroundTask } from "../src/types.js";
 
 test("completion preserves the child-reported outcome separately from execution", () => {
@@ -143,7 +146,7 @@ test("completion is persisted and leaves cleanup pending when pane cleanup fails
   assert.equal(readRegistry(piDir)[0]?.cleanupPending, true);
 });
 
-test("completion notification defaults to adaptive steer delivery", () => {
+test("completion notification defaults to follow-up delivery", () => {
   const piDir = mkdtempSync(join(tmpdir(), "pi-task-completion-delivery-"));
   const task: BackgroundTask = {
     dir: join(piDir, "artifacts", "tasks", "task-default"),
@@ -175,7 +178,41 @@ test("completion notification defaults to adaptive steer delivery", () => {
     if (previous === undefined) delete process.env.PI_TASK_COMPLETION_DELIVERY;
     else process.env.PI_TASK_COMPLETION_DELIVERY = previous;
   }
-  assert.deepEqual(options, { triggerTurn: true, deliverAs: "steer" });
+  assert.deepEqual(options, { triggerTurn: true, deliverAs: "followUp" });
+});
+
+test("completion delivery queue batches notifications within its debounce window", async () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-completion-queue-"));
+  let deliveries = 0;
+  const queue = createCompletionDeliveryQueue(5);
+  const task: BackgroundTask = {
+    dir: join(piDir, "artifacts", "tasks", "queue-task"),
+    agentType: "general",
+    sessionName: "queue-task",
+    startedAt: Date.now(),
+    toolUses: 0,
+    turns: 0,
+    originalPane: null,
+    description: "queued completion",
+    recentCalls: [],
+  };
+  completeTask(
+    { sendMessage: () => { deliveries += 1; } } as never,
+    "queue-task",
+    task,
+    "queued result",
+    "done",
+    piDir,
+    () => {},
+    undefined,
+    undefined,
+    undefined,
+    queue,
+  );
+  assert.equal(deliveries, 0);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(deliveries, 1);
+  queue.dispose();
 });
 
 test("completion notification defers to the next user turn when configured", () => {

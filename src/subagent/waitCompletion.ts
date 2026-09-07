@@ -1,13 +1,13 @@
 import {
+  getLastAssistantResultFromSessionDir,
   getLastAssistantTextFromSessionDir,
-  hasAgentFinished,
 } from "../session-text.js";
 import {
   enrichSubagentFailureMessage,
   sessionJsonlExists,
 } from "./failure-diagnostics.js";
-    import { readExitSentinel } from "./exitSentinel.js";
-    import { paneDead, paneExists } from "./tmux.js";
+import { readExitSentinel } from "./exitSentinel.js";
+import { paneDead, probePane } from "./tmux.js";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -21,8 +21,11 @@ export type TaskCompletionStatus =
 export interface TaskCompletionSnapshot {
   status: TaskCompletionStatus;
   content: string;
-      source?: "session-jsonl" | "pane" | "exit-sentinel" | "timeout" | "signal";
+  source?: "session-jsonl" | "pane" | "exit-sentinel" | "timeout" | "signal";
 }
+
+export type ResourceState = "alive" | "missing" | "unavailable";
+export type ResourceProbe = ResourceState | boolean;
 
 export interface WaitForTaskCompletionOptions {
   sessionDir: string;
@@ -34,7 +37,7 @@ export interface WaitForTaskCompletionOptions {
   timeoutMs?: number;
   pollMs?: number;
   sinceMs?: number;
-  resourceExists?: () => boolean | Promise<boolean>;
+  resourceExists?: () => ResourceProbe | Promise<ResourceProbe>;
   exitSentinelPath?: string;
 }
 
@@ -44,18 +47,22 @@ export interface WaitForTaskCompletionOptions {
  * to write a file. Completion is gated by the assistant's terminal
  * `stopReason` (not `toolUse`, not streaming text).
  */
-function readSessionText(
+function readSessionResult(
   sessionDir: string,
   sessionName: string,
   sinceMs?: number,
-): string | null {
-  if (!hasAgentFinished(sessionDir, sessionName, sinceMs)) return null;
-  const text = getLastAssistantTextFromSessionDir(
+): TaskCompletionSnapshot | null {
+  const result = getLastAssistantResultFromSessionDir(
     sessionDir,
     sessionName,
     sinceMs,
-  ).trim();
-  return text.length > 0 ? text : null;
+  );
+  if (!result) return null;
+  return {
+    status: result.status,
+    content: result.content,
+    source: "session-jsonl",
+  };
 }
 
 const POST_PANE_EXIT_FLUSH_MS = 2500;
@@ -79,49 +86,77 @@ function reportPaneExitFailure(
   });
 }
 
+function enrichEmptySessionFailure(
+  snapshot: TaskCompletionSnapshot,
+  options: Pick<
+    WaitForTaskCompletionOptions,
+    "paneId" | "artifactsDir" | "taskId" | "sessionDir"
+  >,
+): TaskCompletionSnapshot {
+  if (
+    snapshot.status !== "failed" ||
+    snapshot.content !== "Subagent finished without producing a result."
+  ) {
+    return snapshot;
+  }
+  return { ...snapshot, content: reportPaneExitFailure(options) };
+}
+
+function normalizeResourceState(value: ResourceProbe): ResourceState {
+  if (typeof value === "boolean") return value ? "alive" : "missing";
+  return value;
+}
+
+async function getResourceState(
+  options: Pick<WaitForTaskCompletionOptions, "paneId" | "resourceExists">,
+): Promise<ResourceState> {
+  if (options.resourceExists) {
+    return normalizeResourceState(await options.resourceExists());
+  }
+  if (options.paneId) return probePane(options.paneId).state;
+  return "missing";
+}
+
 export async function checkTaskCompletion(
   options: Omit<WaitForTaskCompletionOptions, "signal" | "timeoutMs" | "pollMs">,
 ): Promise<TaskCompletionSnapshot> {
-  const paneAlive = options.resourceExists
-    ? await options.resourceExists()
-    : options.paneId
-      ? paneExists(options.paneId)
-      : false;
+  const initialResourceState = await getResourceState(options);
 
-  if (options.paneId && !paneAlive) {
+  if (options.paneId && initialResourceState === "missing") {
     await sleep(POST_PANE_EXIT_FLUSH_MS);
-    const firstPass = readSessionText(
+    const firstPass = readSessionResult(
       options.sessionDir,
       options.sessionName,
       options.sinceMs,
     );
-    if (firstPass) {
-      return { status: "completed", content: firstPass, source: "session-jsonl" };
-    }
+    if (firstPass) return enrichEmptySessionFailure(firstPass, options);
     await sleep(POST_PANE_EXIT_RETRY_MS);
   }
 
-  const sessionResult = readSessionText(
+  const sessionResult = readSessionResult(
     options.sessionDir,
     options.sessionName,
     options.sinceMs,
   );
-  if (sessionResult) {
-    return { status: "completed", content: sessionResult, source: "session-jsonl" };
-  }
+  // A provider error/abort can be an intermediate row while Pi retries. Do
+  // not settle it while the child resource is still alive; a later poll may
+  // observe the successful terminal row. Successful terminal output remains
+  // authoritative immediately.
+  if (sessionResult?.status === "completed") return sessionResult;
+  const deferredSessionFailure = sessionResult?.status === "failed"
+    ? sessionResult
+    : undefined;
 
   if (options.exitSentinelPath && options.taskId) {
     const sentinel = readExitSentinel(options.exitSentinelPath, options.taskId);
     if (sentinel) {
       await sleep(250);
-      const finalSessionResult = readSessionText(
+      const finalSessionResult = readSessionResult(
         options.sessionDir,
         options.sessionName,
         options.sinceMs,
       );
-      if (finalSessionResult) {
-        return { status: "completed", content: finalSessionResult, source: "session-jsonl" };
-      }
+      if (finalSessionResult) return finalSessionResult;
       const message = sentinel.exitCode === 0
         ? "Agent process exited without writing a final session result."
         : `Agent process exited with code ${sentinel.exitCode} before writing a final session result.`;
@@ -129,12 +164,16 @@ export async function checkTaskCompletion(
     }
   }
 
-  const stillAlive = options.resourceExists
-    ? await options.resourceExists()
-    : options.paneId
-      ? paneExists(options.paneId)
-      : false;
-  if (options.paneId && stillAlive) {
+  const finalResourceState = await getResourceState(options);
+  if (deferredSessionFailure && finalResourceState === "missing") {
+    return enrichEmptySessionFailure(deferredSessionFailure, options);
+  }
+  if (
+    (options.paneId || options.resourceExists) &&
+    finalResourceState !== "missing"
+  ) {
+    // A backend outage is not evidence that the child pane died. Keep the
+    // durable task pending and let a later poll retry the probe.
     return { status: "running", content: "", source: "pane" };
   }
 
@@ -172,6 +211,16 @@ export async function waitForTaskCompletion(
   }
 
   const elapsedMs = Date.now() - started;
+  // A provider failure may have been deferred while the child resource stayed
+  // alive. Preserve that classified terminal content instead of replacing it
+  // with a generic timeout if no later retry arrived.
+  const finalSessionResult = readSessionResult(
+    options.sessionDir,
+    options.sessionName,
+    options.sinceMs,
+  );
+  if (finalSessionResult) return enrichEmptySessionFailure(finalSessionResult, options);
+
   const base = `Task timed out after ${Math.round(timeoutMs / 1000)}s without producing a result.`;
   let content = base;
   if (options.paneId && paneDead(options.paneId)) {

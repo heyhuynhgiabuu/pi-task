@@ -14,6 +14,9 @@ export interface RunSdkSubagentOptions {
   systemPrompt?: string;
   skillPaths?: string[];
   fast?: boolean;
+  sessionName?: string;
+  signal?: AbortSignal;
+  timeoutMs?: number;
   /**
    * Called with the AgentSession after creation but before prompt().
    * Return an unsubscribe function that will be called on cleanup.
@@ -76,6 +79,78 @@ export async function resolveSdkModel(
 let activeSdkRuns = 0;
 let outerDisabledSnapshot: string | undefined;
 
+export type SdkAssistantResult =
+  | { output: string }
+  | { error: string };
+
+export class SdkSubagentInterruptedError extends Error {
+  readonly kind: "cancelled" | "timeout";
+
+  constructor(kind: "cancelled" | "timeout") {
+    super(kind === "cancelled" ? "SDK subagent was cancelled." : "SDK subagent timed out.");
+    this.name = "SdkSubagentInterruptedError";
+    this.kind = kind;
+  }
+}
+
+export function getFinalAssistantResult(messages: readonly unknown[]): SdkAssistantResult {
+  let finalAssistant: Record<string, unknown> | undefined;
+  for (const candidate of messages) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const message = candidate as Record<string, unknown>;
+    if (message.role === "assistant") finalAssistant = message;
+  }
+
+  if (!finalAssistant) {
+    return { error: "SDK subagent completed without an assistant message." };
+  }
+
+  const stopReason = finalAssistant.stopReason;
+  const errorMessage = finalAssistant.errorMessage;
+  const content = finalAssistant.content;
+  const output = extractAssistantText(content);
+  if (
+    typeof stopReason === "string" &&
+    !["stop", "endTurn", "length", "error", "aborted"].includes(stopReason)
+  ) {
+    return { error: "SDK subagent has not reached a terminal result." };
+  }
+  if (stopReason === "error") {
+    return {
+      error:
+        typeof errorMessage === "string" && errorMessage.trim()
+          ? errorMessage.trim()
+          : output || "SDK subagent failed before producing a result.",
+    };
+  }
+  if (stopReason === "aborted") {
+    return {
+      error:
+        typeof errorMessage === "string" && errorMessage.trim()
+          ? errorMessage.trim()
+          : "SDK subagent was aborted.",
+    };
+  }
+  if (!output.trim()) {
+    return { error: "SDK subagent completed without assistant text." };
+  }
+  return { output: output.trim() };
+}
+
+function extractAssistantText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .map((part: unknown) => {
+      if (typeof part === "string") return part;
+      if (!part || typeof part !== "object") return "";
+      const text = (part as { text?: unknown }).text;
+      return typeof text === "string" ? text : "";
+    })
+    .filter(Boolean)
+    .join("\n");
+}
+
 export async function runSdkSubagent(options: RunSdkSubagentOptions): Promise<{
   output: string;
   sessionPath?: string;
@@ -129,17 +204,46 @@ export async function runSdkSubagent(options: RunSdkSubagentOptions): Promise<{
       excludeTools: options.excludeTools,
       resourceLoader,
     }));
+    if (options.sessionName && typeof session.setSessionName === "function") {
+      session.setSessionName(options.sessionName);
+    }
 
     // Subscribe to tool execution events before prompt()
     if (options.onSession) {
       unsubSession = options.onSession(session);
     }
 
-    await session.prompt(options.prompt);
+    let interruption: SdkSubagentInterruptedError | undefined;
+    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+    const interrupt = (kind: "cancelled" | "timeout") => {
+      interruption ??= new SdkSubagentInterruptedError(kind);
+      try {
+        void Promise.resolve(session.abort?.()).catch(() => {
+          // The prompt promise still resolves/rejects through the SDK lifecycle.
+        });
+      } catch {
+        // The prompt promise still resolves/rejects through the SDK lifecycle.
+      }
+    };
+    const onAbort = () => interrupt("cancelled");
+    if (options.signal?.aborted) onAbort();
+    else options.signal?.addEventListener("abort", onAbort, { once: true });
+    if (options.timeoutMs !== undefined) {
+      timeoutHandle = setTimeout(() => interrupt("timeout"), options.timeoutMs);
+    }
+    try {
+      if (interruption) throw interruption;
+      await session.prompt(options.prompt);
+      if (interruption) throw interruption;
+    } finally {
+      if (timeoutHandle) clearTimeout(timeoutHandle);
+      options.signal?.removeEventListener("abort", onAbort);
+    }
 
     const sessionPath = session.sessionFile;
-    const output = getLastAssistantText(session.messages);
-    return { output: output.trim(), sessionPath };
+    const result = getFinalAssistantResult(session.messages);
+    if ("error" in result) throw new Error(result.error);
+    return { output: result.output, sessionPath };
   } finally {
     unsubSession?.();
     session?.dispose?.();
@@ -154,24 +258,4 @@ export async function runSdkSubagent(options: RunSdkSubagentOptions): Promise<{
       outerDisabledSnapshot = undefined;
     }
   }
-}
-
-function getLastAssistantText(messages: readonly any[]): string {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const message = messages[index];
-    if (message?.role !== "assistant") continue;
-    const content = message.content;
-    if (typeof content === "string") return content;
-    if (Array.isArray(content)) {
-      return content
-        .map((part) => {
-          if (typeof part === "string") return part;
-          if (typeof part?.text === "string") return part.text;
-          return "";
-        })
-        .filter(Boolean)
-        .join("\n");
-    }
-  }
-  return "";
 }

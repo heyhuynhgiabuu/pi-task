@@ -1,8 +1,14 @@
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { WRAP_UP_GRACE_TURNS, turnLimitWrapUpPrompt } from "../constants.js";
-import { getLastAssistantTextFromSessionDir } from "../session-text.js";
-import type { TaskCompletionSnapshot } from "../subagent/waitCompletion.js";
+import {
+  getLastAssistantResultFromSessionDir,
+  getLastAssistantTextFromSessionDir,
+} from "../session-text.js";
+import type {
+  ResourceProbe,
+  TaskCompletionSnapshot,
+} from "../subagent/waitCompletion.js";
 import type { BackgroundTask } from "../types.js";
 import { completeTask, type ComparisonSettledHook } from "./completion.js";
 
@@ -15,10 +21,10 @@ export interface BackgroundPollingDeps {
     artifactsDir?: string;
     taskId?: string;
         sinceMs?: number;
-        resourceExists?: () => boolean | Promise<boolean>;
+        resourceExists?: () => ResourceProbe | Promise<ResourceProbe>;
         exitSentinelPath?: string;
       }) => Promise<TaskCompletionSnapshot>;
-      resourceExists?: (task: BackgroundTask) => boolean | Promise<boolean>;
+      resourceExists?: (task: BackgroundTask) => ResourceProbe | Promise<ResourceProbe>;
       closeTask?: (task: BackgroundTask) => void | Promise<void>;
   clearTaskWidgetIfIdle: () => void;
   completeTask: typeof completeTask;
@@ -91,14 +97,24 @@ export function startBackgroundPolling(
       for (const [id, task] of deps.backgroundTasks) {
         if (task.backend === "sdk") continue;
         try {
+          const sessionDir = join(task.dir, "sessions", id);
           const elapsed = Date.now() - task.startedAt;
           if (elapsed > deps.TASK_TIMEOUT_MS) {
             if (deps.backgroundTasks.get(id) !== task) continue;
+            const terminalResult = getLastAssistantResultFromSessionDir(
+              sessionDir,
+              task.sessionName,
+              task.startedAt,
+            );
+            const timeoutContent =
+              terminalResult?.content ||
+              `Task timed out after ${Math.round(deps.TASK_TIMEOUT_MS / 1000)}s without producing a result.`;
             settle(
               id,
               task,
-              `Task timed out after ${Math.round(deps.TASK_TIMEOUT_MS / 1000)}s without producing a result.`,
-              "timeout",
+              timeoutContent,
+              terminalResult?.status === "completed" ? "done" :
+                terminalResult?.status === "failed" ? "failed" : "timeout",
             );
             continue;
           }
@@ -107,7 +123,6 @@ export function startBackgroundPolling(
           // allow a bounded grace of further turns, then settle with whatever
           // the subagent produced instead of discarding it. SDK tasks are
           // skipped above (no terminal session to steer).
-          const sessionDir = join(task.dir, "sessions", id);
           if (task.maxTurns !== undefined) {
             const readPartial = () =>
               getLastAssistantTextFromSessionDir(

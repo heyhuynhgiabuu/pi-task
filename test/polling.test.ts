@@ -111,6 +111,54 @@ function makeDeps(
 }
 
 {
+  const t = "timeout settlement preserves a deferred provider failure";
+  const root = mkdtempSync(join(tmpdir(), "pi-task-polling-timeout-"));
+  try {
+    const taskId = "task-timeout";
+    const sessionDir = join(root, "sessions", taskId);
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(
+      join(sessionDir, "task-timeout.jsonl"),
+      JSON.stringify({ type: "session_info", name: "task-timeout" }) + "\n" +
+        JSON.stringify({
+          type: "message",
+          timestamp: new Date().toISOString(),
+          message: {
+            role: "assistant",
+            stopReason: "error",
+            errorMessage: "provider failure retained",
+            content: [],
+          },
+        }) + "\n",
+    );
+    const backgroundTasks = new Map<any, any>();
+    backgroundTasks.set(taskId, {
+      id: taskId,
+      dir: root,
+      sessionName: taskId,
+      startedAt: Date.now() - 1000,
+    });
+    let settled: { content: string; phase: string } | undefined;
+    const stop = startBackgroundPolling(
+      makeDeps({
+        backgroundTasks,
+        TASK_TIMEOUT_MS: 0,
+        completeTask: (_pi: any, _id: string, _task: any, content: string, phase: string) => {
+          settled = { content, phase };
+        },
+      }),
+      5,
+    );
+    await sleep(30);
+    stop();
+    assert.equal(settled?.phase, "failed", t);
+    assert.match(settled?.content ?? "", /provider failure retained/, t);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
   const t = "stop() during an in-flight tick does not double-fire after stop completes";
   // Simulate a slow checkTaskCompletion so a tick is in-flight when we stop.
   let resolveSlowCheck: ((v: any) => void) | undefined;

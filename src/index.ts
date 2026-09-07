@@ -41,8 +41,8 @@ import {
   readRegistry,
   readTaskSessionHistory,
   readTaskSessionsRegistry,
+  updateRegistry,
   upsertTaskSessionHistory,
-  writeRegistry,
   writeTaskSessionsRegistry,
 } from "./conversation.js";
 import {
@@ -75,15 +75,23 @@ import {
 } from "./comparison.js";
 import {
   completeTask,
+  createCompletionDeliveryQueue,
   createTaskWidgetController,
   restoreActiveBackgroundTasks,
   startBackgroundPolling,
   startToolStatsPolling,
 } from "./lifecycle/index.js";
 import { DeliveryGuard, sessionViewOf, type SessionView } from "./panel/delivery.js";
-import { getLastAssistantTextFromSessionDir } from "./session-text.js";
-import { formatSdkBackgroundReceipt, startSdkBackgroundTask } from "./subagent/sdkBackground.js";
-import { runSdkSubagent } from "./subagent/runSdk.js";
+import { getLastAssistantResultFromSessionDir } from "./session-text.js";
+import {
+  formatSdkBackgroundReceipt,
+  reconcileStaleSdkBackgroundTasks,
+  startSdkBackgroundTask,
+} from "./subagent/sdkBackground.js";
+import {
+  runSdkSubagent,
+  SdkSubagentInterruptedError,
+} from "./subagent/runSdk.js";
 import { resolveAgentSkillPaths } from "./subagent/skills.js";
 import {
   createDefaultHerdrTerminalBackend,
@@ -100,7 +108,7 @@ import {
   hasTmux,
   killAgentPane,
   killAgentPaneStrict,
-  paneExists,
+  probePane,
   setPaneRemainOnExit,
   setPaneSelfDestruct,
   splitWindowPane,
@@ -151,12 +159,15 @@ function comparisonRunFromHistory(
     ? dirname(entry.sessionRef)
     : join(entry.dir, "sessions", entry.id);
   let output = "";
+  let sessionFailure: string | undefined;
   try {
-    output = getLastAssistantTextFromSessionDir(
+    const sessionResult = getLastAssistantResultFromSessionDir(
       sessionDir,
       entry.sessionName,
       entry.startedAt,
     );
+    if (sessionResult?.status === "completed") output = sessionResult.content;
+    else if (sessionResult?.status === "failed") sessionFailure = sessionResult.content;
   } catch {
     // The durable history record still provides a terminal status if the
     // session file is temporarily unavailable during restoration.
@@ -164,7 +175,7 @@ function comparisonRunFromHistory(
 
   const parsed = parseResultXml(output);
   const assessment = assessTaskResult(parsed);
-  const completedNormally = entry.status === "done";
+  const completedNormally = entry.status === "done" && sessionFailure === undefined;
   const { toolUses } = countToolUses(sessionDir, entry.sessionName);
   return {
     model: entry.comparisonModel,
@@ -182,7 +193,9 @@ function comparisonRunFromHistory(
     toolUses,
     durationMs: Math.max(0, (entry.completedAt ?? entry.startedAt) - entry.startedAt),
     sessionPath: entry.sessionRef,
-    error: completedNormally ? undefined : parsed.summary || `Task ${entry.status}`,
+    error: completedNormally
+      ? undefined
+      : sessionFailure || parsed.summary || `Task ${entry.status}`,
   };
 }
 
@@ -231,7 +244,17 @@ export function restoreComparisonGroups(
 
   for (const history of readTaskSessionHistory(piDir)) {
     const backend = history.handle?.backend ?? history.backend;
-    const terminal = backend === "tmux" || backend === "herdr" || Boolean(history.paneId);
+    const terminal =
+      backend === "tmux" ||
+      backend === "herdr" ||
+      Boolean(history.paneId) ||
+      Boolean(history.sessionRef) ||
+      Boolean(
+        history.background &&
+          history.status !== "running" &&
+          history.comparisonGroupId &&
+          history.comparisonModel,
+      );
     if (
       !history.background ||
       !terminal ||
@@ -364,6 +387,31 @@ export default function (pi: ExtensionAPI) {
   // Records which conversation spawned each background task so a result is
   // never delivered into a different conversation or branch.
   const deliveryGuard = new DeliveryGuard();
+  const completionDeliveryQueue = createCompletionDeliveryQueue();
+  const completeTaskWithDelivery: typeof completeTask = (
+    piArg,
+    id,
+    task,
+    content,
+    phase,
+    taskPiDir,
+    resourceCloser,
+    deliveryGuardFn,
+    onComparisonSettled,
+  ) =>
+    completeTask(
+      piArg,
+      id,
+      task,
+      content,
+      phase,
+      taskPiDir,
+      resourceCloser,
+      deliveryGuardFn,
+      onComparisonSettled,
+      undefined,
+      completionDeliveryQueue,
+    );
 
   // Explicit resume moves lifecycle ownership (issue #20) to the resuming
   // session: it now drives the pane, so the previous owner's process must
@@ -383,34 +431,42 @@ export default function (pi: ExtensionAPI) {
     ) {
       return;
     }
-    const entries = readRegistry(piDir);
-    const idx = entries.findIndex((e) => e.id === registryEntry.id);
-    if (idx === -1) return;
-    entries[idx] = {
-      ...registryEntry,
-      ownerSessionId: sessionId,
-      ownerPid: process.pid,
-    };
-    writeRegistry(piDir, entries);
+    updateRegistry(piDir, (entries) => {
+      const idx = entries.findIndex((e) => e.id === registryEntry.id);
+      if (idx === -1) return entries;
+      entries[idx] = {
+        ...registryEntry,
+        ownerSessionId: sessionId,
+        ownerPid: process.pid,
+      };
+      return entries;
+    });
   };
 
   // ── Restore active tasks from registry on load ──────────────────────────
 
   const syncHerdr = createSyncHerdrControl();
-  const registryEntryAlive = (entry: RegistryEntry): boolean => {
-    if (entry.handle?.backend === "herdr") return syncHerdr.exists(entry.handle);
+  const registryEntryStatus = (entry: RegistryEntry): "alive" | "missing" | "unavailable" => {
+    if (entry.handle?.backend === "herdr") {
+      try {
+        return syncHerdr.exists(entry.handle) ? "alive" : "missing";
+      } catch (error) {
+        if (error instanceof Error && error.name === "HerdrUnavailableError") return "unavailable";
+        throw error;
+      }
+    }
     const paneId = entry.handle?.backend === "tmux"
       ? entry.handle.resourceId
       : entry.paneId;
-    return Boolean(paneId && paneExists(paneId));
+    if (!paneId) return "missing";
+    return probePane(paneId).state;
   };
-  const registryEntryStatus = (entry: RegistryEntry): "alive" | "missing" | "unavailable" => {
-    try {
-      return registryEntryAlive(entry) ? "alive" : "missing";
-    } catch (error) {
-      if (error instanceof Error && error.name === "HerdrUnavailableError") return "unavailable";
-      throw error;
+  const registryEntryAlive = (entry: RegistryEntry): boolean => {
+    const status = registryEntryStatus(entry);
+    if (status === "unavailable") {
+      throw new Error("tmux backend temporarily unavailable");
     }
+    return status === "alive";
   };
   const registryEntryCancellationStatus = (entry: RegistryEntry): "alive" | "missing" | "unavailable" => {
     if (
@@ -478,6 +534,7 @@ export default function (pi: ExtensionAPI) {
     restoredLifecycleOnce = true;
     const sessionId = sessionViewOf(ctx).getSessionId();
     try {
+      reconcileStaleSdkBackgroundTasks(piDir);
       restoreActiveBackgroundTasks(
         piDir,
         backgroundTasks,
@@ -537,10 +594,10 @@ export default function (pi: ExtensionAPI) {
       resourceExists: (task) => task.handle?.backend === "herdr"
         ? createDefaultHerdrTerminalBackend().isAlive(task.handle)
         : task.paneId
-          ? paneExists(task.paneId)
+          ? probePane(task.paneId).state
           : false,
       clearTaskWidgetIfIdle,
-      completeTask,
+      completeTask: completeTaskWithDelivery,
       onComparisonSettled: comparisonSettledHandler,
       onTaskFinished: (id, task) => taskWidget.noteTaskFinished(id, task),
       deliveryGuard: (id) => {
@@ -564,7 +621,7 @@ export default function (pi: ExtensionAPI) {
       backgroundTasks,
       registryEntryStatus: registryEntryCancellationStatus,
       clearTaskWidgetIfIdle,
-      completeTask,
+      completeTask: completeTaskWithDelivery,
       onComparisonSettled: comparisonSettledHandler,
       noteTaskFinished: (id, task) => taskWidget.noteTaskFinished(id, task),
     });
@@ -581,6 +638,7 @@ export default function (pi: ExtensionAPI) {
     stopBackgroundPolling();
     clearInterval(countInterval);
     taskWidget.dispose();
+    completionDeliveryQueue.dispose();
   });
 
       // ── Custom notification renderer ───────────────────────────────────────
@@ -748,7 +806,11 @@ export default function (pi: ExtensionAPI) {
             id = registeredTaskId;
             sessionName = conversationId ?? `task-${id}`;
             const previous = findTaskSessionHistory(piDir, id);
-            persistedTaskCwd = previous?.cwd;
+            const repairedPrevious = previous
+              ? repairTaskSessionRef(piDir, previous)
+              : undefined;
+            persistedTaskCwd = repairedPrevious?.cwd ?? previous?.cwd;
+            resumeSessionRef = repairedPrevious?.sessionRef;
             const metadataAgent = previous?.agentType;
             if (metadataAgent && metadataAgent !== agent.name) {
               return {
@@ -847,6 +909,21 @@ export default function (pi: ExtensionAPI) {
               tmux_session: sessionName,
               background: true,
             },
+          };
+        }
+
+        if (!resumeSessionRef) {
+          return {
+            content: [{
+              type: "text" as const,
+              text: `Conversation "${conversationId}" was found, but its session JSONL file could not be resolved. Cannot resume without a --session file path.`,
+            }],
+            details: {
+              phase: "failed" as const,
+              error: "Conversation session file missing",
+              conversation_id: conversationId,
+            },
+            isError: true,
           };
         }
       } else if (taskParams.task_id) {
@@ -1196,6 +1273,7 @@ export default function (pi: ExtensionAPI) {
                   try {
                     const res = await runSdkSubagent({
                       onSession: (session) => subscribeToolEvents(session, fg, 10, taskWidget.requestRender),
+                      sessionName: fg.sessionName,
                       prompt: promptContent,
                       agent: s.agent,
                       cwd: taskCwd,
@@ -1207,6 +1285,8 @@ export default function (pi: ExtensionAPI) {
                       systemPrompt: agent.body,
                       skillPaths,
                       fast: effectiveFast,
+                      signal,
+                      timeoutMs: TASK_TIMEOUT_MS,
                     });
                     const parsed = parseResultXml(res.output);
                     const assess = assessTaskResult(parsed);
@@ -1339,6 +1419,7 @@ export default function (pi: ExtensionAPI) {
               run: () =>
                 runSdkSubagent({
                   onSession: (session) => subscribeToolEvents(session, bg, 10, taskWidget.requestRender),
+                  sessionName: s.sessionName,
                   prompt: promptContent,
                   agent: s.agent,
                   cwd: taskCwd,
@@ -1350,6 +1431,7 @@ export default function (pi: ExtensionAPI) {
                   systemPrompt: agent.body,
                   skillPaths,
                   fast: effectiveFast,
+                  timeoutMs: TASK_TIMEOUT_MS,
                 }),
               onComplete: (result) => {
                 bg.status = "done";
@@ -1737,11 +1819,8 @@ Both subagents are running in background. Results will be compared and delivered
         }
 
         const comparisonIds = new Set(terminalTasks.map((t) => t.id));
-        const existingEntries = readRegistry(piDir).filter(
-          (entry) => !comparisonIds.has(entry.id),
-        );
-        writeRegistry(piDir, [
-          ...existingEntries,
+        updateRegistry(piDir, (existingEntries) => [
+          ...existingEntries.filter((entry) => !comparisonIds.has(entry.id)),
           ...terminalTasks.map((t) => ({
             id: t.id,
             agentType: agent.name,
@@ -1831,6 +1910,7 @@ Both subagents are running in background. Results will be compared and delivered
               onSession: foregroundTask
                 ? (session) => subscribeToolEvents(session, foregroundTask, 10, taskWidget.requestRender)
                 : onSession,
+              sessionName: foregroundTask?.sessionName ?? sessionName,
               prompt: promptContent,
               agent,
               cwd: taskCwd,
@@ -1842,6 +1922,8 @@ Both subagents are running in background. Results will be compared and delivered
               systemPrompt: agent.body,
               skillPaths,
               fast: effectiveFast,
+              signal: foregroundTask ? signal : undefined,
+              timeoutMs: TASK_TIMEOUT_MS,
             });
 
       const foregroundTask: BackgroundTask | undefined = isBackground
@@ -1903,6 +1985,7 @@ Both subagents are running in background. Results will be compared and delivered
                 cwd: taskCwd,
                 conversationId,
                 run: async () => runSdkFallback(undefined, bgOnSession),
+                deliver: (delivery) => completionDeliveryQueue.enqueue(delivery),
                 onComplete: (result) => {
                   if (!deliveryGuard.allows(sessionViewOf(ctx), id)) return;
                   backgroundTask.status = "done";
@@ -1949,20 +2032,22 @@ Both subagents are running in background. Results will be compared and delivered
                 },
                 onFailed: (error) => {
                   if (!deliveryGuard.allows(sessionViewOf(ctx), id)) return;
-                  backgroundTask.status = "failed";
+                  const interrupted = error instanceof SdkSubagentInterruptedError;
+                  const phase = interrupted && error.kind === "timeout" ? "timeout" : "failed";
+                  backgroundTask.status = phase;
                   const message = error instanceof Error ? error.message : String(error);
                   ignoreStaleExtensionCtx(() =>
                     pi.sendMessage(
                       {
                         customType: "task-complete",
-                        content: `Background task ${id} (${agent.name}) failed.\n\n${message}`,
+                        content: `Background task ${id} (${agent.name}) ${phase}.\n\n${message}`,
                         display: true,
                         details: {
                           task_id: id,
                           agent_type: agent.name,
                           description: descText,
-                          phase: "failed",
-                          execution_phase: "failed",
+                          phase,
+                          execution_phase: phase,
                           status: "unknown",
                           reported_status: "unknown",
                           result_valid: false,
@@ -2027,21 +2112,24 @@ Both subagents are running in background. Results will be compared and delivered
                 },
               };
         } catch (error) {
+          const interrupted = error instanceof SdkSubagentInterruptedError;
+          const phase = interrupted && error.kind === "cancelled" ? "cancelled" :
+            interrupted && error.kind === "timeout" ? "timeout" : "failed";
           const message = error instanceof Error ? error.message : String(error);
           return {
             content: [
-              { type: "text" as const, text: `SDK task failed: ${message}` },
+              { type: "text" as const, text: `SDK task ${phase}: ${message}` },
             ],
             details: {
-              phase: "failed" as const,
-              execution_phase: "failed" as const,
+              phase,
+              execution_phase: phase,
               status: "unknown",
               reported_status: "unknown",
               result_valid: false,
               backend: "sdk" as const,
               error: message,
             },
-            isError: true,
+            isError: phase === "failed",
           };
         } finally {
           foregroundTasks.delete(id);
@@ -2272,9 +2360,7 @@ Both subagents are running in background. Results will be compared and delivered
       };
 
       // Write to JSON registry for on-load restore
-      const entries = readRegistry(piDir);
-      entries.push(entry);
-      writeRegistry(piDir, entries);
+      updateRegistry(piDir, (entries) => [...entries, entry]);
       upsertTaskSessionHistory(piDir, {
         ...entry,
         status: "running",

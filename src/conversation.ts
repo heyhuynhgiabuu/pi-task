@@ -1,5 +1,15 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { randomUUID } from "node:crypto";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { isTerminalHandle, type TerminalHandle } from "./subagent/terminalBackend.js";
 import type { RegistryEntry, TaskSessionHistoryEntry } from "./types.js";
 
@@ -27,9 +37,97 @@ function readJsonFile<T>(file: string, fallback: T): T {
   }
 }
 
+const LOCK_STALE_MS = 5 * 60 * 1000;
+const LOCK_WAIT_MS = 25;
+const LOCK_TIMEOUT_MS = 30 * 1000;
+
 function writeJsonFile(file: string, value: unknown): void {
   ensureDir(dirname(file));
-  writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`, "utf-8");
+  const temporary = join(
+    dirname(file),
+    `.${basename(file)}.${process.pid}.${randomUUID()}.tmp`,
+  );
+  try {
+    writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, "utf-8");
+    renameSync(temporary, file);
+  } finally {
+    rmSync(temporary, { force: true });
+  }
+}
+
+function withFileLock<T>(file: string, action: () => T): T {
+  const lock = `${file}.lock`;
+  const token = randomUUID();
+  const owner = `${process.pid}:${token}`;
+  const started = Date.now();
+  let acquired = false;
+  ensureDir(dirname(file));
+
+  while (!acquired) {
+    try {
+      mkdirSync(lock);
+      try {
+        writeFileSync(join(lock, "owner"), owner, "utf-8");
+      } catch (error) {
+        rmSync(lock, { recursive: true, force: true });
+        throw error;
+      }
+      acquired = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) {
+          let ownerAlive = false;
+          try {
+            const ownerPid = Number.parseInt(
+              readFileSync(join(lock, "owner"), "utf-8").split(":", 1)[0] ?? "",
+              10,
+            );
+            if (Number.isInteger(ownerPid) && ownerPid > 0) {
+              try {
+                process.kill(ownerPid, 0);
+                ownerAlive = true;
+              } catch (probeError) {
+                ownerAlive = (probeError as NodeJS.ErrnoException).code !== "ESRCH";
+              }
+            }
+          } catch {
+            // A lock without an owner marker can be reclaimed after a crash.
+          }
+          if (!ownerAlive) {
+            // Rename before removing so a releasing stale owner cannot remove
+            // a replacement lock created by another waiter.
+            const staleLock = `${lock}.stale.${process.pid}.${randomUUID()}`;
+            try {
+              renameSync(lock, staleLock);
+              rmSync(staleLock, { recursive: true, force: true });
+              continue;
+            } catch {
+              // Another waiter won the race; retry the normal acquisition path.
+            }
+          }
+        }
+      } catch {
+        // The owner may have released the lock between stat and cleanup.
+      }
+      if (Date.now() - started >= LOCK_TIMEOUT_MS) {
+        throw new Error(`Timed out acquiring persistence lock: ${lock}`);
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, LOCK_WAIT_MS);
+    }
+  }
+
+  try {
+    return action();
+  } finally {
+    try {
+      if (readFileSync(join(lock, "owner"), "utf-8") === owner) {
+        rmSync(lock, { recursive: true, force: true });
+      }
+    } catch {
+      // A stale-lock reaper may have already moved this lock aside.
+    }
+  }
 }
 
 export function normalizeConversationId(value: unknown): string | undefined {
@@ -73,7 +171,8 @@ export function writeTaskSessionsRegistry(
   piDir: string,
   registry: Record<string, TaskSessionRegistryEntry>,
 ): void {
-  writeJsonFile(getTaskSessionsRegistryPath(piDir), registry);
+  const file = getTaskSessionsRegistryPath(piDir);
+  withFileLock(file, () => writeJsonFile(file, registry));
 }
 
 function getRegistryPath(piDir: string): string {
@@ -109,15 +208,36 @@ export function readRegistry(piDir: string): RegistryEntry[] {
 }
 
 export function writeRegistry(piDir: string, entries: RegistryEntry[]): void {
-  writeJsonFile(getRegistryPath(piDir), entries.map((entry) => migrateRegistryEntry(entry)));
+  const file = getRegistryPath(piDir);
+  withFileLock(file, () =>
+    writeJsonFile(file, entries.map((entry) => migrateRegistryEntry(entry))),
+  );
+}
+
+/** Apply a registry update while holding the cross-process persistence lock. */
+export function updateRegistry(
+  piDir: string,
+  update: (entries: RegistryEntry[]) => RegistryEntry[],
+): RegistryEntry[] {
+  const file = getRegistryPath(piDir);
+  return withFileLock(file, () => {
+    const parsed = readJsonFile<unknown>(file, []);
+    const current = Array.isArray(parsed)
+      ? parsed
+          .filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object")
+          .map((entry) => migrateRegistryEntry(entry))
+      : [];
+    const next = update(current);
+    writeJsonFile(file, next.map((entry) => migrateRegistryEntry(entry)));
+    return next;
+  });
 }
 
 function getTaskSessionHistoryPath(piDir: string): string {
   return join(piDir, TASK_SESSION_HISTORY);
 }
 
-export function readTaskSessionHistory(piDir: string): TaskSessionHistoryEntry[] {
-  const parsed = readJsonFile<unknown>(getTaskSessionHistoryPath(piDir), []);
+function parseTaskSessionHistory(parsed: unknown): TaskSessionHistoryEntry[] {
   if (!Array.isArray(parsed)) return [];
   // The history file is persisted state: drop corrupt elements (null,
   // non-objects) at this single ingest point so every consumer is safe.
@@ -127,25 +247,25 @@ export function readTaskSessionHistory(piDir: string): TaskSessionHistoryEntry[]
   );
 }
 
-function writeTaskSessionHistory(
-  piDir: string,
-  entries: TaskSessionHistoryEntry[],
-): void {
-  writeJsonFile(getTaskSessionHistoryPath(piDir), entries);
+export function readTaskSessionHistory(piDir: string): TaskSessionHistoryEntry[] {
+  return parseTaskSessionHistory(readJsonFile<unknown>(getTaskSessionHistoryPath(piDir), []));
 }
 
 export function upsertTaskSessionHistory(
   piDir: string,
   entry: TaskSessionHistoryEntry,
 ): void {
-  const entries = readTaskSessionHistory(piDir);
-  const idx = entries.findIndex((existing) => existing.id === entry.id);
-  if (idx >= 0) {
-    entries[idx] = { ...entries[idx], ...entry };
-  } else {
-    entries.push(entry);
-  }
-  writeTaskSessionHistory(piDir, entries);
+  const file = getTaskSessionHistoryPath(piDir);
+  withFileLock(file, () => {
+    const entries = parseTaskSessionHistory(readJsonFile<unknown>(file, []));
+    const idx = entries.findIndex((existing) => existing.id === entry.id);
+    if (idx >= 0) {
+      entries[idx] = { ...entries[idx], ...entry };
+    } else {
+      entries.push(entry);
+    }
+    writeJsonFile(file, entries);
+  });
 }
 
 /** Mark both durable sibling records after a comparison report is delivered. */
@@ -154,14 +274,17 @@ export function markComparisonGroupDelivered(
   taskIds: readonly string[],
 ): void {
   const ids = new Set(taskIds);
-  const entries = readTaskSessionHistory(piDir);
-  let changed = false;
-  const updated = entries.map((entry) => {
-    if (!ids.has(entry.id) || entry.comparisonDelivered === true) return entry;
-    changed = true;
-    return { ...entry, comparisonDelivered: true };
+  const file = getTaskSessionHistoryPath(piDir);
+  withFileLock(file, () => {
+    const entries = parseTaskSessionHistory(readJsonFile<unknown>(file, []));
+    let changed = false;
+    const updated = entries.map((entry) => {
+      if (!ids.has(entry.id) || entry.comparisonDelivered === true) return entry;
+      changed = true;
+      return { ...entry, comparisonDelivered: true };
+    });
+    if (changed) writeJsonFile(file, updated);
   });
-  if (changed) writeTaskSessionHistory(piDir, updated);
 }
 
 export function findTaskSessionHistory(

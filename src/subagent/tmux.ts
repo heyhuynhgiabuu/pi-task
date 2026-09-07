@@ -25,6 +25,23 @@ function tmuxCmdQuiet(args: string[]): string {
   }
 }
 
+function tmuxErrorText(error: unknown): string {
+  if (!error || typeof error !== "object") return String(error);
+  const value = error as { message?: unknown; stderr?: unknown; stdout?: unknown };
+  return [value.message, value.stderr, value.stdout]
+    .filter((part): part is string => typeof part === "string")
+    .join(" ");
+}
+
+function isMissingPaneError(error: unknown): boolean {
+  return /can't find pane|no such pane|pane.*not found/i.test(tmuxErrorText(error));
+}
+
+export type TmuxPaneProbe =
+  | { state: "alive" }
+  | { state: "missing" }
+  | { state: "unavailable"; error: unknown };
+
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
@@ -89,13 +106,35 @@ export function setPaneSelfDestruct(paneId: string, enabled: boolean, delaySecon
   tmuxCmdQuiet(["set-hook", "-p", "-t", paneId, "pane-died", hook]);
 }
 
+export function probePane(paneId: string): TmuxPaneProbe {
+  try {
+    const actualPaneId = tmuxCmd([
+      "display-message",
+      "-p",
+      "-t",
+      paneId,
+      "#{pane_id}",
+    ]);
+    return actualPaneId === paneId
+      ? { state: "alive" }
+      : { state: "missing" };
+  } catch (error) {
+    return isMissingPaneError(error)
+      ? { state: "missing" }
+      : { state: "unavailable", error };
+  }
+}
+
 export function paneExists(paneId: string): boolean {
-  return tmuxCmdQuiet(["display-message", "-p", "-t", paneId, "#{pane_id}"]) === paneId;
+  return probePane(paneId).state === "alive";
 }
 
 export function paneDead(paneId: string): boolean {
-  const value = tmuxCmdQuiet(["display-message", "-p", "-t", paneId, "#{pane_dead}"]);
-  return value === "1" || value === "";
+  const probe = probePane(paneId);
+  if (probe.state === "missing" || probe.state === "unavailable") {
+    return probe.state === "missing";
+  }
+  return tmuxCmdQuiet(["display-message", "-p", "-t", paneId, "#{pane_dead}"]) === "1";
 }
 
 export function capturePaneTail(paneId: string, lines = 80): string {
@@ -133,14 +172,14 @@ export function killAgentPaneStrict(paneId: string, originalPane?: string | null
   try {
     existingPane = tmuxCmd(["display-message", "-p", "-t", paneId, "#{pane_id}"]);
   } catch (error) {
-    if (/can't find pane|no such pane|pane.*not found/i.test(String(error))) return;
+    if (isMissingPaneError(error)) return;
     throw error;
   }
   if (existingPane !== paneId) throw new Error(`tmux pane identity mismatch: ${paneId}`);
   try {
     tmuxCmd(["kill-pane", "-t", paneId]);
   } catch (error) {
-    if (/can't find pane|no such pane|pane.*not found/i.test(String(error))) return;
+    if (isMissingPaneError(error)) return;
     throw error;
   }
 }

@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 
 import {
@@ -6,6 +9,7 @@ import {
   createDefaultCommandRunner,
   createTmuxTerminalBackend,
 } from "../src/subagent/terminalBackend.js";
+import { probePane } from "../src/subagent/tmux.js";
 
 test("tmux terminal backend preserves the launch handle contract", async () => {
   const calls: string[][] = [];
@@ -37,6 +41,41 @@ test("tmux terminal backend preserves the launch handle contract", async () => {
     "/repo",
     "pi --session task",
   ]]);
+});
+
+test("tmux pane probes distinguish alive, missing, and unavailable", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-tmux-probe-"));
+  const originalPath = process.env.PATH;
+  try {
+    const binDir = join(root, "bin");
+    mkdirSync(binDir);
+    const tmux = join(binDir, "tmux");
+    writeFileSync(
+      tmux,
+      `#!/bin/sh
+case "$PI_TASK_TEST_TMUX_PROBE" in
+  alive) printf '%%42\\n' ;;
+  missing) printf '%s\\n' "can't find pane: %%42" >&2; exit 1 ;;
+  unavailable) printf '%s\\n' 'no server running on /tmp/tmux' >&2; exit 1 ;;
+esac
+`,
+    );
+    chmodSync(tmux, 0o755);
+    process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+
+    process.env.PI_TASK_TEST_TMUX_PROBE = "alive";
+    assert.deepEqual(probePane("%42"), { state: "alive" });
+    process.env.PI_TASK_TEST_TMUX_PROBE = "missing";
+    assert.deepEqual(probePane("%42"), { state: "missing" });
+    process.env.PI_TASK_TEST_TMUX_PROBE = "unavailable";
+    const result = probePane("%42");
+    assert.equal(result.state, "unavailable");
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    delete process.env.PI_TASK_TEST_TMUX_PROBE;
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("tmux terminal backend requires a launch command", async () => {

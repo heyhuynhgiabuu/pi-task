@@ -2,11 +2,14 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
   readRegistry,
+  updateRegistry,
   upsertTaskSessionHistory,
-  writeRegistry,
 } from "../conversation.js";
-import { hasAgentFinished, getLastMessageTimestampFromSessionDir } from "../session-text.js";
-import { killAgentPane, paneExists } from "../subagent/tmux.js";
+import {
+  getLastAssistantResultFromSessionDir,
+  getLastMessageTimestampFromSessionDir,
+} from "../session-text.js";
+import { killAgentPane, probePane } from "../subagent/tmux.js";
 import type { BackgroundTask, RegistryEntry } from "../types.js";
 
 export function restoreActiveBackgroundTasks(
@@ -106,9 +109,8 @@ export function restoreActiveBackgroundTasks(
   }
 
   if (staleIds.length) {
-    writeRegistry(
-      piDir,
-      registry.filter((entry) => !staleIds.includes(entry.id)),
+    updateRegistry(piDir, (entries) =>
+      entries.filter((entry) => !staleIds.includes(entry.id)),
     );
   }
 
@@ -192,9 +194,15 @@ export function restoreActiveBackgroundTasks(
     // (see startBackgroundPolling); legacy records and tests may point dir
     // directly at the session folder, so accept both.
     const sessionDirs = [join(entry.dir, "sessions", entry.id), entry.dir];
-    const sessionFinished = sessionDirs.some((dir) =>
-      hasAgentFinished(dir, entry.sessionName, entry.startedAt),
-    );
+    const sessionResult = sessionDirs
+      .map((dir) =>
+        getLastAssistantResultFromSessionDir(
+          dir,
+          entry.sessionName,
+          entry.startedAt,
+        ),
+      )
+      .find((result) => result !== null);
     const paneId = entry.handle?.resourceId ?? entry.paneId;
     let paneAlive: boolean;
     try {
@@ -202,13 +210,21 @@ export function restoreActiveBackgroundTasks(
         ? resourceExists(entry)
         : entry.handle?.backend === "herdr"
           ? false
-          : Boolean(paneId && paneExists(paneId));
+          : (() => {
+              if (!paneId) return false;
+              const probe = probePane(paneId);
+              if (probe.state === "unavailable") throw probe.error;
+              return probe.state === "alive";
+            })();
     } catch {
       // A temporary backend outage must not destroy the durable task record.
       return;
     }
 
-    if (sessionFinished) {
+    if (
+      sessionResult?.status === "completed" ||
+      (sessionResult?.status === "failed" && !paneAlive)
+    ) {
       // Faithful completion time from the session itself: restore can happen
       // long after the child finished, and recovered comparison reports would
       // otherwise inflate durations by the outage length.
@@ -217,7 +233,11 @@ export function restoreActiveBackgroundTasks(
           getLastMessageTimestampFromSessionDir(dir, entry.sessionName, entry.startedAt),
         )
         .find((ts) => ts !== undefined) ?? Date.now();
-      terminalReceipt(entry, "done", completedAt);
+      terminalReceipt(
+        entry,
+        sessionResult.status === "failed" ? "failed" : "done",
+        completedAt,
+      );
       if (closeEntryResource(entry, paneId, paneAlive)) staleIds.push(entry.id);
       return;
     }

@@ -107,6 +107,25 @@ test("terminal argv isolates every fast task and preserves env-controlled isolat
   }
 });
 
+test("resuming terminal argv requires a resolved JSONL path", () => {
+  assert.throws(
+    () => buildPiArgv({ ...baseArgvOptions, resume: true }),
+    /resolved session JSONL path/,
+  );
+  const args = buildPiArgv({
+    ...baseArgvOptions,
+    resume: true,
+    resumeSessionRef: "/tmp/task-fast-test/session.jsonl",
+  });
+  assert.deepEqual(args.slice(-5), [
+    "--session",
+    "/tmp/task-fast-test/session.jsonl",
+    "--append-system-prompt",
+    "",
+    "perform the task",
+  ]);
+});
+
 test("PI_TASK_TOOL_DISABLED child registers fast providers after real flag application and startup", async () => {
   const previousDisabled = process.env.PI_TASK_TOOL_DISABLED;
   process.env.PI_TASK_TOOL_DISABLED = "1";

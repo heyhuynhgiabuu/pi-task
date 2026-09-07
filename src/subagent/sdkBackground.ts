@@ -1,4 +1,7 @@
-import { upsertTaskSessionHistory } from "../conversation.js";
+import {
+  readTaskSessionHistory,
+  upsertTaskSessionHistory,
+} from "../conversation.js";
 import { assessTaskResult, parseResultXml } from "../helpers.js";
 import type { TaskSessionHistoryEntry } from "../types.js";
 
@@ -22,6 +25,8 @@ export interface SdkBackgroundTaskInput {
   comparisonDescription?: string;
   comparisonIndex?: 0 | 1;
   run: () => Promise<SdkBackgroundResult>;
+  /** Optional debounce hook for parent notifications. */
+  deliver?: (delivery: () => void) => void;
   onComplete?: (result: SdkBackgroundResult) => void;
   onFailed?: (error: unknown) => void;
   onSettled?: () => void;
@@ -92,23 +97,36 @@ export function startSdkBackgroundTask(input: SdkBackgroundTaskInput): void {
       } catch {
         // See the step-guard note above.
       }
-      try {
-        input.onComplete?.(result);
-      } catch {
-        // Parent notification failure must not rewrite a completed task as failed.
-      }
+      const notify = () => {
+        try {
+          input.onComplete?.(result);
+        } catch {
+          // Parent notification failure must not rewrite a completed task as failed.
+        }
+      };
+      if (input.deliver) input.deliver(notify);
+      else notify();
     })
     .catch((error: unknown) => {
+      const timeout =
+        error !== null &&
+        typeof error === "object" &&
+        (error as { kind?: unknown }).kind === "timeout";
+      const status: TaskSessionHistoryEntry["status"] = timeout ? "timeout" : "failed";
       try {
-        record("failed", { completedAt: now() });
+        record(status, { completedAt: now() });
       } catch {
         // Best-effort durable record of the failure.
       }
-      try {
-        input.onFailed?.(error);
-      } catch {
-        // Notification failure does not change the durable task failure.
-      }
+      const notify = () => {
+        try {
+          input.onFailed?.(error);
+        } catch {
+          // Notification failure does not change the durable task failure.
+        }
+      };
+      if (input.deliver) input.deliver(notify);
+      else notify();
     })
     .finally(() => {
       try {
@@ -120,6 +138,35 @@ export function startSdkBackgroundTask(input: SdkBackgroundTaskInput): void {
     .catch(() => {
       // Terminal guard: no unhandled rejections from the task lifecycle.
     });
+}
+
+/**
+ * SDK work lives in the host process and cannot be resumed after a restart.
+ * Reconcile its running history rows before normal restore/replay so a dead
+ * host never leaves an indefinitely-running task behind.
+ */
+export function reconcileStaleSdkBackgroundTasks(piDir: string): string[] {
+  const staleIds: string[] = [];
+  for (const entry of readTaskSessionHistory(piDir)) {
+    if (
+      entry.status !== "running" ||
+      !entry.background ||
+      entry.handle ||
+      entry.paneId
+    ) {
+      continue;
+    }
+    staleIds.push(entry.id);
+    upsertTaskSessionHistory(piDir, {
+      ...entry,
+      status: "failed",
+      reportedStatus: "failure",
+      rawStatus: "host-restarted",
+      resultValid: false,
+      completedAt: Date.now(),
+    });
+  }
+  return staleIds;
 }
 
 export function formatSdkBackgroundReceipt(id: string): string {

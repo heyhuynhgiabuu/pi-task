@@ -57,7 +57,7 @@ describe("restoreActiveBackgroundTasks", () => {
     ]);
 
     const backgroundTasks = new Map();
-    restoreActiveBackgroundTasks(piDir, backgroundTasks);
+    restoreActiveBackgroundTasks(piDir, backgroundTasks, () => false);
 
     assert.equal(backgroundTasks.size, 0);
     assert.deepEqual(readJson<unknown[]>(join(piDir, "task-registry.json")), []);
@@ -66,6 +66,50 @@ describe("restoreActiveBackgroundTasks", () => {
     );
     assert.equal(history[0]?.status, "done");
 
+  });
+
+  it("records provider error sessions as failed during restore", () => {
+    const piDir = makePiDir();
+    const taskDir = join(piDir, "artifacts", "sessions", "task-error");
+    writeSession(taskDir, "task-task-error", "error");
+    writeJson(join(piDir, "task-registry.json"), [{
+      id: "task-error",
+      dir: taskDir,
+      sessionName: "task-task-error",
+      startedAt: Date.now() - 1000,
+      paneId: "%missing",
+      agentType: "scout",
+      description: "provider error",
+    }]);
+
+    const backgroundTasks = new Map();
+    restoreActiveBackgroundTasks(piDir, backgroundTasks, () => false);
+
+    const history = readJson<Array<{ id: string; status: string }>>(
+      join(piDir, "task-session-history.json"),
+    );
+    assert.equal(history[0]?.status, "failed");
+  });
+
+  it("keeps an error row pending while the child resource is still alive", () => {
+    const piDir = makePiDir();
+    const taskDir = join(piDir, "artifacts", "sessions", "task-retry");
+    writeSession(taskDir, "task-task-retry", "error");
+    writeJson(join(piDir, "task-registry.json"), [{
+      id: "task-retry",
+      dir: taskDir,
+      sessionName: "task-task-retry",
+      startedAt: Date.now() - 1000,
+      paneId: "%alive",
+      agentType: "scout",
+      description: "provider retry",
+    }]);
+
+    const backgroundTasks = new Map();
+    restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true);
+
+    assert.equal(backgroundTasks.has("task-retry"), true);
+    assert.equal(readJson<unknown[]>(join(piDir, "task-registry.json")).length, 1);
   });
 
   it("preserves durable records during a temporary backend outage", () => {
@@ -353,7 +397,7 @@ describe("restoreActiveBackgroundTasks", () => {
     ]);
 
     const backgroundTasks = new Map();
-    restoreActiveBackgroundTasks(piDir, backgroundTasks);
+    restoreActiveBackgroundTasks(piDir, backgroundTasks, () => false);
 
     assert.equal(backgroundTasks.size, 0);
     assert.deepEqual(readJson<unknown[]>(join(piDir, "task-registry.json")), []);

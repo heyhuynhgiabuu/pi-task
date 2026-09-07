@@ -1,8 +1,11 @@
 import { strict as assert } from "node:assert";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startSdkBackgroundTask } from "../src/subagent/sdkBackground.js";
+import {
+  reconcileStaleSdkBackgroundTasks,
+  startSdkBackgroundTask,
+} from "../src/subagent/sdkBackground.js";
 
 async function eventually(assertion: () => void): Promise<void> {
   const started = Date.now();
@@ -15,6 +18,37 @@ async function eventually(assertion: () => void): Promise<void> {
     }
   }
   assertion();
+}
+
+{
+  const t = "reconcile stale SDK history after host restart";
+  const root = mkdtempSync(join(tmpdir(), "pi-task-sdk-reconcile-"));
+  try {
+    const piDir = join(root, ".pi");
+    mkdirSync(piDir, { recursive: true });
+    const historyPath = join(piDir, "task-session-history.json");
+    const startedAt = Date.now() - 10_000;
+    const history = [{
+      id: "sdk-stale",
+      agentType: "general",
+      description: "stale SDK task",
+      sessionName: "task-sdk-stale",
+      startedAt,
+      piDir,
+      dir: join(piDir, "artifacts"),
+      status: "running",
+      background: true,
+    }];
+    mkdirSync(join(piDir, "artifacts"), { recursive: true });
+    writeFileSync(historyPath, JSON.stringify(history));
+
+    assert.deepEqual(reconcileStaleSdkBackgroundTasks(piDir), ["sdk-stale"], t);
+    const updated = JSON.parse(readFileSync(historyPath, "utf8")) as Array<Record<string, unknown>>;
+    assert.equal(updated[0]?.status, "failed", t + ": status");
+    assert.equal(updated[0]?.rawStatus, "host-restarted", t + ": reason");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 {
@@ -102,6 +136,38 @@ async function eventually(assertion: () => void): Promise<void> {
       );
       assert.equal(history[0].status, "failed");
       assert.equal(failure, "network unavailable");
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const t = "SDK timeout is persisted as timeout";
+  const root = mkdtempSync(join(tmpdir(), "pi-task-sdk-bg-timeout-"));
+  try {
+    const piDir = join(root, ".pi");
+    mkdirSync(piDir, { recursive: true });
+    startSdkBackgroundTask({
+      id: "m123abc-timeout",
+      agentType: "general",
+      description: "timed out",
+      sessionName: "task-m123abc-timeout",
+      startedAt: 100,
+      piDir,
+      artifactsDir: piDir,
+      now: () => 200,
+      run: async () => {
+        const error = new Error("SDK subagent timed out") as Error & { kind: string };
+        error.kind = "timeout";
+        throw error;
+      },
+    });
+    await eventually(() => {
+      const history = JSON.parse(
+        readFileSync(join(piDir, "task-session-history.json"), "utf8"),
+      ) as Array<{ status: string }>;
+      assert.equal(history[0]?.status, "timeout", t);
     });
   } finally {
     rmSync(root, { recursive: true, force: true });

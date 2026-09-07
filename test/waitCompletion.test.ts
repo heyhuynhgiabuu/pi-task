@@ -148,7 +148,7 @@ function cleanup(dir: string) {
   }
 }
 
-for (const reason of ["stop", "endTurn", "length", "error", "aborted"]) {
+for (const reason of ["stop", "endTurn", "length"]) {
   const t = `terminal stop reason ${reason} remains completed`;
   const dir = makeSessionFileWithText(`terminal ${reason}`, reason);
   try {
@@ -159,6 +159,146 @@ for (const reason of ["stop", "endTurn", "length", "error", "aborted"]) {
       pollMs: 50,
     });
     assert.equal(result.status, "completed", t);
+    assert.match(result.content, new RegExp(`terminal ${reason}`), t);
+  } finally {
+    cleanup(dir);
+  }
+}
+
+for (const reason of ["error", "aborted"]) {
+  const t = `terminal stop reason ${reason} is a failure`;
+  const dir = makeSessionFileWithText(`terminal ${reason}`, reason);
+  try {
+    const result = await waitForTaskCompletion({
+      sessionDir: join(dir, "sessions", "test-task"),
+      sessionName: "task-test",
+      timeoutMs: 5000,
+      pollMs: 50,
+    });
+    assert.equal(result.status, "failed", t);
+    assert.match(result.content, new RegExp(`terminal ${reason}`), t);
+  } finally {
+    cleanup(dir);
+  }
+}
+
+{
+  const t = "provider failure does not reuse an earlier assistant result";
+  const dir = mkdtempSync(join(tmpdir(), "pi-task-wait-"));
+  try {
+    const sessionDir = join(dir, "sessions", "test-task");
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(
+      join(sessionDir, "task-test.jsonl"),
+      JSON.stringify({ type: "session_info", name: "task-test" }) + "\n" +
+        JSON.stringify({
+          type: "message",
+          message: {
+            role: "assistant",
+            stopReason: "stop",
+            content: [{ type: "text", text: "stale successful answer" }],
+          },
+          timestamp: new Date().toISOString(),
+        }) + "\n" +
+        JSON.stringify({
+          type: "message",
+          message: {
+            role: "assistant",
+            stopReason: "error",
+            errorMessage: "provider rate limit",
+            content: [],
+          },
+          timestamp: new Date().toISOString(),
+        }) + "\n",
+    );
+    const result = await waitForTaskCompletion({
+      sessionDir,
+      sessionName: "task-test",
+      timeoutMs: 5000,
+      pollMs: 50,
+    });
+    assert.equal(result.status, "failed", t);
+    assert.match(result.content, /provider rate limit/);
+    assert.doesNotMatch(result.content, /stale successful answer/);
+  } finally {
+    cleanup(dir);
+  }
+}
+
+{
+  const t = "a provider error is deferred while the child resource is alive";
+  const dir = mkdtempSync(join(tmpdir(), "pi-task-wait-"));
+  try {
+    const sessionDir = join(dir, "sessions", "test-task");
+    mkdirSync(sessionDir, { recursive: true });
+    const sessionFile = join(sessionDir, "task-test.jsonl");
+    const writeResult = (stopReason: string, text: string) =>
+      writeFileSync(
+        sessionFile,
+        JSON.stringify({ type: "session_info", name: "task-test" }) + "\n" +
+          JSON.stringify({
+            type: "message",
+            message: {
+              role: "assistant",
+              stopReason,
+              errorMessage: stopReason === "error" ? "temporary provider error" : undefined,
+              content: text ? [{ type: "text", text }] : [],
+            },
+            timestamp: new Date().toISOString(),
+          }) + "\n",
+      );
+    writeResult("error", "");
+    const first = await checkTaskCompletion({
+      sessionDir,
+      sessionName: "task-test",
+      paneId: "%pane-1",
+      resourceExists: () => "alive",
+    });
+    assert.equal(first.status, "running", t + ": retry remains pending");
+    writeResult("stop", "retry succeeded");
+    const second = await checkTaskCompletion({
+      sessionDir,
+      sessionName: "task-test",
+      paneId: "%pane-1",
+      resourceExists: () => "alive",
+    });
+    assert.equal(second.status, "completed", t + ": later success wins");
+    assert.match(second.content, /retry succeeded/);
+  } finally {
+    cleanup(dir);
+  }
+}
+
+{
+  const t = "deferred provider failure is preserved when the wait expires";
+  const dir = mkdtempSync(join(tmpdir(), "pi-task-wait-"));
+  try {
+    const sessionDir = join(dir, "sessions", "test-task");
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(
+      join(sessionDir, "task-test.jsonl"),
+      JSON.stringify({ type: "session_info", name: "task-test" }) + "\n" +
+        JSON.stringify({
+          type: "message",
+          message: {
+            role: "assistant",
+            stopReason: "error",
+            errorMessage: "provider stayed unavailable",
+            content: [],
+          },
+          timestamp: new Date().toISOString(),
+        }) + "\n",
+    );
+    const result = await waitForTaskCompletion({
+      sessionDir,
+      sessionName: "task-test",
+      paneId: "%pane-1",
+      resourceExists: () => "alive",
+      timeoutMs: 30,
+      pollMs: 5,
+    });
+    assert.equal(result.status, "failed", t);
+    assert.match(result.content, /provider stayed unavailable/, t);
   } finally {
     cleanup(dir);
   }
@@ -201,6 +341,40 @@ for (const reason of ["stop", "endTurn", "length", "error", "aborted"]) {
     });
     assert.equal(result.status, "completed", t);
     assert.match(result.content, /newest file result/, t);
+  } finally {
+    cleanup(dir);
+  }
+}
+
+{
+  const t = "tool-use assistant messages are not terminal results";
+  const dir = makeSessionFileWithText("still working", "toolUse");
+  try {
+    const result = await checkTaskCompletion({
+      sessionDir: join(dir, "sessions", "test-task"),
+      sessionName: "task-test",
+      paneId: "%pane-1",
+      resourceExists: () => "alive",
+    });
+    assert.equal(result.status, "running", t);
+  } finally {
+    cleanup(dir);
+  }
+}
+
+{
+  const t = "backend unavailability does not settle a task as pane death";
+  const dir = mkdtempSync(join(tmpdir(), "pi-task-wait-"));
+  try {
+    const sessionDir = join(dir, "sessions", "test-task");
+    mkdirSync(sessionDir, { recursive: true });
+    const result = await checkTaskCompletion({
+      sessionDir,
+      sessionName: "task-test",
+      paneId: "%pane-1",
+      resourceExists: () => "unavailable",
+    });
+    assert.equal(result.status, "running", t);
   } finally {
     cleanup(dir);
   }

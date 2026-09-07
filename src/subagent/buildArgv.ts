@@ -65,7 +65,12 @@ export function buildPiArgv(opts: BuildPiArgvOptions): string[] {
   args.push("--tools", allowedTools.join(","));
   args.push("--name", sessionName);
   args.push("--session-dir", sessionDir);
-  if (resume) args.push("--session", opts.resumeSessionRef ?? sessionName);
+  if (resume) {
+    if (!opts.resumeSessionRef) {
+      throw new Error("Resuming a task requires a resolved session JSONL path");
+    }
+    args.push("--session", opts.resumeSessionRef);
+  }
   args.push(
     "--append-system-prompt",
     opts.promptLaunch?.systemPromptPath ?? agent.body,

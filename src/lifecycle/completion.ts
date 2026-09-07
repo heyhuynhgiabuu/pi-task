@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   findJsonlSessionByName,
   readRegistry,
+  updateRegistry,
   upsertTaskSessionHistory,
   writeRegistry,
 } from "../conversation.js";
@@ -40,6 +41,43 @@ function closeTaskResource(task: BackgroundTask): void {
  */
 const completedTaskIds = new Set<string>();
 
+export interface CompletionDeliveryQueue {
+  enqueue(delivery: () => void): void;
+  dispose(): void;
+}
+
+/**
+ * Debounce completion notifications so several tasks settling in one polling
+ * window do not each independently interrupt the parent session.
+ */
+export function createCompletionDeliveryQueue(windowMs = 200): CompletionDeliveryQueue {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let pending: Array<() => void> = [];
+  const flush = () => {
+    timer = undefined;
+    const deliveries = pending;
+    pending = [];
+    for (const delivery of deliveries) {
+      try {
+        delivery();
+      } catch {
+        // A stale parent context or one failed send must not block siblings.
+      }
+    }
+  };
+  return {
+    enqueue(delivery) {
+      pending.push(delivery);
+      if (timer === undefined) timer = setTimeout(flush, windowMs);
+    },
+    dispose() {
+      if (timer !== undefined) clearTimeout(timer);
+      timer = undefined;
+      pending = [];
+    },
+  };
+}
+
 export type ComparisonSettledHook = (
   id: string,
   task: BackgroundTask,
@@ -58,6 +96,7 @@ export function completeTask(
   deliveryGuard?: () => boolean,
   onComparisonSettled?: ComparisonSettledHook,
   writeRegistryFn: (piDir: string, entries: RegistryEntry[]) => void = writeRegistry,
+  deliveryQueue?: CompletionDeliveryQueue,
 ): { cleanupSucceeded: boolean } {
   if (completedTaskIds.has(id)) {
     // Already fully processed in this process: never re-deliver or re-close.
@@ -111,7 +150,23 @@ export function completeTask(
   // after close succeeds. This write runs BEFORE the history upsert: if the
   // registry is unreadable, no terminal phase is recorded at all, so a
   // poll-error retry can never rewrite a recorded done/timeout as failed.
-  writeRegistryFn(piDir, [...entries, cleanupEntry]);
+  if (writeRegistryFn === writeRegistry) {
+    updateRegistry(piDir, (currentEntries) => {
+      const currentEntry = currentEntries.find((entry) => entry.id === id);
+      const ownerSessionId = currentEntry?.ownerSessionId ?? priorEntry?.ownerSessionId;
+      const ownerPid = currentEntry?.ownerPid ?? priorEntry?.ownerPid;
+      return [
+        ...currentEntries.filter((entry) => entry.id !== id),
+        {
+          ...cleanupEntry,
+          ...(ownerSessionId !== undefined ? { ownerSessionId } : {}),
+          ...(ownerPid !== undefined ? { ownerPid } : {}),
+        },
+      ];
+    });
+  } else {
+    writeRegistryFn(piDir, [...entries, cleanupEntry]);
+  }
 
   upsertTaskSessionHistory(piDir, {
     id,
@@ -156,7 +211,13 @@ export function completeTask(
   completedTaskIds.add(id);
   if (cleanupSucceeded) {
     try {
-      writeRegistryFn(piDir, entries);
+      if (writeRegistryFn === writeRegistry) {
+        updateRegistry(piDir, (currentEntries) =>
+          currentEntries.filter((entry) => entry.id !== id),
+        );
+      } else {
+        writeRegistryFn(piDir, entries);
+      }
     } catch {
       // The cleanupPending receipt written above stays durable and restore
       // retries cleanup (missing panes are tolerated and clear the receipt).
@@ -180,7 +241,7 @@ export function completeTask(
     return { cleanupSucceeded };
   }
 
-  ignoreStaleExtensionCtx(() =>
+  const deliver = () => ignoreStaleExtensionCtx(() =>
     pi.sendMessage(
       {
         customType: "task-complete",
@@ -215,6 +276,8 @@ export function completeTask(
       completionDeliveryOptions(process.env.PI_TASK_COMPLETION_DELIVERY),
     ),
   );
+  if (deliveryQueue) deliveryQueue.enqueue(deliver);
+  else deliver();
 
   return { cleanupSucceeded };
 }

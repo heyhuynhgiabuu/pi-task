@@ -509,18 +509,17 @@ export type CompletionDelivery = "steer" | "followUp" | "nextTurn";
 
 /**
  * Resolve how background task-completion results reach the parent (issue #15):
- * - `steer` (default, adaptive): while the parent is streaming, the result is
- *   injected into the current turn mid-work — no extra turn (a steer landing
- *   in the parent's final response still costs one assistant response, same
- *   as `followUp`); while idle, the trigger fires so autonomous runs react.
- *   Note: the completion reaches the model as a user-role message mid-turn,
- *   not at a natural stopping point.
- * - `followUp`: always forces a new model turn per completed task.
+ * - `followUp` (default): always forces a new model turn per completed task,
+ *   so autonomous completion cannot interrupt the parent's current reasoning.
+ * - `steer`: explicit opt-in; while the parent is streaming, the result is
+ *   injected into the current turn mid-work — no extra turn. While idle, the
+ *   trigger fires so autonomous runs react. The completion reaches the model
+ *   as a user-role message mid-turn, not at a natural stopping point.
  * - `nextTurn`: queues the result and delivers it with the next user prompt.
  *   A queued result is held in memory only and is lost if the session ends
  *   before the next prompt; the durable task-session history retains its
  *   recovery pointer.
- * Unset, empty, or unrecognized values fall back to `steer`.
+ * Unset, empty, or unrecognized values fall back to `followUp`.
  */
 export function resolveCompletionDelivery(
   configured?: string,
@@ -528,7 +527,8 @@ export function resolveCompletionDelivery(
   const mode = configured?.trim().toLowerCase();
   if (mode === "nextturn") return "nextTurn";
   if (mode === "followup") return "followUp";
-  return "steer";
+  if (mode === "steer") return "steer";
+  return "followUp";
 }
 
 /**
@@ -921,7 +921,7 @@ function stripProactivePrefix(description: string): string {
  * Build pi CLI arguments for spawning or resuming a sub-agent session.
  *
  * - Fresh spawn: omit `resume` or pass falsy — `--session` is not included.
-     * - Resume: pass `resume=true` and optionally `resumeSessionRef` —
+     * - Resume: pass `resume=true` with a resolved `resumeSessionRef` —
      *   `--session <ref>` is included so pi continues an existing session.
      */
     export function buildPiArgs(

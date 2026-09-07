@@ -769,6 +769,99 @@ if (process.platform !== "win32") {
 
 console.log("prompt.test.ts: all passed");
 if (process.platform !== "win32") {
+  const t = "conversation resume rejects a missing transcript before launch";
+  const root = mkdtempSync(join(tmpdir(), "pi-task-conversation-missing-session-"));
+  const originalPath = process.env.PATH;
+  const originalTmux = process.env.TMUX;
+  const originalBackend = process.env.PI_TASK_BACKEND;
+  const originalCwd = process.cwd();
+  let shutdown: (() => void) | undefined;
+  try {
+    const piDir = join(root, ".pi");
+    mkdirSync(join(piDir, "artifacts", "tasks"), { recursive: true });
+    const binDir = join(root, "bin");
+    mkdirSync(binDir);
+    const spawnLog = join(root, "spawn.log");
+    writeFileSync(
+      join(binDir, "tmux"),
+      `#!/bin/sh\\ncase "$1" in\\n  -V) printf '%s\\n' 'tmux 3.4' ;;\\n  display-message) printf '%s\\n' '%parent' ;;\\n  split-window) printf '%s\\n' split >> '${spawnLog}'; printf '%s\\n' '%child' ;;\\n  *) exit 0 ;;\\nesac\\n`,
+    );
+    chmodSync(join(binDir, "tmux"), 0o755);
+    process.env.PATH = `${binDir}:${originalPath ?? ""}`;
+    process.env.TMUX = join(root, "tmux.sock");
+    process.env.PI_TASK_BACKEND = "tmux";
+    process.chdir(root);
+
+    const id = "conversation-missing-session";
+    const sessionName = "conversation-missing";
+    upsertTaskSessionHistory(piDir, {
+      id,
+      agentType: "explore",
+      description: "missing transcript",
+      sessionName,
+      startedAt: Date.now() - 1000,
+      piDir,
+      dir: join(piDir, "artifacts", "tasks"),
+      cwd: root,
+      conversationId: sessionName,
+      status: "done",
+      background: true,
+    });
+    mkdirSync(join(piDir, "artifacts"), { recursive: true });
+    writeFileSync(
+      join(piDir, "artifacts", "task-sessions.json"),
+      JSON.stringify({
+        [sessionName]: { task_id: id, updated_at: new Date().toISOString() },
+      }),
+    );
+
+    let tool: { execute: (...args: unknown[]) => Promise<{ isError?: boolean; details?: { error?: string } }> } | undefined;
+    taskExtension({
+      on(event: string, handler: () => void) {
+        if (event === "session_shutdown") shutdown = handler;
+      },
+      registerMessageRenderer() {},
+      registerFlag() {},
+      registerTool(value: typeof tool) {
+        tool = value;
+      },
+      registerCommand() {},
+      appendEntry() {},
+      getAllTools() {
+        return [];
+      },
+    } as never);
+    assert.ok(tool, t + " registration");
+    const result = await tool.execute(
+      "conversation-missing-session",
+      {
+        agent_type: "explore",
+        prompt: "Continue",
+        description: "missing transcript",
+        conversation_id: sessionName,
+        background: true,
+      },
+      undefined,
+      undefined,
+      { cwd: root, isProjectTrusted: () => true },
+    );
+    assert.equal(result.isError, true, t + " rejection");
+    assert.equal(result.details?.error, "Conversation session file missing", t + " error");
+    assert.equal(existsSync(spawnLog), false, t + " no pane launch");
+  } finally {
+    shutdown?.();
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    if (originalTmux === undefined) delete process.env.TMUX;
+    else process.env.TMUX = originalTmux;
+    if (originalBackend === undefined) delete process.env.PI_TASK_BACKEND;
+    else process.env.PI_TASK_BACKEND = originalBackend;
+    process.chdir(originalCwd);
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+if (process.platform !== "win32") {
   const t = "live resume reattach keeps enforcing the agent turn limit";
   const root = mkdtempSync(join(tmpdir(), "pi-task-resume-turns-"));
   const originalPath = process.env.PATH;

@@ -127,17 +127,21 @@ try {
   console.log("  PASS: buildPiArgs fresh");
 
   // Test buildPiArgs (resume task — includes --session)
+  const resumeSessionRef = join(sessionDir, "task-test123.jsonl");
   const resumeArgs = buildPiArgs(
     explore,
     "task-test123",
     sessionDir,
     "Do more",
     true,
+    undefined,
+    undefined,
+    resumeSessionRef,
   );
   assert.ok(resumeArgs.includes("--session"), "--session included for resume");
   assert.ok(
-    resumeArgs.includes("task-test123"),
-    "--session value is session name",
+    resumeArgs.includes(resumeSessionRef),
+    "--session uses the resolved JSONL path",
   );
   console.log("  PASS: buildPiArgs resume");
 

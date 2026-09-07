@@ -4,6 +4,17 @@ All notable changes to `@heyhuynhgiabuu/pi-task` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- Durable conversation resume now repairs and validates the child JSONL path before relaunching; provider error/aborted results no longer reuse stale assistant text; tmux outages remain retryable instead of being treated as dead panes; and SDK background records are reconciled after a host restart.
+
+### Changed
+
+- Registry and task-history persistence uses atomic replacement with a cross-process lock. Background completion delivery defaults to `followUp` and debounces notifications settling together; `steer` remains an explicit opt-in.
+- Release metadata now keeps `package-lock.json` aligned with the package version and no longer auto-pushes from npm's `postversion` hook.
+
 ## [0.7.0] - 2026-09-05
 
 ### Added

@@ -261,6 +261,37 @@ test("foreground comparison history keeps execution status separate from reporte
   assert.equal(entry?.comparisonIndex, 0);
 });
 
+test("restores settled SDK comparison siblings without pane handles", () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-comparison-sdk-restore-"));
+  const artifactsDir = join(piDir, "artifacts");
+  mkdirSync(artifactsDir, { recursive: true });
+  for (const [id, model, index] of [["sdk-m0", "model-a", 0], ["sdk-m1", "model-b", 1]] as const) {
+    upsertTaskSessionHistory(piDir, {
+      id,
+      agentType: "reviewer",
+      description: "SDK compare",
+      sessionName: id,
+      startedAt: Date.now() - 1000,
+      piDir,
+      dir: artifactsDir,
+      status: "failed",
+      background: true,
+      comparisonGroupId: "sdk-group",
+      comparisonModel: model,
+      comparisonDescription: "SDK compare",
+      comparisonIndex: index,
+    });
+  }
+
+  const runs = restoreComparisonGroups(
+    piDir,
+    new Map(),
+    new ComparisonCoordinator(),
+    "session-current",
+  );
+  assert.deepEqual(runs.map((run) => run.model).sort(), ["model-a", "model-b"]);
+});
+
 test("ComparisonCoordinator handles failures gracefully", () => {
   const coordinator = new ComparisonCoordinator();
   coordinator.registerGroup(

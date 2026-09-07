@@ -650,8 +650,22 @@ export function loadAgentsFromDir(
     const readonly = parseBool(frontmatter.readonly);
     const fast = parseBool(frontmatter.fast);
     const runtimeRaw = frontmatter.runtime?.trim().toLowerCase();
-    const runtime = runtimeRaw === "claude" ? ("claude" as const) : undefined;
-    const permissionMode = frontmatter.permission_mode?.trim() || undefined;
+    // `model: claude-code/<model>` implies the claude runtime — one line
+    // instead of separate runtime/model frontmatter fields.
+    const rawModel = frontmatter.model?.trim();
+    const runtime: ChildRuntime | undefined =
+      runtimeRaw === "claude"
+        ? "claude"
+        : runtimeRaw
+          ? undefined
+          : rawModel?.toLowerCase().startsWith("claude-code/")
+            ? "claude"
+            : undefined;
+    // bypassPermissions is the unattended-completion default for claude
+    // children; permission_mode: overrides it for stricter setups.
+    const permissionMode =
+      frontmatter.permission_mode?.trim() ||
+      (runtime === "claude" ? "bypassPermissions" : undefined);
     // Always-on xAI disallow list — these tools are never useful for
     // task subagents and risk leaking provider-specific behavior.
     const withDefaults = [
@@ -668,7 +682,7 @@ export function loadAgentsFromDir(
     const skills = parseToolList(frontmatter.skills);
     const modelSpecs = parseModelSpecs(
       frontmatter.models as string | string[] | undefined,
-      frontmatter.model?.trim(),
+      rawModel,
       frontmatter.thinking,
     );
     const models = modelSpecs.length > 0 ? modelSpecs.map((s) => s.model) : undefined;
@@ -796,7 +810,12 @@ export function parseModelSpecs(
   fallbackModel?: string,
   thinkingRaw?: string | string[] | undefined,
 ): AgentModelSpec[] {
-  const modelEntries = parseModelList(modelsRaw ?? fallbackModel);
+  const resolved =
+    modelsRaw ??
+    (fallbackModel?.toLowerCase().startsWith("claude-code/")
+      ? fallbackModel.slice("claude-code/".length)
+      : fallbackModel);
+  const modelEntries = parseModelList(resolved);
   const thinkings = parseToolList(thinkingRaw);
 
   return modelEntries.map((entry, i) => {

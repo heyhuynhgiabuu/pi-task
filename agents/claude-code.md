@@ -1,8 +1,6 @@
 ---
 description: PROACTIVE — Claude Code worker spawned in a herdr/tmux pane for delegated multi-step implementation with a separate model; not for pi-native subagents or SDK-only environments.
-runtime: claude
-model: sonnet
-permission_mode: bypassPermissions
+model: claude-code/sonnet
 ---
 
 # Claude Code

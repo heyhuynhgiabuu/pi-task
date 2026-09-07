@@ -1,3 +1,4 @@
+import { test } from "node:test";
 import { strict as assert } from "node:assert";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -237,3 +238,34 @@ console.log("frontmatter.test.ts: all passed");
     else process.env.PI_TASK_MAX_TURNS = prev;
   }
 }
+
+test("model: claude-code/<model> implies claude runtime and bypassPermissions default", async () => {
+  const { loadAgentsFromDir } = await import("../src/helpers.js");
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "pi-task-claude-"));
+  try {
+    writeFileSync(join(dir, "a.md"), `---\ndescription: x\nmodel: claude-code/opus\n---\nbody`);
+    writeFileSync(join(dir, "b.md"), `---\ndescription: x\nmodel: claude-code/opus\npermission_mode: acceptEdits\n---\nbody`);
+    writeFileSync(join(dir, "c.md"), `---\ndescription: x\nmodel: opus\n---\nbody`);
+    writeFileSync(join(dir, "d.md"), `---\ndescription: x\nmodel: claude-code/\n---\nbody`);
+    const agents = loadAgentsFromDir(dir, "project");
+    const a = agents.find((x) => x.name === "a")!;
+    const b = agents.find((x) => x.name === "b")!;
+    const c = agents.find((x) => x.name === "c")!;
+    const d = agents.find((x) => x.name === "d")!;
+    assert.equal(a.runtime, "claude");
+    assert.equal(a.model, "opus");
+    assert.equal(a.permissionMode, "bypassPermissions");
+    assert.equal(b.runtime, "claude");
+    assert.equal(b.permissionMode, "acceptEdits");
+    assert.equal(c.runtime, undefined);
+    assert.equal(c.model, "opus");
+    assert.equal(d.runtime, "claude");
+    assert.equal(d.model, undefined);
+    assert.equal(d.permissionMode, "bypassPermissions");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

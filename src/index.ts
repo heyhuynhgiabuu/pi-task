@@ -50,7 +50,6 @@ import {
   TASK_BACKGROUND_DEFAULT,
   buildPiArgs,
   buildTaskToolDescription,
-      countToolUses,
       discoverAgents,
       subscribeToolEvents,
   resolveTaskAgentPreflight,
@@ -84,6 +83,7 @@ import {
   createCompletionDeliveryQueue,
   createTaskWidgetController,
   executeTerminalForegroundTask,
+  executeComparisonTerminalForeground,
   restoreActiveBackgroundTasks,
   startBackgroundPolling,
   startToolStatsPolling,
@@ -116,7 +116,6 @@ import {
 import { launchTerminalTask } from "./subagent/terminal-launch.js";
 import {
   checkTaskCompletion,
-  waitForTaskCompletion as waitForSessionTaskCompletion,
 } from "./subagent/waitCompletion.js";
 import {
   hasTmux,
@@ -130,7 +129,6 @@ import {
   createTaskCompleteRenderer,
   renderCall,
   renderResult,
-  startForegroundProgressPolling,
   taskParametersSchema,
 } from "./tool/index.js";
 import type {
@@ -1418,127 +1416,24 @@ Both subagents are running in background. Results will be compared and delivered
             });
           }
           ignoreStaleExtensionCtx(() => ensureTaskWidget(ctx));
-          const stopProgress = terminalTasks.map((t) =>
-            startForegroundProgressPolling({
-              taskId: t.id,
-              sessionDir: t.sessionDir,
-              sessionName: t.sessionName,
-              agentType: agent.name,
-              description: t.desc,
-              startedAt: t.startedAt,
-              onUpdate: (update) => {
-                const progress = update.details._taskRunningProgress;
-                const foregroundTask = foregroundTasks.get(t.id);
-                if (
-                  foregroundTask &&
-                  progress &&
-                  typeof progress === "object" &&
-                  "toolUses" in progress &&
-                  typeof progress.toolUses === "number"
-                ) {
-                  foregroundTask.toolUses = progress.toolUses;
-                  taskWidget.requestRender();
-                }
-                onUpdate?.(update);
-              },
-            }),
-          );
-
-          try {
-            const runs = (await Promise.all(
-            terminalTasks.map(async (t) => {
-              upsertTaskSessionHistory(piDir, {
-                id: t.id,
-                agentType: agent.name,
-                description: t.desc,
-                sessionName: t.sessionName,
-                startedAt: t.startedAt,
-                paneId: t.paneId,
-                handle: t.handle,
-                piDir,
-                dir: artifactsDir,
-                cwd: taskCwd,
-                status: "running",
-                background: false,
-                ownerSessionId,
-                ownerLeafId,
-                ownerPid: process.pid,
-                comparisonGroupId: groupId,
-                comparisonModel: t.model,
-                comparisonDescription: descText,
-                comparisonIndex: t.index,
-              });
-
-              const completion = await waitForSessionTaskCompletion({
-                sessionDir: t.sessionDir,
-                sessionName: t.sessionName,
-                paneId: t.paneId,
-                signal,
-                timeoutMs: TASK_TIMEOUT_MS,
-                pollMs: 1000,
-                sinceMs: t.startedAt,
-                resourceExists: selectedBackend === "herdr"
-                  ? () => herdrBackend.isAlive(t.handle as Extract<TerminalHandle, { backend: "herdr" }>)
-                  : () => probePaneAsync(t.paneId).then((probe) => probe.state),
-              });
-
-              if (t.handle.backend === "herdr") {
-                await herdrBackend.close(t.handle);
-              } else {
-                killAgentPane(t.paneId, t.originalPane);
-              }
-
-              const parsed = parseResultXml(completion.content);
-              const assess = assessTaskResult(parsed);
-              const phase = completion.status === "completed" ? "done" : completion.status === "cancelled" ? "cancelled" : "failed";
-              const completedSessionRef = findJsonlSessionByName(
-                piDir,
-                t.id,
-                agent.name,
-              )?.sessionRef;
-              upsertTaskSessionHistory(piDir, {
-                id: t.id,
-                agentType: agent.name,
-                description: t.desc,
-                sessionName: t.sessionName,
-                startedAt: t.startedAt,
-                paneId: t.paneId,
-                handle: t.handle,
-                piDir,
-                dir: artifactsDir,
-                cwd: taskCwd,
-                sessionRef: completedSessionRef,
-                status: phase,
-                reportedStatus: assess.reportedStatus,
-                rawStatus: assess.rawStatus,
-                resultValid: assess.valid,
-                completedAt: Date.now(),
-                background: false,
-                comparisonGroupId: groupId,
-                comparisonModel: t.model,
-                comparisonDescription: descText,
-                comparisonIndex: t.index,
-                ownerSessionId,
-                ownerLeafId,
-              });
-              const { toolUses } = countToolUses(t.sessionDir, t.sessionName);
-              return {
-                model: t.model,
-                taskId: t.id,
-                status: completion.status === "completed" ? assess.reportedStatus : "failure",
-                rawStatus: completion.status === "completed" ? assess.rawStatus : completion.status,
-                summary: parsed.summary,
-                findings: parsed.findings,
-                evidence: parsed.evidence,
-                files: parsed.files,
-                caveats: parsed.caveats,
-                nextSteps: parsed.next_steps,
-                toolUses,
-                durationMs: Date.now() - t.startedAt,
-                sessionPath: completedSessionRef,
-              } satisfies ComparisonRunResult;
-            }),
-          )) as [ComparisonRunResult, ComparisonRunResult];
+          const runs = await executeComparisonTerminalForeground({
+            tasks: terminalTasks,
+            groupId,
+            agentType: agent.name,
+            description: descText,
+            artifactsDir,
+            taskCwd,
+            piDir,
+            selectedBackend,
+            terminalBackend: herdrBackend,
+            signal,
+            onUpdate,
+            ownerSessionId,
+            ownerLeafId,
+            foregroundTasks,
+            requestRender: taskWidget.requestRender,
+            clearTaskWidgetIfIdle,
+          });
 
           const report = formatComparisonReport({
             agentType: agent.name,
@@ -1546,22 +1441,17 @@ Both subagents are running in background. Results will be compared and delivered
             runs,
           });
 
-            return {
-              content: [{ type: "text" as const, text: report }],
-              details: {
-                phase: "done" as const,
-                compare: true,
-                agent_type: agent.name,
-                description: descText,
-                models: [modelA, modelB],
-                runs,
-              },
-            };
-          } finally {
-            for (const stop of stopProgress) stop();
-            for (const t of terminalTasks) foregroundTasks.delete(t.id);
-            clearTaskWidgetIfIdle();
-          }
+          return {
+            content: [{ type: "text" as const, text: report }],
+            details: {
+              phase: "done" as const,
+              compare: true,
+              agent_type: agent.name,
+              description: descText,
+              models: [modelA, modelB],
+              runs,
+            },
+          };
         }
 
         // Terminal Background

@@ -16,3 +16,8 @@ export {
 } from "./comparison-settlement.js";
 export { executeTerminalForegroundTask } from "./terminal-foreground.js";
 export type { TerminalForegroundExecutionOptions } from "./terminal-foreground.js";
+export { executeComparisonTerminalForeground } from "./comparison-terminal-foreground.js";
+export type {
+  ComparisonTerminalTask,
+  ComparisonTerminalForegroundOptions,
+} from "./comparison-terminal-foreground.js";

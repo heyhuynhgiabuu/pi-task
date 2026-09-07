@@ -68,7 +68,6 @@ import {
   resolveCompareModels,
   shellQuote,
   type ComparisonRunResult,
-  type ParsedResult,
 } from "./helpers.js";
 import {
   ComparisonCoordinator,
@@ -91,6 +90,7 @@ import {
   durableParentOf,
   transferTaskOwnership,
   createRegistryEntryStatus,
+  createComparisonSettledHandler,
 } from "./lifecycle/index.js";
 import { DeliveryGuard, sessionViewOf } from "./panel/delivery.js";
 import {
@@ -269,47 +269,13 @@ export default function (pi: ExtensionAPI) {
 
   const comparisonCoordinator = new ComparisonCoordinator();
 
-  const comparisonSettledHandler = (
-    id: string,
-    task: BackgroundTask,
-    parsed: ParsedResult,
-    phase: "done" | "cancelled" | "timeout" | "failed",
-  ) => {
-    if (task.comparisonPartialDelivered === true) return true;
-    if (!task.comparisonGroupId) return false;
-    if (findTaskSessionHistory(piDir, id)?.comparisonPartialDelivered === true) {
-      return true;
-    }
-    const assessment = assessTaskResult(parsed);
-    const runResult: ComparisonRunResult = {
-      model: task.comparisonModel || task.agentType,
-      taskId: id,
-      status: phase === "done" ? assessment.reportedStatus : "failure",
-      rawStatus: phase === "done" ? assessment.rawStatus : phase,
-      summary: parsed.summary,
-      findings: parsed.findings,
-      evidence: parsed.evidence,
-      files: parsed.files,
-      caveats: parsed.caveats,
-      nextSteps: parsed.next_steps,
-      toolUses: task.toolUses,
-      durationMs: Date.now() - task.startedAt,
-    };
-    const ctx = taskWidget.getContext();
-    const allowed = ctx ? deliveryGuard.allows(sessionViewOf(ctx), id) : true;
-    return comparisonCoordinator.recordTaskSettled(
-      id,
-      runResult,
-      pi,
-      allowed,
-      (taskIds) => markComparisonGroupDelivered(piDir, taskIds),
-      (taskId) => {
-        const current = taskWidget.getContext();
-        return current ? deliveryGuard.allows(sessionViewOf(current), taskId) : true;
-      },
-      (taskIds) => markComparisonGroupPartiallyDelivered(piDir, taskIds),
-    );
-  };
+  const comparisonSettledHandler = createComparisonSettledHandler({
+    piDir,
+    pi,
+    comparisonCoordinator,
+    taskWidget,
+    deliveryGuard,
+  });
 
   // Durable-task restore and comparison replay wait for the first
   // session_start (issue #20): the owning session id only exists once a

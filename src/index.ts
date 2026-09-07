@@ -83,6 +83,7 @@ import {
   completeTask,
   createCompletionDeliveryQueue,
   createTaskWidgetController,
+  executeTerminalForegroundTask,
   restoreActiveBackgroundTasks,
   startBackgroundPolling,
   startToolStatsPolling,
@@ -1993,135 +1994,30 @@ Both subagents are running in background. Results will be compared and delivered
       const ownerSessionId = owner.ownerSessionId;
       const ownerLeafId = owner.ownerLeafId;
       if (!isBackground) {
-        const startedAt = foregroundTask?.startedAt ?? Date.now();
-        upsertTaskSessionHistory(piDir, {
+        return executeTerminalForegroundTask({
           id,
           agentType: agent.name,
           description: descText,
           sessionName,
-          startedAt,
-          paneId,
-          handle,
-          piDir,
-          dir: artifactsDir,
-          cwd: taskCwd,
+          sessionDir,
+          artifactsDir,
+          taskCwd,
           conversationId,
-          status: "running",
-          background: false,
+          piDir,
+          handle,
+          paneId,
+          originalPane,
+          startedAt: foregroundTask?.startedAt ?? Date.now(),
           ownerSessionId,
           ownerLeafId,
-          ownerPid: process.pid,
+          selectedBackend,
+          terminalBackend: herdrBackend,
+          signal,
+          onUpdate,
+          foregroundTasks,
+          clearTaskWidgetIfIdle,
         });
-
-                        const stopProgress = startForegroundProgressPolling({
-                              taskId: id,
-                              sessionDir,
-                              sessionName,
-                              agentType: agent.name,
-                              description: descText,
-                              startedAt,
-                              onUpdate: onUpdate ?? (() => {}),
-                            });
-
-                        const onAbort = () => stopProgress();
-                        signal?.addEventListener("abort", onAbort, { once: true });
-
-            const completion = await waitForSessionTaskCompletion({
-              sessionDir,
-              sessionName,
-              paneId,
-              signal,
-              timeoutMs: TASK_TIMEOUT_MS,
-              pollMs: 1000,
-              sinceMs: startedAt,
-              resourceExists: selectedBackend === "herdr"
-                ? () => herdrBackend.isAlive(handle as Extract<TerminalHandle, { backend: "herdr" }>)
-                : () => probePaneAsync(paneId).then((probe) => probe.state),
-            });
-        stopProgress();
-        signal?.removeEventListener("abort", onAbort);
-        const content = completion.content;
-        const parsed = parseResultXml(content);
-        const assessment = assessTaskResult(parsed);
-        const phase =
-          completion.status === "completed"
-            ? "done"
-            : completion.status === "cancelled"
-              ? "cancelled"
-              : "failed";
-        const completedSessionRef = findJsonlSessionByName(
-          piDir,
-          id,
-          agent.name,
-        )?.sessionRef;
-        upsertTaskSessionHistory(piDir, {
-          id,
-          agentType: agent.name,
-          description: descText,
-          sessionName,
-          startedAt,
-          paneId,
-          handle,
-          piDir,
-          dir: artifactsDir,
-          cwd: taskCwd,
-          conversationId,
-          sessionRef: completedSessionRef,
-          status: phase,
-          reportedStatus: assessment.reportedStatus,
-          rawStatus: assessment.rawStatus,
-          resultValid: assessment.valid,
-          completedAt: Date.now(),
-          background: false,
-          ownerSessionId,
-          ownerLeafId,
-        });
-        if (phase === "done") {
-          if (handle.backend === "herdr") await herdrBackend.close(handle);
-          else killAgentPane(paneId, originalPane);
-        } else {
-          // The subagent pane is still alive after a cancel/failed/timeout
-          // (we never reached the done branch). Without this, a user-initiated
-          // session replacement while the foreground wait was in flight would
-          // abort the wait → return cancelled → leave the pane orphaned. Always
-          // tear down the pane on any terminal status so the user never ends up
-          // with a dangling tmux split. Best-effort: ignore failures (pane may
-          // already be gone).
-          try {
-            if (handle.backend === "herdr") await herdrBackend.close(handle);
-            else killAgentPane(paneId, originalPane);
-          } catch {
-            // ignore
-          }
-        }
-        foregroundTasks.delete(id);
-        clearTaskWidgetIfIdle();
-        const durationMs = Date.now() - startedAt;
-        const { toolUses, turns } = countToolUses(sessionDir, sessionName);
-        const envelope = buildTaskEnvelope(parsed, {
-          agent_type: agent.name,
-          description: descText,
-          tool_uses: toolUses,
-          duration_ms: durationMs,
-          background: false,
-        });
-        return {
-          ...envelope,
-          details: {
-            ...envelope.details,
-            task_id: id,
-            phase,
-            execution_phase: phase,
-            reported_status: assessment.reportedStatus,
-            raw_status: assessment.rawStatus,
-            result_valid: assessment.valid,
-            confidence: parsed.confidence || "",
-            turn_count: turns,
-            conversation_id: conversationId,
-            full_output: parsed.raw.trim() || content.trim(),
-          },
-        };
-          }
+      }
 
       // ── BACKGROUND MODE (default): add to tracker, return immediately ─────
 

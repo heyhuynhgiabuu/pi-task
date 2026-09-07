@@ -6,8 +6,9 @@ import {
   writeRegistry,
 } from "../conversation.js";
 import { hasAgentFinished, getLastMessageTimestampFromSessionDir } from "../session-text.js";
+import { claudeSessionFilePath, hasClaudeFinished } from "../subagent/claudeSession.js";
 import { killAgentPane, paneExists } from "../subagent/tmux.js";
-import type { BackgroundTask, RegistryEntry } from "../types.js";
+import { taskRuntime, type BackgroundTask, type RegistryEntry } from "../types.js";
 
 export function restoreActiveBackgroundTasks(
   piDir: string,
@@ -77,6 +78,10 @@ export function restoreActiveBackgroundTasks(
       cwd: entry.cwd,
       agentType: entry.agentType,
       sessionName: entry.sessionName,
+      runtime: entry.runtime,
+      ...(entry.runtime === "claude" && entry.cwd
+        ? { claudeSessionFile: claudeSessionFilePath(entry.cwd, entry.sessionName) }
+        : {}),
       paneId,
       handle: entry.handle,
       backend: entry.handle?.backend ?? entry.backend ?? "tmux",
@@ -192,9 +197,14 @@ export function restoreActiveBackgroundTasks(
     // (see startBackgroundPolling); legacy records and tests may point dir
     // directly at the session folder, so accept both.
     const sessionDirs = [join(entry.dir, "sessions", entry.id), entry.dir];
-    const sessionFinished = sessionDirs.some((dir) =>
-      hasAgentFinished(dir, entry.sessionName, entry.startedAt),
-    );
+    const claudeFile = taskRuntime(entry) === "claude" && entry.cwd
+      ? claudeSessionFilePath(entry.cwd, entry.sessionName)
+      : undefined;
+    const sessionFinished = claudeFile
+      ? hasClaudeFinished(claudeFile, entry.startedAt)
+      : sessionDirs.some((dir) =>
+          hasAgentFinished(dir, entry.sessionName, entry.startedAt),
+        );
     const paneId = entry.handle?.resourceId ?? entry.paneId;
     let paneAlive: boolean;
     try {

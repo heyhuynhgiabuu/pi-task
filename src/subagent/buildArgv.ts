@@ -1,9 +1,11 @@
 /**
- * Build `pi` CLI argv for subagent spawns.
+ * Build child CLI argv for subagent spawns (pi / Claude Code runtimes).
  */
 
 import type { AgentConfig } from "../helpers.js";
 import { resolveAgentToolAllowlist } from "../agent-tools.js";
+
+export type ChildRuntime = "pi" | "claude";
 
 export interface PiPromptLaunchOptions {
   systemPromptPath: string;
@@ -72,4 +74,44 @@ export function buildPiArgv(opts: BuildPiArgvOptions): string[] {
   );
   if (!opts.promptLaunch?.deferTaskPrompt) args.push(promptContent);
   return args;
+}
+
+export interface BuildClaudeArgsOptions {
+  agent: AgentConfig;
+  /** Pinned Claude Code session id (UUID); the transcript is <id>.jsonl. */
+  sessionId: string;
+  promptContent: string;
+  deferTaskPrompt?: boolean;
+}
+
+/**
+ * Build `claude` CLI arguments. Flags first, optional positional prompt last
+ * (Claude Code treats the first positional argument as the initial prompt).
+ */
+export function buildClaudeArgs(opts: BuildClaudeArgsOptions): string[] {
+  const args: string[] = [];
+  const permissionMode = opts.agent.permissionMode?.trim();
+  if (permissionMode) args.push("--permission-mode", permissionMode);
+  if (opts.agent.model) args.push("--model", opts.agent.model);
+  args.push("--session-id", opts.sessionId);
+  if (!opts.deferTaskPrompt) args.push(opts.promptContent);
+  return args;
+}
+
+/** Route child argv construction by agent runtime (default: pi). */
+export function buildChildArgs(
+  agent: AgentConfig,
+  opts: BuildPiArgvOptions & BuildClaudeArgsOptions,
+): string[] {
+  if (agent.runtime === "claude") {
+    const { sessionId, deferTaskPrompt } = opts;
+    return buildClaudeArgs({ agent, sessionId, promptContent: opts.promptContent, deferTaskPrompt });
+  }
+  const {
+    agent: _agent,
+    sessionId: _sessionId,
+    deferTaskPrompt: _deferTaskPrompt,
+    ...piOpts
+  } = opts;
+  return buildPiArgv({ ...piOpts, agent });
 }

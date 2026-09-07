@@ -2,6 +2,10 @@ import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { WRAP_UP_GRACE_TURNS, turnLimitWrapUpPrompt } from "../constants.js";
 import { getLastAssistantTextFromSessionDir } from "../session-text.js";
+import { taskRuntime } from "../types.js";
+import {
+  getLastClaudeAssistantText,
+} from "../subagent/claudeSession.js";
 import type { TaskCompletionSnapshot } from "../subagent/waitCompletion.js";
 import type { BackgroundTask } from "../types.js";
 import { completeTask, type ComparisonSettledHook } from "./completion.js";
@@ -17,6 +21,8 @@ export interface BackgroundPollingDeps {
         sinceMs?: number;
         resourceExists?: () => boolean | Promise<boolean>;
         exitSentinelPath?: string;
+        runtime?: "pi" | "claude";
+        claudeSessionFile?: string;
       }) => Promise<TaskCompletionSnapshot>;
       resourceExists?: (task: BackgroundTask) => boolean | Promise<boolean>;
       closeTask?: (task: BackgroundTask) => void | Promise<void>;
@@ -110,7 +116,12 @@ export function startBackgroundPolling(
           const sessionDir = join(task.dir, "sessions", id);
           if (task.maxTurns !== undefined) {
             const readPartial = () =>
-              getLastAssistantTextFromSessionDir(
+              taskRuntime(task) === "claude"
+                ? getLastClaudeAssistantText(
+                    task.claudeSessionFile ?? "",
+                    task.startedAt,
+                  )
+                : getLastAssistantTextFromSessionDir(
                 sessionDir,
                 task.sessionName,
                 task.startedAt,
@@ -149,6 +160,9 @@ export function startBackgroundPolling(
                 sinceMs: task.startedAt,
                 resourceExists: deps.resourceExists ? () => deps.resourceExists!(task) : undefined,
                 exitSentinelPath: task.exitSentinelPath,
+                ...(taskRuntime(task) === "claude"
+                  ? { runtime: "claude" as const, claudeSessionFile: task.claudeSessionFile }
+                  : {}),
               });
 
           if (stopped) return;

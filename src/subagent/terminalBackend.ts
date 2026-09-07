@@ -4,6 +4,8 @@ import { chooseTmuxSplitDirection } from "../helpers.js";
 export type TerminalBackendKind = "tmux" | "herdr";
 export type ExecutionBackendKind = "sdk" | TerminalBackendKind;
 export type RequestedBackendKind = "auto" | ExecutionBackendKind;
+/** Which agent flavor a terminal pane hosts (pi by default, or claude). */
+export type AgentRuntimeKind = "pi" | "claude";
 
 export type TerminalHandle =
   | {
@@ -20,6 +22,8 @@ export type TerminalHandle =
       foregroundProcessGroupId?: number;
       workspaceId?: string;
       workspaceGroup?: string;
+      /** Agent flavor this handle launched; "pi" when absent (legacy records). */
+      agentKind?: AgentRuntimeKind;
     };
 
 export type HerdrTerminalHandle = Extract<TerminalHandle, { backend: "herdr" }>;
@@ -34,6 +38,8 @@ export interface TerminalLaunchInput {
   env?: Record<string, string>;
   remainOnExit?: boolean;
   workspaceGroup?: string;
+  /** Agent flavor started in the pane; defaults to "pi". */
+  agentKind?: AgentRuntimeKind;
 }
 
 export interface CommandRunOptions {

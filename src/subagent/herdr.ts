@@ -5,6 +5,7 @@ import type { HerdrTerminalHandle } from "../types.js";
 import {
   CLI_TIMEOUT_MS,
   createDefaultCommandRunner,
+  type AgentRuntimeKind,
   type CommandRunner,
   type CommandResult,
   type TerminalBackend,
@@ -99,9 +100,9 @@ function paneFrom(value: unknown): HerdrPane {
   return pane as HerdrPane;
 }
 
-function paneHostsPi(value: unknown): boolean {
+function paneHostsAgent(value: unknown, kind: AgentRuntimeKind = "pi"): boolean {
   const candidate = value as { pane?: { agent?: unknown } };
-  return candidate.pane?.agent === "pi";
+  return candidate.pane?.agent === kind;
 }
 
 function workspaceFrom(value: unknown): HerdrWorkspace {
@@ -337,6 +338,7 @@ async function closeCreatedResource(
   allowCleanup: boolean,
   expectedAgent?: HerdrAgentInfo,
   requireAgentIdentity = false,
+  agentKind: AgentRuntimeKind = "pi",
 ): Promise<void> {
   if (!allowCleanup) return;
   if (requireAgentIdentity && !expectedAgent) return;
@@ -357,7 +359,7 @@ async function closeCreatedResource(
       );
       if (
         current.terminal_id !== created.terminal_id ||
-        current.agent !== "pi"
+        current.agent !== agentKind
       ) {
         return;
       }
@@ -460,11 +462,12 @@ async function retryStalledPrompt(
 async function readStartedAgent(
   run: HerdrRun,
   created: HerdrPane,
+  expectedKind: AgentRuntimeKind = "pi",
 ): Promise<HerdrAgentInfo> {
   const promptIdentity = await readAgent(run, created.pane_id);
   if (
     promptIdentity.terminal_id !== created.terminal_id ||
-    (promptIdentity.agent !== undefined && promptIdentity.agent !== "pi")
+    (promptIdentity.agent !== undefined && promptIdentity.agent !== expectedKind)
   ) {
     throw new HerdrIdentityError(
       `HerdR agent identity did not match started pane ${created.pane_id}`,
@@ -705,7 +708,7 @@ export function createHerdrTerminalBackend(
             "start",
             input.label ?? "pi-task",
             "--kind",
-            "pi",
+            input.agentKind ?? "pi",
             "--pane",
             created.pane_id,
             "--",
@@ -722,7 +725,7 @@ export function createHerdrTerminalBackend(
               await sleep(50);
             }
           }
-          const promptIdentity = await readStartedAgent(run, created);
+          const promptIdentity = await readStartedAgent(run, created, input.agentKind ?? "pi");
           expectedAgent = promptIdentity;
           if (input.initialPrompt !== undefined) {
             await submitInitialPrompt(
@@ -748,6 +751,7 @@ export function createHerdrTerminalBackend(
             resourceId: created.pane_id,
             socketPath,
             terminalId: created.terminal_id,
+            agentKind: input.agentKind ?? "pi",
             ...(expectedAgent?.name ? { agentName: expectedAgent.name } : {}),
             ...(expectedAgent?.foreground_process_group_id !== undefined
               ? { foregroundProcessGroupId: expectedAgent.foreground_process_group_id }
@@ -767,6 +771,7 @@ export function createHerdrTerminalBackend(
             !(error instanceof HerdrIdentityError),
             expectedAgent,
             requireAgentIdentity,
+            input.agentKind ?? "pi",
           );
           throw error;
         }
@@ -780,7 +785,7 @@ export function createHerdrTerminalBackend(
         const response = await run(["pane", "get", owned.resourceId]);
         const payload = decode(response.stdout, "pane get");
         if (paneFrom(payload).terminal_id !== owned.terminalId) return false;
-        return paneHostsPi(payload);
+        return paneHostsAgent(payload, owned.agentKind ?? "pi");
       } catch (error) {
         const message = errorText(error);
         if (/ownership mismatch/i.test(message) || isMissingPane(error)) return false;

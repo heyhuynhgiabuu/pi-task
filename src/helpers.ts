@@ -15,6 +15,7 @@ import { parseMergedDisallowedTools } from "./policy.js";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
   buildPiArgv,
+  type ChildRuntime,
   type PiPromptLaunchOptions,
 } from "./subagent/buildArgv.js";
 
@@ -91,6 +92,10 @@ export interface AgentConfig {
   hidden?: boolean;
   proactive?: boolean;
   readonly?: boolean;
+  /** Child runtime from frontmatter `runtime:`; undefined = pi CLI. */
+  runtime?: ChildRuntime;
+  /** Claude Code permission mode from frontmatter `permission_mode:`. */
+  permissionMode?: string;
   body: string;
   source: "project" | "user" | "bundled";
   path: string;
@@ -644,6 +649,9 @@ export function loadAgentsFromDir(
     const proactive = parseBool(frontmatter.proactive);
     const readonly = parseBool(frontmatter.readonly);
     const fast = parseBool(frontmatter.fast);
+    const runtimeRaw = frontmatter.runtime?.trim().toLowerCase();
+    const runtime = runtimeRaw === "claude" ? ("claude" as const) : undefined;
+    const permissionMode = frontmatter.permission_mode?.trim() || undefined;
     // Always-on xAI disallow list — these tools are never useful for
     // task subagents and risk leaking provider-specific behavior.
     const withDefaults = [
@@ -681,6 +689,8 @@ export function loadAgentsFromDir(
       hidden,
       proactive,
       readonly,
+      runtime,
+      permissionMode,
       maxTurns,
       body,
       source,
@@ -966,6 +976,8 @@ function stripProactivePrefix(description: string): string {
         requiredExtensions,
       });
     }
+
+    export { buildChildArgs } from "./subagent/buildArgv.js";
 
     // ─── JSONL Session Helpers ───────────────────────────────────────────────────
 

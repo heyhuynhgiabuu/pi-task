@@ -293,6 +293,26 @@ export function restoreComparisonGroups(
     const second = ordered[1];
     if (!first || !second) continue;
 
+    // A comparison report combines both siblings, so it must never be
+    // reconstructed by a session when ownership is split between sessions
+    // (including a partially migrated sibling with no owner metadata).
+    const ownerSessionIds = ordered.flatMap((record) => {
+      const taskOwner = record.task?.ownerSessionId;
+      const historyOwner = record.history?.ownerSessionId;
+      if (taskOwner !== undefined && historyOwner !== undefined && taskOwner !== historyOwner) {
+        return [taskOwner, historyOwner];
+      }
+      return [historyOwner ?? taskOwner];
+    });
+    const hasOwnership = ownerSessionIds.some((owner) => owner !== undefined);
+    const distinctOwners = new Set(ownerSessionIds.filter((owner): owner is string => owner !== undefined));
+    if (
+      distinctOwners.size > 1 ||
+      (hasOwnership && ownerSessionIds.some((owner) => owner === undefined))
+    ) {
+      continue;
+    }
+
     const histories = ordered.map((record) => record.history);
     if (
       ordered.some(
@@ -578,9 +598,9 @@ export default function (pi: ExtensionAPI) {
       pi,
       allowed,
       (taskIds) => markComparisonGroupDelivered(piDir, taskIds),
-      () => {
+      (taskId) => {
         const current = taskWidget.getContext();
-        return current ? deliveryGuard.allows(sessionViewOf(current), id) : true;
+        return current ? deliveryGuard.allows(sessionViewOf(current), taskId) : true;
       },
       (taskIds) => markComparisonGroupPartiallyDelivered(piDir, taskIds),
     );
@@ -661,7 +681,7 @@ export default function (pi: ExtensionAPI) {
           pi,
           allowed,
           (taskIds) => markComparisonGroupDelivered(piDir, taskIds),
-          undefined,
+          (taskId) => deliveryGuard.allows(currentSession, taskId),
           (taskIds) => markComparisonGroupPartiallyDelivered(piDir, taskIds),
         );
       } catch {
@@ -917,6 +937,13 @@ export default function (pi: ExtensionAPI) {
         const entry = readRegistry(piDir).find(
           (candidate) => candidate.id === id,
         );
+        if (entry?.comparisonGroupId || repairedPrevious?.comparisonGroupId) {
+          return {
+            content: [{ type: "text" as const, text: "Comparison tasks cannot be resumed individually." }],
+            details: { phase: "failed" as const, error: "resume_unsupported_for_compare", task_id: id },
+            isError: true,
+          };
+        }
         persistedTaskCwd = entry?.cwd ?? persistedTaskCwd;
         if (entry?.cleanupPending) {
           return {
@@ -1026,6 +1053,13 @@ export default function (pi: ExtensionAPI) {
         // `pi --session`, or hold a stale one. Repair it (and the durable
         // record) before the spawn reuses it.
         if (entry) entry = repairTaskSessionRef(piDir, entry);
+        if (entry?.comparisonGroupId) {
+          return {
+            content: [{ type: "text" as const, text: "Comparison tasks cannot be resumed individually." }],
+            details: { phase: "failed" as const, error: "resume_unsupported_for_compare", task_id: entry.id },
+            isError: true,
+          };
+        }
         if (!entry) {
           taskParams = { ...taskParams, task_id: undefined };
           id = `${Date.now().toString(36)}-${randomUUID().slice(0, 4)}`;
@@ -1546,9 +1580,9 @@ export default function (pi: ExtensionAPI) {
                   pi,
                   deliveryGuard.allows(sessionViewOf(ctx), s.id),
                   undefined,
-                  () => {
+                  (taskId) => {
                     const current = taskWidget.getContext();
-                    return current ? deliveryGuard.allows(sessionViewOf(current), s.id) : true;
+                    return current ? deliveryGuard.allows(sessionViewOf(current), taskId) : true;
                   },
                   (taskIds) => markComparisonGroupPartiallyDelivered(piDir, taskIds),
                 );
@@ -1575,9 +1609,9 @@ export default function (pi: ExtensionAPI) {
                   pi,
                   deliveryGuard.allows(sessionViewOf(ctx), s.id),
                   undefined,
-                  () => {
+                  (taskId) => {
                     const current = taskWidget.getContext();
-                    return current ? deliveryGuard.allows(sessionViewOf(current), s.id) : true;
+                    return current ? deliveryGuard.allows(sessionViewOf(current), taskId) : true;
                   },
                   (taskIds) => markComparisonGroupPartiallyDelivered(piDir, taskIds),
                 );

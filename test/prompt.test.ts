@@ -240,6 +240,91 @@ if (process.platform !== "win32") {
 }
 
 if (process.platform !== "win32") {
+  const t = "individual comparison resume is rejected";
+  const root = mkdtempSync(join(tmpdir(), "pi-task-comparison-resume-"));
+  const piDir = join(root, ".pi");
+  const artifactsDir = join(piDir, "artifacts", "tasks");
+  let shutdown: (() => void) | undefined;
+  try {
+    mkdirSync(artifactsDir, { recursive: true });
+    writeFileSync(join(piDir, "task-registry.json"), JSON.stringify([{
+      id: "compare-m0",
+      agentType: "explore",
+      description: "comparison sibling",
+      sessionName: "compare-m0",
+      startedAt: Date.now() - 1000,
+      handle: { backend: "tmux", resourceId: "%pane-compare" },
+      piDir,
+      dir: artifactsDir,
+      cwd: root,
+      status: "running",
+      background: true,
+      comparisonGroupId: "compare-group",
+      comparisonModel: "model-a",
+      comparisonIndex: 0,
+    }]));
+    writeFileSync(
+      join(piDir, "artifacts", "task-sessions.json"),
+      JSON.stringify({ "compare-conversation": { task_id: "compare-m0" } }),
+    );
+
+    let tool: { execute: (...args: unknown[]) => Promise<{ isError?: boolean; details?: { error?: string } }> } | undefined;
+    taskExtension({
+      on(event: string, handler: () => void) {
+        if (event === "session_shutdown") shutdown = handler;
+      },
+      registerMessageRenderer() {},
+      registerFlag() {},
+      registerTool(value: typeof tool) {
+        tool = value;
+      },
+      registerCommand() {},
+      getAllTools() {
+        return [];
+      },
+    } as never);
+    assert.ok(tool, t + " registration");
+    const result = await tool.execute(
+      "comparison-resume",
+      {
+        agent_type: "explore",
+        prompt: "Continue",
+        description: "Resume comparison sibling",
+        task_id: "compare-m0",
+        background: true,
+      },
+      undefined,
+      undefined,
+      { cwd: root, isProjectTrusted: () => true },
+    );
+    assert.equal(result.isError, true, t + " task_id rejection");
+    assert.equal(result.details?.error, "resume_unsupported_for_compare", t + " task_id error");
+    const conversationResult = await tool.execute(
+      "comparison-conversation-resume",
+      {
+        agent_type: "explore",
+        prompt: "Continue",
+        description: "Resume comparison sibling",
+        conversation_id: "compare-conversation",
+        background: true,
+      },
+      undefined,
+      undefined,
+      { cwd: root, isProjectTrusted: () => true },
+    );
+    assert.equal(conversationResult.isError, true, t + " conversation_id rejection");
+    assert.equal(
+      conversationResult.details?.error,
+      "resume_unsupported_for_compare",
+      t + " conversation_id error",
+    );
+  } finally {
+    shutdown?.();
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+if (process.platform !== "win32") {
   const t = "concurrent durable launches create one child";
   const root = mkdtempSync(join(tmpdir(), "pi-task-concurrent-cwd-"));
   const piDir = join(root, ".pi");

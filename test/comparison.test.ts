@@ -216,6 +216,46 @@ test("ComparisonCoordinator retries a guard-suppressed deadline as a full report
   assert.equal(sentMessages[0]?.details.partial, false);
 });
 
+test("ComparisonCoordinator checks both guards before partial delivery", async () => {
+  const coordinator = new ComparisonCoordinator({ joinWindowMs: 10 });
+  coordinator.registerGroup(
+    "group-guarded-partial-both",
+    "base-guarded-partial-both",
+    "reviewer",
+    "Review auth code",
+    ["task-partial-guard-a", "task-partial-guard-b"],
+    ["model-a", "model-b"],
+  );
+  const sentMessages: any[] = [];
+  const fakePi: any = { sendMessage: (message: any) => sentMessages.push(message) };
+  let checks = 0;
+  coordinator.recordTaskSettled(
+    "task-partial-guard-a",
+    {
+      model: "model-a",
+      taskId: "task-partial-guard-a",
+      status: "success",
+      rawStatus: "done",
+      summary: "done",
+      findings: "",
+      evidence: "",
+      files: "",
+      caveats: "",
+      nextSteps: "",
+      toolUses: 1,
+      durationMs: 1,
+    },
+    fakePi,
+    true,
+    undefined,
+    () => ++checks < 2,
+  );
+  await sleep(30);
+
+  assert.equal(sentMessages.length, 0, "one refused sibling blocks partial delivery");
+  assert.equal(checks, 2, "both sibling guards are checked for partial delivery");
+});
+
 test("partial comparison delivery markers persist and suppress replay", async () => {
   const piDir = mkdtempSync(join(tmpdir(), "pi-task-comparison-partial-marker-"));
   try {
@@ -664,6 +704,147 @@ test("ComparisonCoordinator respects deliveryGuard when delivery is refused", ()
   assert.equal(coordinator.isComparisonTask("task-3-m1"), false);
 });
 
+
+test("ComparisonCoordinator requires guard permission for both siblings", () => {
+  const coordinator = new ComparisonCoordinator();
+  coordinator.registerGroup(
+    "group-guard-both",
+    "base-guard-both",
+    "explore",
+    "Explore repo",
+    ["task-guard-m0", "task-guard-m1"],
+    ["model-a", "model-b"],
+  );
+  const run = (taskId: string, model: string): ComparisonRunResult => ({
+    model,
+    taskId,
+    status: "success",
+    rawStatus: "done",
+    summary: `Finished ${taskId}`,
+    findings: "",
+    evidence: "",
+    files: "",
+    caveats: "",
+    nextSteps: "",
+    toolUses: 1,
+    durationMs: 500,
+  });
+  const sentMessages: any[] = [];
+  const fakePi: any = { sendMessage: (message: any) => sentMessages.push(message) };
+  let checks = 0;
+  const guardCheck = () => {
+    checks += 1;
+    return checks !== 2;
+  };
+
+  coordinator.recordTaskSettled(
+    "task-guard-m0",
+    run("task-guard-m0", "model-a"),
+    fakePi,
+    true,
+    undefined,
+    guardCheck,
+  );
+  coordinator.recordTaskSettled(
+    "task-guard-m1",
+    run("task-guard-m1", "model-b"),
+    fakePi,
+    true,
+    undefined,
+    guardCheck,
+  );
+
+  assert.equal(sentMessages.length, 0, "one refused sibling blocks the joint report");
+  assert.equal(checks, 2, "both sibling guards are checked");
+});
+
+test("restoreComparisonGroups defers groups split across owner sessions", () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-comparison-mixed-owner-"));
+  const groupId = "mixed-owner-group";
+  const timestamp = new Date().toISOString();
+  for (const [name, model, index, ownerSessionId] of [
+    ["task-m0", "model-a", 0, "sess-a"],
+    ["task-m1", "model-b", 1, "sess-b"],
+  ] as const) {
+    const taskDir = join(piDir, "artifacts", "sessions", name);
+    mkdirSync(taskDir, { recursive: true });
+    writeFileSync(
+      join(taskDir, "session.jsonl"),
+      [
+        { type: "session_info", timestamp, name },
+        {
+          type: "message",
+          timestamp,
+          message: {
+            role: "assistant",
+            stopReason: "stop",
+            content: [{ type: "text", text: `<status>success</status>\n<summary>${name} result</summary>` }],
+          },
+        },
+      ].map((entry) => JSON.stringify(entry)).join("\n"),
+    );
+    upsertTaskSessionHistory(piDir, {
+      id: name,
+      agentType: "reviewer",
+      description: `Review [${model}]`,
+      sessionName: name,
+      startedAt: Date.now() - 1000,
+      handle: { backend: "tmux", resourceId: `%${name}` },
+      piDir,
+      dir: join(piDir, "artifacts"),
+      status: "done",
+      sessionRef: join(taskDir, "session.jsonl"),
+      completedAt: Date.now(),
+      background: true,
+      ownerSessionId,
+      comparisonGroupId: groupId,
+      comparisonModel: model,
+      comparisonDescription: "Review",
+      comparisonIndex: index,
+    });
+  }
+
+  const coordinator = new ComparisonCoordinator();
+  const pending = restoreComparisonGroups(piDir, new Map(), coordinator, "sess-a");
+  assert.deepEqual(pending, [], "mixed-owner groups are not replayed as partial reports");
+  assert.equal(coordinator.isComparisonTask("task-m0"), false, "mixed group is not registered");
+  assert.equal(coordinator.isComparisonTask("task-m1"), false, "mixed group is not registered");
+});
+
+test("restoreComparisonGroups defers partially migrated owner metadata", () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-comparison-partial-owner-"));
+  const makeTask = (id: string, ownerSessionId?: string): BackgroundTask => ({
+    dir: join(piDir, "artifacts"),
+    cwd: "/tmp/project",
+    agentType: "reviewer",
+    sessionName: id,
+    backend: "sdk",
+    originalPane: null,
+    description: "Review",
+    startedAt: Date.now() - 1000,
+    toolUses: 0,
+    turns: 0,
+    ownerSessionId,
+    comparisonGroupId: "partial-owner-group",
+    comparisonModel: id.endsWith("m0") ? "model-a" : "model-b",
+    comparisonDescription: "Review",
+    comparisonIndex: id.endsWith("m0") ? 0 : 1,
+  });
+  const coordinator = new ComparisonCoordinator();
+  const pending = restoreComparisonGroups(
+    piDir,
+    new Map([
+      ["task-m0", makeTask("task-m0", "sess-a")],
+      ["task-m1", makeTask("task-m1")],
+    ]),
+    coordinator,
+    "sess-a",
+  );
+
+  assert.deepEqual(pending, [], "partially migrated groups are deferred");
+  assert.equal(coordinator.isComparisonTask("task-m0"), false, "partial group is not registered");
+  assert.equal(coordinator.isComparisonTask("task-m1"), false, "partial group is not registered");
+});
 
 test("restoreComparisonGroups skips history runs owned by another session", () => {
   const piDir = mkdtempSync(join(tmpdir(), "pi-task-comparison-foreign-owner-"));

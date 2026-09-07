@@ -32,7 +32,7 @@ export interface ComparisonGroup {
   cleanupTimer?: ReturnType<typeof setTimeout>;
 }
 
-type DeliveryGuardCheck = () => boolean;
+type DeliveryGuardCheck = (taskId: string) => boolean;
 
 function positiveDuration(value: number | undefined, fallback: number): number {
   return value !== undefined && Number.isFinite(value) && value > 0
@@ -159,7 +159,9 @@ export class ComparisonCoordinator {
     if (!settledId) return;
     const missingId = group.taskIds.find((id) => id !== settledId);
     if (!missingId) return;
-    const deliveryAllowed = deliveryGuardCheck?.() ?? deliveryGuardAllowed;
+    const deliveryAllowed = deliveryGuardCheck
+      ? group.taskIds.every((taskId) => deliveryGuardCheck(taskId))
+      : deliveryGuardAllowed;
     if (!deliveryAllowed) {
       group.deadlineTimer = undefined;
       group.cleanupTimer = setTimeout(() => this.clearGroup(groupId), this.partialRetentionMs);
@@ -260,7 +262,10 @@ export class ComparisonCoordinator {
       const run1 = group.results.get(group.taskIds[1]);
       this.clearGroup(groupId);
       if (run0 && run1) {
-        this.deliverReport(group, [run0, run1], pi, deliveryGuardAllowed, onDelivered, false);
+        const deliveryAllowed = deliveryGuardCheck
+          ? group.taskIds.every((groupTaskId) => deliveryGuardCheck(groupTaskId))
+          : deliveryGuardAllowed;
+        this.deliverReport(group, [run0, run1], pi, deliveryAllowed, onDelivered, false);
       }
     } else {
       this.armDeadline(

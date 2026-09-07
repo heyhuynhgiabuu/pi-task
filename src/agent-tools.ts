@@ -157,6 +157,8 @@ export interface ClaudeToolPolicy {
  * - Explicit `tools:` maps supported pi names to Claude names and REJECTS any
  *   unmappable name rather than silently dropping it.
  * - Explicit `disallowed_tools:` maps likewise; unmappable names are rejected.
+ *   When both `tools:` and `disallowed_tools:` are declared, both mapped flags
+ *   are emitted (the deny list stays authoritative on overlap).
  * - `readonly: true` enforces an actual read-only surface (`--tools`
  *   Read,Grep,Glob + read-only web tools) regardless of permission mode, so
  *   bypassPermissions grants no shell/write escape.
@@ -227,7 +229,17 @@ export function resolveClaudeToolPolicy(
   }
 
   if (explicitTools !== undefined) {
-    return { tools: translate(explicitTools, "tools").join(",") };
+    // Both flags must reach the CLI when the user declared both lists:
+    // Claude's deny list is authoritative when allow and deny overlap, so
+    // explicit disallowed_tools survive alongside an explicit allowlist.
+    const mappedTools = translate(explicitTools, "tools");
+    const mappedDisallowed = translate(explicitDisallowed, "disallowedTools");
+    return {
+      tools: mappedTools.join(","),
+      ...(mappedDisallowed.length > 0
+        ? { disallowedTools: mappedDisallowed.join(",") }
+        : {}),
+    };
   }
 
   if (explicitDisallowed.length > 0) {

@@ -189,6 +189,17 @@ test("buildClaudeArgs: explicit disallowed_tools map onto --disallowedTools", ()
   assert.ok(!args.includes("--tools"), "no allowlist for deny-only policy");
 });
 
+test("buildClaudeArgs: explicit tools + disallowed_tools emit both flags (deny stays authoritative)", () => {
+  const args = buildClaudeArgs({
+    agent: claudeAgent({ tools: ["read", "bash"], disallowedTools: ["bash", "write"] }),
+    sessionId: "sid",
+    promptContent: "p",
+    deferTaskPrompt: true,
+  });
+  assert.equal(indexOfValue(args, "--tools"), "Read,Bash");
+  assert.equal(indexOfValue(args, "--disallowedTools"), "Bash,Write");
+});
+
 test("buildClaudeArgs: unsupported explicit tools reject with an actionable error", () => {
   assert.throws(
     () =>

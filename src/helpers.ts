@@ -667,14 +667,24 @@ export function loadAgentsFromDir(
       frontmatter.permission_mode?.trim() ||
       (runtime === "claude" ? "bypassPermissions" : undefined);
     // Always-on xAI disallow list — these tools are never useful for
-    // task subagents and risk leaking provider-specific behavior.
-    const withDefaults = [
-      ...parseToolList(disallowedRaw),
-      ...DEFAULT_DISALLOWED_TOOLS,
-      ...(readonly ? READONLY_TOOL_DENY : []),
-    ];
+    // task subagents and risk leaking provider-specific behavior. Claude
+    // runtime agents skip the provider-specific defaults: those names cannot
+    // map to Claude Code built-ins and would make resolveClaudeToolPolicy
+    // reject agents the user never restricted. User-declared disallowed_tools
+    // and readonly denies still apply on both runtimes.
+    const userDisallowed = parseToolList(disallowedRaw);
+    const readonlyDeny = readonly ? READONLY_TOOL_DENY : [];
     const maxTurns = parsePositiveInt(frontmatter.max_turns);
-    const merged = parseMergedDisallowedTools(withDefaults.join(","));
+    const merged =
+      runtime === "claude"
+        ? [...new Set([...userDisallowed, ...readonlyDeny])]
+        : parseMergedDisallowedTools(
+            [
+              ...userDisallowed,
+              ...DEFAULT_DISALLOWED_TOOLS,
+              ...readonlyDeny,
+            ].join(","),
+          );
     const disallowedTools = merged.length > 0 ? merged : undefined;
     const tools = parseToolList(
       frontmatter.tools as string | string[] | undefined,

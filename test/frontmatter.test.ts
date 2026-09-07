@@ -269,3 +269,101 @@ test("model: claude-code/<model> implies claude runtime and bypassPermissions de
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("claude tool policy: frontmatter load to buildChildArgs without rejecting injected xAI defaults", async () => {
+  const { loadAgentsFromDir } = await import("../src/helpers.js");
+  const { buildChildArgs } = await import("../src/subagent/buildArgv.js");
+  const { resolveClaudeToolPolicy } = await import("../src/agent-tools.js");
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+
+  const dir = mkdtempSync(join(tmpdir(), "pi-task-claude-policy-"));
+  try {
+    writeFileSync(
+      join(dir, "plain.md"),
+      `---\ndescription: plain claude worker\nmodel: claude-code/sonnet\n---\nbody`,
+    );
+    writeFileSync(
+      join(dir, "combined.md"),
+      [
+        "---",
+        "description: claude worker with allow and deny",
+        "runtime: claude",
+        "tools: read, bash",
+        "disallowed_tools:",
+        "  - bash",
+        "  - write",
+        "---",
+        "body",
+      ].join("\n"),
+    );
+    writeFileSync(
+      join(dir, "unsupported.md"),
+      `---\ndescription: claude worker with unmappable deny\nruntime: claude\ndisallowed_tools: memory-search\n---\nbody`,
+    );
+    writeFileSync(
+      join(dir, "pinet.md"),
+      `---\ndescription: pi worker\nmodel: gpt-5\n---\nbody`,
+    );
+
+    const agents = loadAgentsFromDir(dir, "project");
+    const plain = agents.find((a) => a.name === "plain")!;
+    const combined = agents.find((a) => a.name === "combined")!;
+    const unsupported = agents.find((a) => a.name === "unsupported")!;
+
+    const opts = {
+      sessionName: "task-x",
+      sessionDir: join(dir, "sessions"),
+      promptContent: "p",
+      sessionId: "00000000-0000-4000-8000-00000000000a",
+      deferTaskPrompt: true,
+    };
+
+    // Minimal claude agent: no xAI provider defaults injected, policy keeps
+    // the Claude default tool surface, and the child argv builds cleanly.
+    assert.equal(plain.runtime, "claude");
+    assert.ok(
+      !plain.disallowedTools?.some((t) => t.startsWith("xai_")),
+      "xAI provider defaults are not injected into claude agents",
+    );
+    assert.deepEqual(
+      resolveClaudeToolPolicy({ tools: plain.tools, disallowedTools: plain.disallowedTools }),
+      { tools: "default" },
+      "unrestricted claude agent keeps tools: default",
+    );
+    const plainArgs = buildChildArgs(plain, opts);
+    assert.ok(!plainArgs.includes("--tools"), "no --tools allowlist emitted");
+    assert.ok(!plainArgs.includes("--disallowedTools"), "no deny list emitted");
+
+    // Explicit tools + disallowed_tools: both flags reach the CLI with
+    // correct pi→Claude mappings; deny survives alongside the allowlist.
+    assert.deepEqual(
+      combined.disallowedTools,
+      ["bash", "write"],
+      "user-declared disallowed_tools preserved on claude runtime",
+    );
+    const combinedArgs = buildChildArgs(combined, opts);
+    const flagValue = (flag: string) => {
+      const i = combinedArgs.indexOf(flag);
+      return i >= 0 ? combinedArgs[i + 1] : undefined;
+    };
+    assert.equal(flagValue("--tools"), "Read,Bash");
+    assert.equal(flagValue("--disallowedTools"), "Bash,Write");
+
+    // User-declared unmappable restrictions still reject at spawn time.
+    assert.throws(
+      () => buildChildArgs(unsupported, opts),
+      /cannot be mapped to Claude Code built-in tools[\s\S]*"memory-search"/,
+    );
+
+    // Pi runtime loading keeps the provider default deny list unchanged.
+    const piAgent = loadAgentsFromDir(dir, "project").find((a) => a.name === "pinet")!;
+    assert.ok(
+      piAgent.disallowedTools?.includes("xai_web_search"),
+      "pi runtime still injects xAI default disallowed tools",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

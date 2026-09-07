@@ -59,9 +59,18 @@ function assertPiMeetsPeerDependency(): void {
     cur[0] < min[0] ||
     (cur[0] === min[0] && cur[1] < min[1]) ||
     (cur[0] === min[0] && cur[1] === min[1] && cur[2] < min[2]);
+  const upper = min[0] > 0
+    ? [min[0] + 1, 0, 0]
+    : min[1] > 0
+      ? [0, min[1] + 1, 0]
+      : [0, 0, min[2] + 1];
+  const above =
+    cur[0] > upper[0] ||
+    (cur[0] === upper[0] && cur[1] > upper[1]) ||
+    (cur[0] === upper[0] && cur[1] === upper[1] && cur[2] >= upper[2]);
   assert.ok(
-    !below,
-    `pi ${piVersion} is below peer ${peerRange}; upgrade pi-coding-agent`,
+    !below && !above,
+    `pi ${piVersion} is outside peer ${peerRange}; use a compatible pi-coding-agent`,
   );
   console.log("  PASS: pi version meets peer", peerRange, "(", piVersion, ")");
 }

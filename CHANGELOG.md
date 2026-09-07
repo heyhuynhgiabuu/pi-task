@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Peer dependency ranges now pin the tested Pi 0.85.x and TypeBox 1.3.x compatibility lines instead of accepting arbitrary versions.
 - Registry and task-history persistence uses atomic replacement with a cross-process lock. Background completion delivery defaults to `followUp` and debounces notifications settling together; `steer` remains an explicit opt-in.
 - Release metadata now keeps `package-lock.json` aligned with the package version and no longer auto-pushes from npm's `postversion` hook.
 

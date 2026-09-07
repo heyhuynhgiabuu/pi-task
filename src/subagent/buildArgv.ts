@@ -93,9 +93,25 @@ export function buildClaudeArgs(opts: BuildClaudeArgsOptions): string[] {
   const permissionMode = opts.agent.permissionMode?.trim();
   if (permissionMode) args.push("--permission-mode", permissionMode);
   if (opts.agent.model) args.push("--model", opts.agent.model);
+  // pi thinking levels map onto claude effort: off/medium -> low, high -> high,
+  // max/xhigh -> max. Only claude-recognized values are forwarded.
+  const effort = effortFromThinking(opts.agent.thinking);
+  if (effort) args.push("--effort", effort);
   args.push("--session-id", opts.sessionId);
   if (!opts.deferTaskPrompt) args.push(opts.promptContent);
   return args;
+}
+
+function effortFromThinking(
+  thinking: string | undefined,
+): "low" | "medium" | "high" | "xhigh" | "max" | undefined {
+  const value = thinking?.trim().toLowerCase();
+  if (!value) return undefined;
+  if (value === "off" || value === "minimal") return "low";
+  if (value === "low" || value === "medium" || value === "high" || value === "xhigh" || value === "max") {
+    return value as "low" | "medium" | "high" | "xhigh" | "max";
+  }
+  return undefined;
 }
 
 /** Route child argv construction by agent runtime (default: pi). */

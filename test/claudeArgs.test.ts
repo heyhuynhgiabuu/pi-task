@@ -122,3 +122,13 @@ test("buildChildArgs routes pi runtime to the pi argv (unchanged shape)", () => 
   assert.deepEqual(args, expected);
   assert.ok(args.includes("--session-dir"));
 });
+
+test("buildClaudeArgs maps thinking to --effort", () => {
+  const base = { sessionId: "s-1", promptContent: "p", deferTaskPrompt: true } as const;
+  const agent = (thinking?: string) => ({ name: "a", description: "d", body: "", source: "bundled" as const, path: "", thinking }) as Parameters<typeof buildClaudeArgs>[0]["agent"];
+  assert.deepEqual(buildClaudeArgs({ agent: agent("max"), ...base }), ["--model-x"].slice(0,0).concat(["--effort", "max", "--session-id", "s-1"]));
+  assert.deepEqual(buildClaudeArgs({ agent: agent("high"), ...base }), ["--effort", "high", "--session-id", "s-1"]);
+  assert.deepEqual(buildClaudeArgs({ agent: agent("off"), ...base }), ["--effort", "low", "--session-id", "s-1"]);
+  assert.deepEqual(buildClaudeArgs({ agent: agent(undefined), ...base }), ["--session-id", "s-1"]);
+  assert.deepEqual(buildClaudeArgs({ agent: agent("bogus"), ...base }), ["--session-id", "s-1"]);
+});

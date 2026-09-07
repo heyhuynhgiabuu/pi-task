@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { buildTmuxSplitWindowArgs, chooseTmuxSplitDirection } from "../helpers.js";
+import { createDefaultCommandRunner } from "./terminalBackend.js";
 
 export type TmuxSplitResult = {
   paneId: string;
@@ -41,6 +42,17 @@ export type TmuxPaneProbe =
   | { state: "alive" }
   | { state: "missing" }
   | { state: "unavailable"; error: unknown };
+
+export type AsyncTmuxCommand = (
+  args: readonly string[],
+  input?: string,
+) => Promise<string>;
+
+const defaultAsyncTmuxCommand: AsyncTmuxCommand = (() => {
+  const runner = createDefaultCommandRunner();
+  return async (args, input) =>
+    (await runner.run("tmux", args, { input })).stdout.trim();
+})();
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
@@ -125,6 +137,28 @@ export function probePane(paneId: string): TmuxPaneProbe {
   }
 }
 
+export async function probePaneAsync(
+  paneId: string,
+  run: AsyncTmuxCommand = defaultAsyncTmuxCommand,
+): Promise<TmuxPaneProbe> {
+  try {
+    const actualPaneId = (await run([
+      "display-message",
+      "-p",
+      "-t",
+      paneId,
+      "#{pane_id}",
+    ])).trim();
+    return actualPaneId === paneId
+      ? { state: "alive" }
+      : { state: "missing" };
+  } catch (error) {
+    return isMissingPaneError(error)
+      ? { state: "missing" }
+      : { state: "unavailable", error };
+  }
+}
+
 export function paneExists(paneId: string): boolean {
   return probePane(paneId).state === "alive";
 }
@@ -197,6 +231,25 @@ export function tmuxSteerPane(paneId: string, message: string): void {
     tmuxCmdQuiet(["delete-buffer", "-b", bufferName]);
   }
   tmuxCmd(["send-keys", "-t", paneId, "Enter"]);
+}
+
+export async function tmuxSteerPaneAsync(
+  paneId: string,
+  message: string,
+  run: AsyncTmuxCommand = defaultAsyncTmuxCommand,
+): Promise<void> {
+  const bufferName = `pi-task-steer-${process.pid}-${Date.now()}`;
+  try {
+    await run(["load-buffer", "-b", bufferName, "-"], message);
+    await run(["paste-buffer", "-b", bufferName, "-t", paneId]);
+  } finally {
+    try {
+      await run(["delete-buffer", "-b", bufferName]);
+    } catch {
+      // Best-effort buffer cleanup must not hide the steer result.
+    }
+  }
+  await run(["send-keys", "-t", paneId, "Enter"]);
 }
 
 function sessionWatcherScript(sessionFilePath: string): string {

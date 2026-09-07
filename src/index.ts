@@ -99,7 +99,10 @@ import {
   resolveHerdrPiIntegrationExtension,
 } from "./subagent/herdr.js";
 import { describeCommandFailure, selectTerminalBackend } from "./subagent/terminalBackend.js";
-import { steerRunningBackgroundTask } from "./subagent/steer.js";
+import {
+  steerRunningBackgroundTask,
+  steerRunningBackgroundTaskAsync,
+} from "./subagent/steer.js";
 import {
   checkTaskCompletion,
   waitForTaskCompletion as waitForSessionTaskCompletion,
@@ -109,6 +112,7 @@ import {
   killAgentPane,
   killAgentPaneStrict,
   probePane,
+  probePaneAsync,
   setPaneRemainOnExit,
   setPaneSelfDestruct,
   splitWindowPane,
@@ -594,7 +598,7 @@ export default function (pi: ExtensionAPI) {
       resourceExists: (task) => task.handle?.backend === "herdr"
         ? createDefaultHerdrTerminalBackend().isAlive(task.handle)
         : task.paneId
-          ? probePane(task.paneId).state
+          ? probePaneAsync(task.paneId).then((probe) => probe.state)
           : false,
       clearTaskWidgetIfIdle,
       completeTask: completeTaskWithDelivery,
@@ -609,7 +613,8 @@ export default function (pi: ExtensionAPI) {
       piDir,
       pi,
       steerTask: (task, prompt) =>
-        steerRunningBackgroundTask(task.paneId, prompt, task.handle).ok,
+        steerRunningBackgroundTaskAsync(task.paneId, prompt, task.handle)
+          .then((result) => result.ok),
     },
     BACKGROUND_CHECK_MS,
   );
@@ -1677,7 +1682,7 @@ Both subagents are running in background. Results will be compared and delivered
                 sinceMs: t.startedAt,
                 resourceExists: selectedBackend === "herdr"
                   ? () => herdrBackend.isAlive(t.handle as Extract<TerminalHandle, { backend: "herdr" }>)
-                  : undefined,
+                  : () => probePaneAsync(t.paneId).then((probe) => probe.state),
               });
 
               if (t.handle.backend === "herdr") {
@@ -2232,7 +2237,7 @@ Both subagents are running in background. Results will be compared and delivered
               sinceMs: startedAt,
               resourceExists: selectedBackend === "herdr"
                 ? () => herdrBackend.isAlive(handle as Extract<TerminalHandle, { backend: "herdr" }>)
-                : undefined,
+                : () => probePaneAsync(paneId).then((probe) => probe.state),
             });
         stopProgress();
         signal?.removeEventListener("abort", onAbort);

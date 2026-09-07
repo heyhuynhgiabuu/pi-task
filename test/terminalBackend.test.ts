@@ -9,7 +9,11 @@ import {
   createDefaultCommandRunner,
   createTmuxTerminalBackend,
 } from "../src/subagent/terminalBackend.js";
-import { probePane } from "../src/subagent/tmux.js";
+import {
+  probePane,
+  probePaneAsync,
+  tmuxSteerPaneAsync,
+} from "../src/subagent/tmux.js";
 
 test("tmux terminal backend preserves the launch handle contract", async () => {
   const calls: string[][] = [];
@@ -76,6 +80,43 @@ esac
     delete process.env.PI_TASK_TEST_TMUX_PROBE;
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("async tmux pane probes preserve missing versus unavailable", async () => {
+  let mode: "alive" | "missing" | "unavailable" = "alive";
+  const run = async () => {
+    if (mode === "alive") return "%42\n";
+    const error = new Error("tmux command failed") as Error & { stderr: string };
+    error.stderr = mode === "missing"
+      ? "can't find pane: %42"
+      : "no server running on /tmp/tmux";
+    throw error;
+  };
+
+  assert.deepEqual(await probePaneAsync("%42", run), { state: "alive" });
+  mode = "missing";
+  assert.deepEqual(await probePaneAsync("%42", run), { state: "missing" });
+  mode = "unavailable";
+  const unavailable = await probePaneAsync("%42", run);
+  assert.equal(unavailable.state, "unavailable");
+});
+
+test("async tmux steering uses argument-safe command calls", async () => {
+  const calls: Array<{ args: string[]; input?: string }> = [];
+  await tmuxSteerPaneAsync("%42", "hello\nworld", async (args, input) => {
+    calls.push({ args: [...args], input });
+    return "";
+  });
+
+  assert.deepEqual(calls.map(({ args }) => args[0]), [
+    "load-buffer",
+    "paste-buffer",
+    "delete-buffer",
+    "send-keys",
+  ]);
+  assert.equal(calls[0]?.input, "hello\nworld");
+  assert.deepEqual(calls[1]?.args.slice(0, 4), ["paste-buffer", "-b", calls[0]?.args[2], "-t"]);
+  assert.deepEqual(calls[3]?.args.slice(0, 3), ["send-keys", "-t", "%42"]);
 });
 
 test("tmux terminal backend requires a launch command", async () => {

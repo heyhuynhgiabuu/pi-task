@@ -46,7 +46,7 @@ export interface BackgroundPollingDeps {
    * Returns false when the injection fails (dead pane, herdr unavailable);
    * the polling loop then settles the task immediately.
    */
-  steerTask?: (task: BackgroundTask, prompt: string) => boolean;
+  steerTask?: (task: BackgroundTask, prompt: string) => boolean | Promise<boolean>;
 }
 
 export function startBackgroundPolling(
@@ -138,7 +138,7 @@ export function startBackgroundPolling(
           );
         if (!task.wrapUp && task.turns >= task.maxTurns) {
           task.wrapUp = { turnsAtStart: task.turns };
-          const steered = deps.steerTask?.(task, turnLimitWrapUpPrompt(task.maxTurns)) ?? false;
+          const steered = await (deps.steerTask?.(task, turnLimitWrapUpPrompt(task.maxTurns)) ?? false);
           if (!steered) {
             if (deps.backgroundTasks.get(id) !== task) return;
             settleAtLimit("; wrap-up steering failed.");

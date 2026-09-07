@@ -94,6 +94,7 @@ import { buildClaudeArgs } from "./subagent/buildArgv.js";
 import {
   claudeSessionFilePath,
   claudeToolUseCount,
+  claudeTurnCount,
 } from "./subagent/claudeSession.js";
 import { describeCommandFailure, selectTerminalBackend } from "./subagent/terminalBackend.js";
 import { steerRunningBackgroundTask } from "./subagent/steer.js";
@@ -1127,8 +1128,10 @@ export default function (pi: ExtensionAPI) {
           await mkdir(sessionDir, { recursive: true });
 
       // ── Claude Code runtime setup: pinned session id + transcript path ──
-      // sessionName doubles as the claude session UUID so post-restart
-      // polling can rebuild the transcript path from cwd + sessionName.
+      // The UUID is the durable identity: it is persisted on every task/
+      // registry/history record so post-restart polling can rebuild the
+      // transcript path from cwd + claudeSessionId (sessionName stays the
+      // ordinary task-<id> name).
       const claudeSessionId = claudeRuntime ? randomUUID() : undefined;
       const claudeSessionFile = claudeRuntime && claudeSessionId
         ? claudeSessionFilePath(taskCwd, claudeSessionId)
@@ -1948,7 +1951,7 @@ Both subagents are running in background. Results will be compared and delivered
             sessionName,
                     backend: selectedBackend,
             runtime: claudeTaskRuntime,
-            ...(claudeRuntime ? { claudeSessionFile } : {}),
+            ...(claudeRuntime ? { claudeSessionId, claudeSessionFile } : {}),
             originalPane: null,
             description: descText,
             startedAt: Date.now(),
@@ -2219,6 +2222,7 @@ Both subagents are running in background. Results will be compared and delivered
           description: descText,
           sessionName,
           runtime: claudeTaskRuntime,
+          ...(claudeRuntime ? { claudeSessionId } : {}),
           startedAt,
           paneId,
           handle,
@@ -2282,6 +2286,7 @@ Both subagents are running in background. Results will be compared and delivered
           description: descText,
           sessionName,
           runtime: claudeTaskRuntime,
+          ...(claudeRuntime ? { claudeSessionId } : {}),
           startedAt,
           paneId,
           handle,
@@ -2321,7 +2326,7 @@ Both subagents are running in background. Results will be compared and delivered
         const { toolUses, turns } = claudeRuntime
           ? {
               toolUses: claudeToolUseCount(claudeSessionFile ?? "", startedAt),
-              turns: 0,
+              turns: claudeTurnCount(claudeSessionFile ?? "", startedAt),
             }
           : countToolUses(sessionDir, sessionName);
         const envelope = buildTaskEnvelope(parsed, {
@@ -2368,7 +2373,7 @@ Both subagents are running in background. Results will be compared and delivered
         recentCalls: [],
         backend: selectedBackend,
         runtime: claudeTaskRuntime,
-        ...(claudeRuntime ? { claudeSessionFile } : {}),
+        ...(claudeRuntime ? { claudeSessionId, claudeSessionFile } : {}),
       };
 
       backgroundTasks.set(id, bgtask);
@@ -2382,6 +2387,7 @@ Both subagents are running in background. Results will be compared and delivered
         description: descText,
         sessionName,
         runtime: claudeTaskRuntime,
+        ...(claudeRuntime ? { claudeSessionId } : {}),
         startedAt: bgtask.startedAt,
         paneId,
         handle,

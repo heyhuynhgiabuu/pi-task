@@ -3,7 +3,10 @@
  */
 
 import type { AgentConfig } from "../helpers.js";
-import { resolveAgentToolAllowlist } from "../agent-tools.js";
+import {
+  resolveAgentToolAllowlist,
+  resolveClaudeToolPolicy,
+} from "../agent-tools.js";
 
 export type ChildRuntime = "pi" | "claude";
 
@@ -90,6 +93,18 @@ export interface BuildClaudeArgsOptions {
  */
 export function buildClaudeArgs(opts: BuildClaudeArgsOptions): string[] {
   const args: string[] = [];
+  // Tool policy is translated per runtime: explicit tools/disallowed_tools map
+  // onto --tools/--disallowedTools (unmappable names throw); readonly: true
+  // enforces a read-only surface so bypassPermissions grants no escape.
+  const policy = resolveClaudeToolPolicy({
+    tools: opts.agent.tools,
+    disallowedTools: opts.agent.disallowedTools,
+    readonly: opts.agent.readonly,
+  });
+  if (policy.tools !== "default") args.push("--tools", policy.tools);
+  if (policy.disallowedTools) {
+    args.push("--disallowedTools", policy.disallowedTools);
+  }
   const permissionMode = opts.agent.permissionMode?.trim();
   if (permissionMode) args.push("--permission-mode", permissionMode);
   if (opts.agent.model) args.push("--model", opts.agent.model);

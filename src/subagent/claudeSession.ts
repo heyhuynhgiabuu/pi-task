@@ -100,17 +100,41 @@ function forEachClaudeAssistant(
  * Whether the Claude Code child has finished: the last assistant row must
  * carry a terminal stop_reason. Null (in flight) and "tool_use" (continues)
  * mean not done; a missing transcript means not done.
+ *
+ * The last assistant row is authoritative: a newer row with a null stop
+ * reason (a turn still streaming) must override an older terminal reason,
+ * so `last` is assigned for every assistant row regardless of nullity.
  */
 export function hasClaudeFinished(
   filePath: string,
   sinceMs?: number,
 ): boolean {
+  let sawAssistant = false;
   let last: string | null = null;
   forEachClaudeAssistant(filePath, sinceMs, (msg) => {
-    const reason = claudeStopReason(msg);
-    if (reason !== null) last = reason;
+    sawAssistant = true;
+    last = claudeStopReason(msg);
   });
-  return last !== null && CLAUDE_TERMINAL_STOP_REASONS.has(last);
+  return sawAssistant && last !== null && CLAUDE_TERMINAL_STOP_REASONS.has(last);
+}
+
+/**
+ * Completed assistant turns: assistant rows with an explicit stop_reason
+ * ("tool_use" between turns and terminal reasons alike). Null/unknown
+ * rows are still streaming and don't count, so a turn increments only
+ * when the child actually finished responding. Compatible with the pi
+ * turn counting used for max_turns wrap-up (issue #19).
+ */
+export function claudeTurnCount(
+  filePath: string,
+  sinceMs?: number,
+): number {
+  let count = 0;
+  forEachClaudeAssistant(filePath, sinceMs, (msg) => {
+    const reason = claudeStopReason(msg);
+    if (reason !== null) count += 1;
+  });
+  return count;
 }
 
 /** Last non-empty assistant text from the Claude Code transcript. */

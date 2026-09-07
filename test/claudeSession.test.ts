@@ -12,6 +12,7 @@ import {
   claudeSessionFilePath,
   claudeSlug,
   claudeToolUseCount,
+  claudeTurnCount,
   getLastClaudeAssistantText,
   hasClaudeFinished,
 } from "../src/subagent/claudeSession.js";
@@ -234,6 +235,77 @@ for (const reason of ["stop_sequence", "max_tokens"]) {
   try {
     assert.equal(hasClaudeFinished(file), false, t);
     assert.equal(getLastClaudeAssistantText(file), "", t);
+  } finally {
+    cleanup(file);
+  }
+}
+
+{
+  const t = "end_turn followed by null (new in-flight turn) is NOT finished";
+  const file = makeTranscript([
+    assistant("end_turn"),
+    assistant(null),
+  ]);
+  try {
+    assert.equal(hasClaudeFinished(file), false, t);
+  } finally {
+    cleanup(file);
+  }
+}
+
+{
+  const t = "null (in flight) followed by end_turn IS finished (latest row wins)";
+  const file = makeTranscript([
+    assistant(null),
+    assistant("end_turn", [{ type: "text", text: "actually done" }]),
+  ]);
+  try {
+    assert.equal(hasClaudeFinished(file), true, t);
+    assert.equal(getLastClaudeAssistantText(file), "actually done", t);
+  } finally {
+    cleanup(file);
+  }
+}
+
+{
+  const t = "turns: only assistant rows with an explicit stop_reason count";
+  const file = makeTranscript([
+    assistant("tool_use"),
+    assistant(null),
+    assistant("tool_use"),
+    assistant("end_turn"),
+  ]);
+  try {
+    assert.equal(claudeTurnCount(file), 3, t);
+  } finally {
+    cleanup(file);
+  }
+}
+
+{
+  const t = "turns: null/unknown streaming rows and non-assistant rows are excluded";
+  const file = makeTranscript([
+    assistant(null),
+    { type: "user", message: { role: "user", content: "hi" } },
+    { type: "assistant" },
+  ]);
+  try {
+    assert.equal(claudeTurnCount(file), 0, t);
+  } finally {
+    cleanup(file);
+  }
+}
+
+{
+  const t = "turns: sinceMs filters older rows and a missing file yields 0";
+  const file = makeTranscript([
+    { ...assistant("end_turn"), timestamp: "2000-01-01T00:00:00.000Z" },
+    { ...assistant("tool_use"), timestamp: new Date().toISOString() },
+  ]);
+  const missing = join(tmpdir(), `pi-task-claude-missing-${Date.now()}.jsonl`);
+  try {
+    assert.equal(claudeTurnCount(file, Date.now() - 60_000), 1, t);
+    assert.equal(claudeTurnCount(missing), 0, t);
   } finally {
     cleanup(file);
   }

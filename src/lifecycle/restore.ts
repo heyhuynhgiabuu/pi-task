@@ -10,6 +10,30 @@ import { claudeSessionFilePath, hasClaudeFinished } from "../subagent/claudeSess
 import { killAgentPane, paneExists } from "../subagent/tmux.js";
 import { taskRuntime, type BackgroundTask, type RegistryEntry } from "../types.js";
 
+/** A syntactically valid Claude Code session UUID. */
+function isClaudeSessionId(value: string | undefined): value is string {
+  return (
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+  );
+}
+
+/**
+ * Transcript path for a persisted claude entry: prefer the durable session
+ * UUID; legacy entries without one may fall back to sessionName only when it
+ * is itself a UUID (early builds pinned it as such). Anything else must not
+ * invent a path — restore polls the pi layout or fails closed instead.
+ */
+function restoredClaudeSessionFile(entry: RegistryEntry): string | undefined {
+  if (taskRuntime(entry) !== "claude" || !entry.cwd) return undefined;
+  const sessionId = isClaudeSessionId(entry.claudeSessionId)
+    ? entry.claudeSessionId
+    : isClaudeSessionId(entry.sessionName)
+      ? entry.sessionName
+      : undefined;
+  return sessionId ? claudeSessionFilePath(entry.cwd, sessionId) : undefined;
+}
+
 export function restoreActiveBackgroundTasks(
   piDir: string,
   backgroundTasks: Map<string, BackgroundTask>,
@@ -32,6 +56,9 @@ export function restoreActiveBackgroundTasks(
       agentType: entry.agentType,
       description: entry.description,
       sessionName: entry.sessionName,
+      ...(entry.claudeSessionId !== undefined
+        ? { claudeSessionId: entry.claudeSessionId }
+        : {}),
       startedAt: entry.startedAt,
       handle: entry.handle,
       paneId: entry.paneId,
@@ -79,8 +106,9 @@ export function restoreActiveBackgroundTasks(
       agentType: entry.agentType,
       sessionName: entry.sessionName,
       runtime: entry.runtime,
-      ...(entry.runtime === "claude" && entry.cwd
-        ? { claudeSessionFile: claudeSessionFilePath(entry.cwd, entry.sessionName) }
+      ...(entry.claudeSessionId !== undefined ? { claudeSessionId: entry.claudeSessionId } : {}),
+      ...(restoredClaudeSessionFile(entry)
+        ? { claudeSessionFile: restoredClaudeSessionFile(entry) }
         : {}),
       paneId,
       handle: entry.handle,
@@ -162,6 +190,9 @@ export function restoreActiveBackgroundTasks(
           agentType: entry.agentType,
           description: entry.description,
           sessionName: entry.sessionName,
+          ...(entry.claudeSessionId !== undefined
+            ? { claudeSessionId: entry.claudeSessionId }
+            : {}),
           startedAt: entry.startedAt,
           handle: entry.handle,
           paneId: entry.paneId,
@@ -197,9 +228,7 @@ export function restoreActiveBackgroundTasks(
     // (see startBackgroundPolling); legacy records and tests may point dir
     // directly at the session folder, so accept both.
     const sessionDirs = [join(entry.dir, "sessions", entry.id), entry.dir];
-    const claudeFile = taskRuntime(entry) === "claude" && entry.cwd
-      ? claudeSessionFilePath(entry.cwd, entry.sessionName)
-      : undefined;
+    const claudeFile = restoredClaudeSessionFile(entry);
     const sessionFinished = claudeFile
       ? hasClaudeFinished(claudeFile, entry.startedAt)
       : sessionDirs.some((dir) =>

@@ -20,6 +20,8 @@ export interface SdkBackgroundTaskInput {
   artifactsDir: string;
   cwd?: string;
   conversationId?: string;
+  ownerSessionId?: string;
+  ownerLeafId?: string | null;
   comparisonGroupId?: string;
   comparisonModel?: string;
   comparisonDescription?: string;
@@ -60,6 +62,8 @@ export function startSdkBackgroundTask(input: SdkBackgroundTaskInput): void {
       dir: input.artifactsDir,
       cwd: input.cwd,
       conversationId: input.conversationId,
+      ownerSessionId: input.ownerSessionId,
+      ownerLeafId: input.ownerLeafId,
       status,
       background: true,
       comparisonGroupId: input.comparisonGroupId,

@@ -3,12 +3,12 @@
  * spawned each task and refuses to deliver a completion into a different
  * conversation or branch. Adopted from the pi-subtask pattern (parent session
  * id + leaf id checks) so a result can never land in a conversation that did
- * not spawn the task. In-memory only: no durable schema change.
+ * not spawn the task. Durable records can restore the parent after restart.
  */
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
-interface TaskParentContext {
+export interface TaskParentContext {
   sessionId: string;
   leafId: string | null;
 }
@@ -28,6 +28,11 @@ export class DeliveryGuard {
       sessionId: session.getSessionId(),
       leafId: session.getLeafId(),
     });
+  }
+
+  /** Restore a parent context loaded from durable task state after restart. */
+  restore(taskId: string, parent: TaskParentContext): void {
+    this.parents.set(taskId, { ...parent });
   }
 
   /** Drop the record once the task is settled or removed. */

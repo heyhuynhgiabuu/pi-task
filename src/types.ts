@@ -30,6 +30,10 @@ export interface BackgroundTask {
    */
   wrapUp?: { turnsAtStart: number };
   conversationId?: string;
+  /** Durable parent session used to restore delivery checks. */
+  ownerSessionId?: string;
+  /** Durable parent conversation leaf used to restore delivery checks. */
+  ownerLeafId?: string | null;
   /** Most recent tool calls (capped), updated every COUNT_POLL_MS. */
   recentCalls: ToolCallRecord[];
   /** Consecutive completion-poll failures; reset to 0 on a successful poll. */
@@ -71,6 +75,8 @@ export interface RegistryEntry {
    * legacy entries and entries spawned before a session context existed.
    */
   ownerSessionId?: string;
+  /** Conversation leaf that spawned the task; null means branch checks are disabled. */
+  ownerLeafId?: string | null;
   /** OS pid of the owning Pi process; a dead pid lets others recover the task. */
   ownerPid?: number;
   /** Terminal cleanup must be retried before this record is removed. */

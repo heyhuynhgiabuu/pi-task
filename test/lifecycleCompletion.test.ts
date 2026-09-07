@@ -575,6 +575,7 @@ test("settlement carries the registry entry's session ownership into history", (
       piDir,
       dir: join(piDir, "artifacts", "tasks"),
       ownerSessionId: "sess-a",
+      ownerLeafId: "leaf-a",
       ownerPid: 4242,
       comparisonGroupId: "cmp-group",
       comparisonModel: "model-a",
@@ -609,5 +610,6 @@ test("settlement carries the registry entry's session ownership into history", (
 
   const history = readTaskSessionHistory(piDir);
   assert.equal(history[0]?.ownerSessionId, "sess-a", "history records the owning session");
+  assert.equal(history[0]?.ownerLeafId, "leaf-a", "history records the owning leaf");
   assert.equal(history[0]?.ownerPid, 4242, "history records the owning pid");
 });

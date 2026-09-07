@@ -402,6 +402,15 @@ export default function (pi: ExtensionAPI) {
   // Records which conversation spawned each background task so a result is
   // never delivered into a different conversation or branch.
   const deliveryGuard = new DeliveryGuard();
+  const durableParentOf = (
+    session: SessionView,
+  ): Pick<BackgroundTask, "ownerSessionId" | "ownerLeafId"> => {
+    const ownerSessionId = session.getSessionId();
+    return {
+      ownerSessionId: ownerSessionId || undefined,
+      ownerLeafId: ownerSessionId ? session.getLeafId() : undefined,
+    };
+  };
   const completionDeliveryQueue = createCompletionDeliveryQueue();
   const completeTaskWithDelivery: typeof completeTask = (
     piArg,
@@ -440,8 +449,10 @@ export default function (pi: ExtensionAPI) {
     // Without a session id ownership cannot be expressed; leave the entry as
     // recorded rather than stripping it.
     if (!sessionId) return;
+    const parent = durableParentOf(session);
     if (
       registryEntry.ownerSessionId === sessionId &&
+      registryEntry.ownerLeafId === parent.ownerLeafId &&
       registryEntry.ownerPid === process.pid
     ) {
       return;
@@ -451,11 +462,19 @@ export default function (pi: ExtensionAPI) {
       if (idx === -1) return entries;
       entries[idx] = {
         ...registryEntry,
-        ownerSessionId: sessionId,
+        ...parent,
         ownerPid: process.pid,
       };
       return entries;
     });
+    const history = findTaskSessionHistory(piDir, registryEntry.id);
+    if (history) {
+      upsertTaskSessionHistory(piDir, {
+        ...history,
+        ...parent,
+        ownerPid: process.pid,
+      });
+    }
   };
 
   // ── Restore active tasks from registry on load ──────────────────────────
@@ -606,6 +625,24 @@ export default function (pi: ExtensionAPI) {
         `[pi-task] background task restore failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+    const currentSession = sessionViewOf(ctx);
+    if (currentSession.getSessionId()) {
+      for (const history of readTaskSessionHistory(piDir)) {
+        if (history.ownerSessionId === undefined) continue;
+        deliveryGuard.restore(history.id, {
+          sessionId: history.ownerSessionId,
+          leafId: history.ownerLeafId ?? null,
+        });
+      }
+      for (const [id, task] of backgroundTasks) {
+        if (task.ownerSessionId === undefined) continue;
+        deliveryGuard.restore(id, {
+          sessionId: task.ownerSessionId,
+          leafId: task.ownerLeafId ?? null,
+        });
+      }
+    }
+
     const restoredComparisonRuns = restoreComparisonGroups(
       piDir,
       backgroundTasks,
@@ -613,6 +650,7 @@ export default function (pi: ExtensionAPI) {
       sessionId,
     );
     for (const run of restoredComparisonRuns) {
+      const allowed = deliveryGuard.allows(currentSession, run.taskId);
       // Replay is best-effort: a non-stale send failure must not abort the
       // session. The delivered marker stays unset, so the group is recovered
       // and retried on the next extension load.
@@ -621,7 +659,7 @@ export default function (pi: ExtensionAPI) {
           run.taskId,
           run,
           pi,
-          true,
+          allowed,
           (taskIds) => markComparisonGroupDelivered(piDir, taskIds),
           undefined,
           (taskIds) => markComparisonGroupPartiallyDelivered(piDir, taskIds),
@@ -918,6 +956,7 @@ export default function (pi: ExtensionAPI) {
             turns: 0,
             maxTurns: entry.maxTurns,
             conversationId,
+            ...durableParentOf(sessionViewOf(ctx)),
             recentCalls: [],
           };
                     backgroundTasks.set(id, bgtask);
@@ -1059,6 +1098,7 @@ export default function (pi: ExtensionAPI) {
             turns: 0,
             maxTurns: entry.maxTurns,
             conversationId: entry.conversationId,
+            ...durableParentOf(sessionViewOf(ctx)),
             recentCalls: [],
           };
           backgroundTasks.set(id, bgtask);
@@ -1293,6 +1333,7 @@ export default function (pi: ExtensionAPI) {
                 startedAt: Date.now(),
                 toolUses: 0,
                 turns: 0,
+                ...durableParentOf(sessionViewOf(ctx)),
                 recentCalls: [],
                 comparisonGroupId: groupId,
                 comparisonModel: s.model,
@@ -1440,6 +1481,7 @@ export default function (pi: ExtensionAPI) {
               startedAt: Date.now(),
               toolUses: 0,
               turns: 0,
+              ...durableParentOf(sessionViewOf(ctx)),
               recentCalls: [],
               comparisonGroupId: groupId,
               comparisonModel: s.model,
@@ -1462,6 +1504,7 @@ export default function (pi: ExtensionAPI) {
               comparisonModel: s.model,
               comparisonDescription: descText,
               comparisonIndex: s.index,
+              ...durableParentOf(sessionViewOf(ctx)),
               run: () =>
                 runSdkSubagent({
                   onSession: (session) => subscribeToolEvents(session, bg, 10, taskWidget.requestRender),
@@ -1651,7 +1694,9 @@ Both subagents are running in background. Results will be compared and delivered
 
         // Ownership (issue #20) is stamped identically on every record this
         // compare run persists (history spawn records and registry entries).
-        const ownerSessionId = sessionViewOf(ctx).getSessionId() || undefined;
+        const owner = durableParentOf(sessionViewOf(ctx));
+        const ownerSessionId = owner.ownerSessionId;
+        const ownerLeafId = owner.ownerLeafId;
         if (!isBackground) {
           for (const t of terminalTasks) {
             foregroundTasks.set(t.id, {
@@ -1672,6 +1717,8 @@ Both subagents are running in background. Results will be compared and delivered
               comparisonModel: t.model,
               comparisonDescription: descText,
               comparisonIndex: t.index,
+              ownerSessionId,
+              ownerLeafId,
             });
           }
           ignoreStaleExtensionCtx(() => ensureTaskWidget(ctx));
@@ -1718,6 +1765,7 @@ Both subagents are running in background. Results will be compared and delivered
                 status: "running",
                 background: false,
                 ownerSessionId,
+                ownerLeafId,
                 ownerPid: process.pid,
                 comparisonGroupId: groupId,
                 comparisonModel: t.model,
@@ -1774,6 +1822,8 @@ Both subagents are running in background. Results will be compared and delivered
                 comparisonModel: t.model,
                 comparisonDescription: descText,
                 comparisonIndex: t.index,
+                ownerSessionId,
+                ownerLeafId,
               });
               const { toolUses } = countToolUses(t.sessionDir, t.sessionName);
               return {
@@ -1849,6 +1899,8 @@ Both subagents are running in background. Results will be compared and delivered
             comparisonModel: t.model,
             comparisonDescription: descText,
             comparisonIndex: t.index,
+            ownerSessionId,
+            ownerLeafId,
           };
           backgroundTasks.set(t.id, bg);
           deliveryGuard.track(t.id, sessionViewOf(ctx));
@@ -1867,6 +1919,7 @@ Both subagents are running in background. Results will be compared and delivered
             status: "running",
             background: true,
             ownerSessionId,
+            ownerLeafId,
             ownerPid: process.pid,
             comparisonGroupId: groupId,
             comparisonModel: t.model,
@@ -1893,6 +1946,7 @@ Both subagents are running in background. Results will be compared and delivered
             cwd: taskCwd,
             maxTurns,
             ownerSessionId,
+            ownerLeafId,
             ownerPid: process.pid,
             comparisonGroupId: groupId,
             comparisonModel: t.model,
@@ -1998,6 +2052,7 @@ Both subagents are running in background. Results will be compared and delivered
             toolUses: 0,
             turns: 0,
             conversationId,
+            ...durableParentOf(sessionViewOf(ctx)),
             recentCalls: [],
           };
 
@@ -2024,6 +2079,7 @@ Both subagents are running in background. Results will be compared and delivered
                 toolUses: 0,
                 turns: 0,
                 conversationId,
+                ...durableParentOf(sessionViewOf(ctx)),
                 recentCalls: [],
               };
               backgroundTasks.set(id, backgroundTask);
@@ -2042,6 +2098,7 @@ Both subagents are running in background. Results will be compared and delivered
                 artifactsDir,
                 cwd: taskCwd,
                 conversationId,
+                ...durableParentOf(sessionViewOf(ctx)),
                 run: async () => runSdkFallback(undefined, bgOnSession),
                 deliver: (delivery) => completionDeliveryQueue.enqueue(delivery),
                 onComplete: (result) => {
@@ -2246,7 +2303,9 @@ Both subagents are running in background. Results will be compared and delivered
       }
 
       // ── FOREGROUND MODE: block until result, return directly ────────────
-      const ownerSessionId = sessionViewOf(ctx).getSessionId() || undefined;
+      const owner = durableParentOf(sessionViewOf(ctx));
+      const ownerSessionId = owner.ownerSessionId;
+      const ownerLeafId = owner.ownerLeafId;
       if (!isBackground) {
         const startedAt = foregroundTask?.startedAt ?? Date.now();
         upsertTaskSessionHistory(piDir, {
@@ -2264,6 +2323,7 @@ Both subagents are running in background. Results will be compared and delivered
           status: "running",
           background: false,
           ownerSessionId,
+          ownerLeafId,
           ownerPid: process.pid,
         });
 
@@ -2327,6 +2387,8 @@ Both subagents are running in background. Results will be compared and delivered
           resultValid: assessment.valid,
           completedAt: Date.now(),
           background: false,
+          ownerSessionId,
+          ownerLeafId,
         });
         if (phase === "done") {
           if (handle.backend === "herdr") await herdrBackend.close(handle);
@@ -2391,6 +2453,8 @@ Both subagents are running in background. Results will be compared and delivered
         turns: 0,
         maxTurns: agent.maxTurns ?? envTurnLimit(),
         conversationId,
+        ownerSessionId,
+        ownerLeafId,
         recentCalls: [],
         backend: selectedBackend,
       };
@@ -2414,6 +2478,7 @@ Both subagents are running in background. Results will be compared and delivered
         conversationId,
         maxTurns: bgtask.maxTurns,
         ownerSessionId,
+        ownerLeafId,
         ownerPid: process.pid,
       };
 

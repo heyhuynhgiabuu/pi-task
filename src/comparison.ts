@@ -306,6 +306,8 @@ export function persistComparisonTaskHistory(
     dir: task.dir,
     cwd: task.cwd,
     conversationId: task.conversationId,
+    ownerSessionId: task.ownerSessionId,
+    ownerLeafId: task.ownerLeafId,
     sessionRef: input.sessionRef,
     status: input.status,
     reportedStatus: input.reportedStatus,

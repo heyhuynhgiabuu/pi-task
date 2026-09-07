@@ -507,6 +507,8 @@ it("synthesizes the terminal history record for a receipt that lost its history 
     paneId: "%receipt",
     agentType: "scout",
     description: "receipt without history",
+    ownerSessionId: "sess-a",
+    ownerLeafId: "leaf-a",
     cleanupPending: true,
     cleanupPhase: "done",
     comparisonGroupId: "grp-1",
@@ -525,6 +527,8 @@ it("synthesizes the terminal history record for a receipt that lost its history 
       completedAt?: number;
       comparisonModel?: string;
       comparisonDescription?: string;
+      ownerSessionId?: string;
+      ownerLeafId?: string | null;
     }>
   >(join(piDir, "task-session-history.json"));
   const entry = history.find((e) => e.id === "task-receipt-only");
@@ -532,6 +536,8 @@ it("synthesizes the terminal history record for a receipt that lost its history 
   assert.equal(entry.status, "done", "phase comes from cleanupPhase");
   assert.equal(entry.comparisonGroupId, "grp-1", "comparison group copied");
   assert.equal(entry.comparisonModel, "zai/glm-5.3", "comparison model copied");
+  assert.equal(entry.ownerSessionId, "sess-a", "owner session copied");
+  assert.equal(entry.ownerLeafId, "leaf-a", "owner leaf copied");
   assert.equal(
     entry.comparisonDescription,
     "receipt sibling",
@@ -711,7 +717,12 @@ describe("session ownership (issue #20)", () => {
   it("restores entries owned by the current session", async () => {
     const piDir = makePiDir();
     writeJson(join(piDir, "task-registry.json"), [
-      ownedEntry(piDir, { id: "task-own", ownerSessionId: "sess-b", ownerPid: 4242 }),
+      ownedEntry(piDir, {
+        id: "task-own",
+        ownerSessionId: "sess-b",
+        ownerLeafId: "leaf-1",
+        ownerPid: 4242,
+      }),
     ]);
 
     const backgroundTasks = new Map();
@@ -721,6 +732,11 @@ describe("session ownership (issue #20)", () => {
     });
 
     assert.equal(backgroundTasks.has("task-own"), true, "own live task restored");
+    assert.equal(
+      (backgroundTasks.get("task-own") as { ownerLeafId?: string }).ownerLeafId,
+      "leaf-1",
+      "spawn leaf survives restore",
+    );
     assert.equal(
       readJson<Array<{ id: string }>>(join(piDir, "task-registry.json")).length,
       1,

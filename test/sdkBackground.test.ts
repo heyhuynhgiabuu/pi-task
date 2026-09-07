@@ -73,6 +73,8 @@ async function eventually(assertion: () => void): Promise<void> {
       artifactsDir,
       cwd,
       conversationId: "research",
+      ownerSessionId: "sess-a",
+      ownerLeafId: "leaf-a",
       now: () => 200,
       run: async () => ({
         output: "<status>failure</status>\n<summary>Tests failed</summary>",
@@ -95,6 +97,8 @@ async function eventually(assertion: () => void): Promise<void> {
       assert.equal(history[0].resultValid, true);
       assert.equal(history[0].background, true);
       assert.equal(history[0].cwd, cwd);
+      assert.equal(history[0].ownerSessionId, "sess-a");
+      assert.equal(history[0].ownerLeafId, "leaf-a");
       assert.equal(history[0].sessionRef, sessionPath);
       assert.equal(history[0].completedAt, 200);
       assert.equal(completedOutput, "<status>failure</status>\n<summary>Tests failed</summary>");

@@ -150,8 +150,14 @@ export function completeTask(
             task.comparisonPartialDelivered ?? priorEntry?.comparisonPartialDelivered,
         }
       : {}),
-    ...(priorEntry?.ownerSessionId !== undefined
-      ? { ownerSessionId: priorEntry.ownerSessionId }
+    ...(task.ownerSessionId !== undefined || priorEntry?.ownerSessionId !== undefined
+      ? { ownerSessionId: task.ownerSessionId ?? priorEntry?.ownerSessionId }
+      : {}),
+    ...(task.ownerLeafId !== undefined || priorEntry?.ownerLeafId !== undefined
+      ? {
+          ownerLeafId:
+            task.ownerLeafId !== undefined ? task.ownerLeafId : priorEntry?.ownerLeafId,
+        }
       : {}),
     ...(priorEntry?.ownerPid !== undefined ? { ownerPid: priorEntry.ownerPid } : {}),
   };
@@ -164,12 +170,17 @@ export function completeTask(
     updateRegistry(piDir, (currentEntries) => {
       const currentEntry = currentEntries.find((entry) => entry.id === id);
       const ownerSessionId = currentEntry?.ownerSessionId ?? priorEntry?.ownerSessionId;
+      const ownerLeafId =
+        currentEntry?.ownerLeafId !== undefined
+          ? currentEntry.ownerLeafId
+          : priorEntry?.ownerLeafId;
       const ownerPid = currentEntry?.ownerPid ?? priorEntry?.ownerPid;
       return [
         ...currentEntries.filter((entry) => entry.id !== id),
         {
           ...cleanupEntry,
           ...(ownerSessionId !== undefined ? { ownerSessionId } : {}),
+          ...(ownerLeafId !== undefined ? { ownerLeafId } : {}),
           ...(ownerPid !== undefined ? { ownerPid } : {}),
         },
       ];
@@ -209,8 +220,14 @@ export function completeTask(
             task.comparisonPartialDelivered ?? priorEntry?.comparisonPartialDelivered,
         }
       : {}),
-    ...(priorEntry?.ownerSessionId !== undefined
-      ? { ownerSessionId: priorEntry.ownerSessionId }
+    ...(task.ownerSessionId !== undefined || priorEntry?.ownerSessionId !== undefined
+      ? { ownerSessionId: task.ownerSessionId ?? priorEntry?.ownerSessionId }
+      : {}),
+    ...(task.ownerLeafId !== undefined || priorEntry?.ownerLeafId !== undefined
+      ? {
+          ownerLeafId:
+            task.ownerLeafId !== undefined ? task.ownerLeafId : priorEntry?.ownerLeafId,
+        }
       : {}),
     ...(priorEntry?.ownerPid !== undefined ? { ownerPid: priorEntry.ownerPid } : {}),
   });

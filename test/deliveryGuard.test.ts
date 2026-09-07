@@ -34,6 +34,17 @@ test("DeliveryGuard allows delivery in the same session with the spawn leaf on t
   assert.equal(guard.allows(current, "t1"), true);
 });
 
+test("DeliveryGuard restores a durable parent context after restart", () => {
+  const guard = new DeliveryGuard();
+  const otherBranch = makeSession({
+    id: "sess-1",
+    leafId: "leaf-9",
+    branchIds: ["root", "leaf-9"],
+  });
+  guard.restore("t1", { sessionId: "sess-1", leafId: "leaf-1" });
+  assert.equal(guard.allows(otherBranch, "t1"), false);
+});
+
 test("DeliveryGuard refuses delivery when the session id changed", () => {
   const guard = new DeliveryGuard();
   const spawn = makeSession({ id: "sess-1", leafId: "leaf-1" });

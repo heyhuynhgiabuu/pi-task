@@ -491,6 +491,8 @@ test("foreground comparison history keeps execution status separate from reporte
       toolUses: 0,
       turns: 0,
       recentCalls: [],
+      ownerSessionId: "session-a",
+      ownerLeafId: "leaf-a",
       comparisonGroupId: "compare-group",
       comparisonModel: "model-a",
       comparisonDescription: "Review",
@@ -516,6 +518,8 @@ test("foreground comparison history keeps execution status separate from reporte
   assert.equal(entry?.resultValid, true);
   assert.equal(entry?.comparisonModel, "model-a");
   assert.equal(entry?.comparisonIndex, 0);
+  assert.equal(entry?.ownerSessionId, "session-a");
+  assert.equal(entry?.ownerLeafId, "leaf-a");
 });
 
 test("restores settled SDK comparison siblings without pane handles", () => {

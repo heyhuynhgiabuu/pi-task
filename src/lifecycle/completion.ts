@@ -143,6 +143,13 @@ export function completeTask(
     comparisonDescription: task.comparisonDescription,
     comparisonIndex: task.comparisonIndex,
     comparisonDelivered: task.comparisonDelivered,
+    ...(task.comparisonPartialDelivered !== undefined ||
+    priorEntry?.comparisonPartialDelivered !== undefined
+      ? {
+          comparisonPartialDelivered:
+            task.comparisonPartialDelivered ?? priorEntry?.comparisonPartialDelivered,
+        }
+      : {}),
     ...(priorEntry?.ownerSessionId !== undefined
       ? { ownerSessionId: priorEntry.ownerSessionId }
       : {}),
@@ -195,6 +202,13 @@ export function completeTask(
     comparisonDescription: task.comparisonDescription,
     comparisonIndex: task.comparisonIndex,
     comparisonDelivered: task.comparisonDelivered,
+    ...(task.comparisonPartialDelivered !== undefined ||
+    priorEntry?.comparisonPartialDelivered !== undefined
+      ? {
+          comparisonPartialDelivered:
+            task.comparisonPartialDelivered ?? priorEntry?.comparisonPartialDelivered,
+        }
+      : {}),
     ...(priorEntry?.ownerSessionId !== undefined
       ? { ownerSessionId: priorEntry.ownerSessionId }
       : {}),

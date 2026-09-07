@@ -287,6 +287,34 @@ export function markComparisonGroupDelivered(
   });
 }
 
+/** Mark both durable sibling records after a partial comparison is delivered. */
+export function markComparisonGroupPartiallyDelivered(
+  piDir: string,
+  taskIds: readonly string[],
+): void {
+  const ids = new Set(taskIds);
+  const historyFile = getTaskSessionHistoryPath(piDir);
+  withFileLock(historyFile, () => {
+    const entries = parseTaskSessionHistory(readJsonFile<unknown>(historyFile, []));
+    let changed = false;
+    const updated = entries.map((entry) => {
+      if (!ids.has(entry.id) || entry.comparisonPartialDelivered === true) return entry;
+      changed = true;
+      return { ...entry, comparisonPartialDelivered: true };
+    });
+    if (changed) writeJsonFile(historyFile, updated);
+  });
+  updateRegistry(piDir, (entries) => {
+    let changed = false;
+    const updated = entries.map((entry) => {
+      if (!ids.has(entry.id) || entry.comparisonPartialDelivered === true) return entry;
+      changed = true;
+      return { ...entry, comparisonPartialDelivered: true };
+    });
+    return changed ? updated : entries;
+  });
+}
+
 export function findTaskSessionHistory(
   piDir: string,
   taskId: string,

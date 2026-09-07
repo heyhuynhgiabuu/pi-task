@@ -46,6 +46,9 @@ export function restoreActiveBackgroundTasks(
       comparisonDescription: entry.comparisonDescription,
       comparisonIndex: entry.comparisonIndex,
       comparisonDelivered: entry.comparisonDelivered,
+      ...(entry.comparisonPartialDelivered !== undefined
+        ? { comparisonPartialDelivered: entry.comparisonPartialDelivered }
+        : {}),
     });
   };
   // Best-effort terminal cleanup. HerdR resources always need an explicit
@@ -96,6 +99,7 @@ export function restoreActiveBackgroundTasks(
       comparisonDescription: entry.comparisonDescription,
       comparisonIndex: entry.comparisonIndex,
       comparisonDelivered: entry.comparisonDelivered,
+      comparisonPartialDelivered: entry.comparisonPartialDelivered,
     });
   };
 
@@ -176,6 +180,9 @@ export function restoreActiveBackgroundTasks(
           // true marker recorded before the registry-removal write failed.
           ...(entry.comparisonDelivered === true
             ? { comparisonDelivered: true }
+            : {}),
+          ...(entry.comparisonPartialDelivered === true
+            ? { comparisonPartialDelivered: true }
             : {}),
         });
         staleIds.push(entry.id);

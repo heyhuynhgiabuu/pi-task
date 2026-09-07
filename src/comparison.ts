@@ -108,8 +108,8 @@ export class ComparisonCoordinator {
     deliveryGuardAllowed: boolean,
     onDelivered: ((taskIds: [string, string]) => void) | undefined,
     partial: boolean,
-  ): void {
-    if (!deliveryGuardAllowed) return;
+  ): boolean {
+    if (!deliveryGuardAllowed) return false;
     const report = formatComparisonReport({
       agentType: group.agentType,
       description: group.description,
@@ -142,6 +142,7 @@ export class ComparisonCoordinator {
       delivered = true;
     });
     if (delivered && !partial) onDelivered?.(group.taskIds);
+    return delivered;
   }
 
   private expireGroup(
@@ -150,6 +151,7 @@ export class ComparisonCoordinator {
     deliveryGuardAllowed: boolean,
     onDelivered: ((taskIds: [string, string]) => void) | undefined,
     deliveryGuardCheck: DeliveryGuardCheck | undefined,
+    onPartialDelivered: ((taskIds: [string, string]) => void) | undefined,
   ): void {
     const group = this.groups.get(groupId);
     if (!group || group.partialDelivered || group.results.size !== 1) return;
@@ -157,6 +159,13 @@ export class ComparisonCoordinator {
     if (!settledId) return;
     const missingId = group.taskIds.find((id) => id !== settledId);
     if (!missingId) return;
+    const deliveryAllowed = deliveryGuardCheck?.() ?? deliveryGuardAllowed;
+    if (!deliveryAllowed) {
+      group.deadlineTimer = undefined;
+      group.cleanupTimer = setTimeout(() => this.clearGroup(groupId), this.partialRetentionMs);
+      unrefTimer(group.cleanupTimer);
+      return;
+    }
     const missingIndex = group.taskIds[0] === missingId ? 0 : 1;
     const missingRun: ComparisonRunResult = {
       model: group.models[missingIndex],
@@ -174,16 +183,27 @@ export class ComparisonCoordinator {
       error: `Comparison sibling ${missingId} did not settle within ${this.joinWindowMs}ms.`,
     };
     group.results.set(missingId, missingRun);
-    group.partialDelivered = true;
     group.deadlineTimer = undefined;
-    this.deliverReport(
+    const delivered = this.deliverReport(
       group,
       [group.results.get(group.taskIds[0])!, group.results.get(group.taskIds[1])!],
       pi,
-      deliveryGuardCheck?.() ?? deliveryGuardAllowed,
+      deliveryAllowed,
       onDelivered,
       true,
     );
+    if (!delivered) {
+      group.results.delete(missingId);
+      group.cleanupTimer = setTimeout(() => this.clearGroup(groupId), this.partialRetentionMs);
+      unrefTimer(group.cleanupTimer);
+      return;
+    }
+    group.partialDelivered = true;
+    try {
+      onPartialDelivered?.(group.taskIds);
+    } catch {
+      // The partial report is already delivered; persistence retries on restart.
+    }
     group.cleanupTimer = setTimeout(() => this.clearGroup(groupId), this.partialRetentionMs);
     unrefTimer(group.cleanupTimer);
   }
@@ -194,6 +214,7 @@ export class ComparisonCoordinator {
     deliveryGuardAllowed: boolean,
     onDelivered: ((taskIds: [string, string]) => void) | undefined,
     deliveryGuardCheck: DeliveryGuardCheck | undefined,
+    onPartialDelivered: ((taskIds: [string, string]) => void) | undefined,
   ): void {
     if (group.deadlineTimer) return;
     group.deadlineTimer = setTimeout(
@@ -203,6 +224,7 @@ export class ComparisonCoordinator {
         deliveryGuardAllowed,
         onDelivered,
         deliveryGuardCheck,
+        onPartialDelivered,
       ),
       this.joinWindowMs,
     );
@@ -217,6 +239,7 @@ export class ComparisonCoordinator {
     deliveryGuardAllowed: boolean = true,
     onDelivered?: (taskIds: [string, string]) => void,
     deliveryGuardCheck?: DeliveryGuardCheck,
+    onPartialDelivered?: (taskIds: [string, string]) => void,
   ): boolean {
     const groupId = this.taskToGroup.get(taskId);
     if (!groupId) return false;
@@ -246,6 +269,7 @@ export class ComparisonCoordinator {
         deliveryGuardAllowed,
         onDelivered,
         deliveryGuardCheck,
+        onPartialDelivered,
       );
     }
 
@@ -294,5 +318,8 @@ export function persistComparisonTaskHistory(
     comparisonDescription: task.comparisonDescription,
     comparisonIndex: task.comparisonIndex,
     comparisonDelivered: task.comparisonDelivered,
+    ...(task.comparisonPartialDelivered !== undefined
+      ? { comparisonPartialDelivered: task.comparisonPartialDelivered }
+      : {}),
   });
 }

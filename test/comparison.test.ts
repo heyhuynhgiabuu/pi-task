@@ -1,11 +1,12 @@
 import { strict as assert } from "node:assert";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   markComparisonGroupDelivered,
+  markComparisonGroupPartiallyDelivered,
   readTaskSessionHistory,
   upsertTaskSessionHistory,
 } from "../src/conversation.js";
@@ -159,6 +160,209 @@ test("ComparisonCoordinator delivers a bounded partial report for a straggler", 
     "late sibling completion remains consumed by the comparison group",
   );
   assert.equal(sentMessages.length, 1, "late sibling does not emit a duplicate report");
+});
+
+test("ComparisonCoordinator retries a guard-suppressed deadline as a full report when the sibling arrives", async () => {
+  const coordinator = new ComparisonCoordinator({ joinWindowMs: 10 });
+  coordinator.registerGroup(
+    "group-guarded-partial",
+    "base-guarded-partial",
+    "reviewer",
+    "Review auth code",
+    ["task-guarded-a", "task-guarded-b"],
+    ["model-a", "model-b"],
+  );
+  const sentMessages: any[] = [];
+  const fakePi: any = { sendMessage: (message: any) => sentMessages.push(message) };
+  const runA: ComparisonRunResult = {
+    model: "model-a",
+    taskId: "task-guarded-a",
+    status: "success",
+    rawStatus: "done",
+    summary: "Completed model A",
+    findings: "",
+    evidence: "",
+    files: "",
+    caveats: "",
+    nextSteps: "",
+    toolUses: 1,
+    durationMs: 10,
+  };
+  let partialMarkers = 0;
+  coordinator.recordTaskSettled(
+    "task-guarded-a",
+    runA,
+    fakePi,
+    true,
+    undefined,
+    () => false,
+    () => { partialMarkers += 1; },
+  );
+  await sleep(30);
+  assert.equal(sentMessages.length, 0, "guarded partial delivery is suppressed");
+  assert.equal(partialMarkers, 0, "suppressed delivery is not marked durable");
+
+  coordinator.recordTaskSettled(
+    "task-guarded-b",
+    {
+      ...runA,
+      model: "model-b",
+      taskId: "task-guarded-b",
+      summary: "Completed model B",
+    },
+    fakePi,
+  );
+  assert.equal(sentMessages.length, 1, "late sibling still produces one full report");
+  assert.equal(sentMessages[0]?.details.partial, false);
+});
+
+test("partial comparison delivery markers persist and suppress replay", async () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-comparison-partial-marker-"));
+  try {
+    for (const [id, model, index] of [["marker-a", "model-a", 0], ["marker-b", "model-b", 1]] as const) {
+      upsertTaskSessionHistory(piDir, {
+        id,
+        agentType: "reviewer",
+        description: "Partial marker",
+        sessionName: id,
+        startedAt: 100,
+        piDir,
+        dir: piDir,
+        status: index === 0 ? "done" : "running",
+        background: true,
+        comparisonGroupId: "marker-group",
+        comparisonModel: model,
+        comparisonDescription: "Partial marker",
+        comparisonIndex: index,
+      });
+    }
+
+    const coordinator = new ComparisonCoordinator({ joinWindowMs: 10 });
+    coordinator.registerGroup(
+      "marker-group",
+      "marker-group",
+      "reviewer",
+      "Partial marker",
+      ["marker-a", "marker-b"],
+      ["model-a", "model-b"],
+    );
+    coordinator.recordTaskSettled(
+      "marker-a",
+      {
+        model: "model-a",
+        taskId: "marker-a",
+        status: "success",
+        rawStatus: "done",
+        summary: "done",
+        findings: "",
+        evidence: "",
+        files: "",
+        caveats: "",
+        nextSteps: "",
+        toolUses: 1,
+        durationMs: 1,
+      },
+      { sendMessage: () => {} } as any,
+      true,
+      undefined,
+      undefined,
+      (taskIds) => markComparisonGroupPartiallyDelivered(piDir, taskIds),
+    );
+    await sleep(30);
+
+    assert.equal(
+      readTaskSessionHistory(piDir).every((entry) => entry.comparisonPartialDelivered === true),
+      true,
+      "partial delivery marker is persisted for both siblings",
+    );
+    assert.deepEqual(
+      restoreComparisonGroups(piDir, new Map(), new ComparisonCoordinator()),
+      [],
+      "restart replay skips an already delivered partial group",
+    );
+  } finally {
+    rmSync(piDir, { recursive: true, force: true });
+  }
+});
+
+test("replayed comparison groups persist partial delivery markers", async () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-comparison-replay-partial-"));
+  try {
+    const sharedHistory = {
+      agentType: "reviewer",
+      description: "Replay partial",
+      piDir,
+      dir: piDir,
+      background: true,
+      comparisonGroupId: "replay-partial-group",
+      comparisonDescription: "Replay partial",
+    } as const;
+    upsertTaskSessionHistory(piDir, {
+      ...sharedHistory,
+      id: "replay-a",
+      sessionName: "replay-a",
+      startedAt: 100,
+      completedAt: 110,
+      status: "done",
+      reportedStatus: "success",
+      comparisonModel: "model-a",
+      comparisonIndex: 0,
+    });
+    upsertTaskSessionHistory(piDir, {
+      ...sharedHistory,
+      id: "replay-b",
+      sessionName: "replay-b",
+      startedAt: 100,
+      status: "running",
+      comparisonModel: "model-b",
+      comparisonIndex: 1,
+    });
+    const activeSibling: BackgroundTask = {
+      dir: piDir,
+      cwd: piDir,
+      agentType: "reviewer",
+      sessionName: "replay-b",
+      paneId: "pane-replay-b",
+      originalPane: null,
+      description: "Replay partial",
+      startedAt: 100,
+      toolUses: 0,
+      turns: 0,
+      recentCalls: [],
+      comparisonGroupId: "replay-partial-group",
+      comparisonModel: "model-b",
+      comparisonDescription: "Replay partial",
+      comparisonIndex: 1,
+    };
+    const coordinator = new ComparisonCoordinator({ joinWindowMs: 10 });
+    const pendingRuns = restoreComparisonGroups(
+      piDir,
+      new Map([[activeSibling.sessionName, activeSibling]]),
+      coordinator,
+    );
+    assert.deepEqual(pendingRuns.map((run) => run.taskId), ["replay-a"]);
+
+    const sentMessages: any[] = [];
+    coordinator.recordTaskSettled(
+      "replay-a",
+      pendingRuns[0]!,
+      { sendMessage: (message: any) => sentMessages.push(message) } as any,
+      true,
+      undefined,
+      undefined,
+      (taskIds) => markComparisonGroupPartiallyDelivered(piDir, taskIds),
+    );
+    await sleep(30);
+
+    assert.equal(sentMessages.length, 1);
+    assert.equal(sentMessages[0]?.details.partial, true);
+    assert.equal(
+      readTaskSessionHistory(piDir).every((entry) => entry.comparisonPartialDelivered === true),
+      true,
+    );
+  } finally {
+    rmSync(piDir, { recursive: true, force: true });
+  }
 });
 
 test("restores a grouped report when one sibling is only in history", () => {

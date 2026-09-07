@@ -43,6 +43,7 @@ export interface BackgroundTask {
   comparisonDescription?: string;
   comparisonIndex?: 0 | 1;
   comparisonDelivered?: boolean;
+  comparisonPartialDelivered?: boolean;
 }
 
 /** Serializable subset for active task registry persistence. */
@@ -81,6 +82,7 @@ export interface RegistryEntry {
   comparisonDescription?: string;
   comparisonIndex?: 0 | 1;
   comparisonDelivered?: boolean;
+  comparisonPartialDelivered?: boolean;
 }
 
 /** Durable task→session mapping used for resume after task completion. */

@@ -38,6 +38,7 @@ import {
   findTaskSessionHistory,
   repairTaskSessionRef,
   markComparisonGroupDelivered,
+  markComparisonGroupPartiallyDelivered,
   readRegistry,
   readTaskSessionHistory,
   readTaskSessionsRegistry,
@@ -294,6 +295,15 @@ export function restoreComparisonGroups(
 
     const histories = ordered.map((record) => record.history);
     if (
+      ordered.some(
+        (record) =>
+          record.history?.comparisonPartialDelivered === true ||
+          record.task?.comparisonPartialDelivered === true,
+      )
+    ) {
+      continue;
+    }
+    if (
       histories.every(
         (history) =>
           history &&
@@ -501,7 +511,11 @@ export default function (pi: ExtensionAPI) {
     parsed: ParsedResult,
     phase: "done" | "cancelled" | "timeout" | "failed",
   ) => {
+    if (task.comparisonPartialDelivered === true) return true;
     if (!task.comparisonGroupId) return false;
+    if (findTaskSessionHistory(piDir, id)?.comparisonPartialDelivered === true) {
+      return true;
+    }
     const assessment = assessTaskResult(parsed);
     const runResult: ComparisonRunResult = {
       model: task.comparisonModel || task.agentType,
@@ -529,6 +543,7 @@ export default function (pi: ExtensionAPI) {
         const current = taskWidget.getContext();
         return current ? deliveryGuard.allows(sessionViewOf(current), id) : true;
       },
+      (taskIds) => markComparisonGroupPartiallyDelivered(piDir, taskIds),
     );
   };
 
@@ -588,6 +603,8 @@ export default function (pi: ExtensionAPI) {
           pi,
           true,
           (taskIds) => markComparisonGroupDelivered(piDir, taskIds),
+          undefined,
+          (taskIds) => markComparisonGroupPartiallyDelivered(piDir, taskIds),
         );
       } catch {
         // Retry on next restart via durable history.
@@ -1470,6 +1487,7 @@ export default function (pi: ExtensionAPI) {
                     const current = taskWidget.getContext();
                     return current ? deliveryGuard.allows(sessionViewOf(current), s.id) : true;
                   },
+                  (taskIds) => markComparisonGroupPartiallyDelivered(piDir, taskIds),
                 );
               },
               onFailed: (error) => {
@@ -1498,6 +1516,7 @@ export default function (pi: ExtensionAPI) {
                     const current = taskWidget.getContext();
                     return current ? deliveryGuard.allows(sessionViewOf(current), s.id) : true;
                   },
+                  (taskIds) => markComparisonGroupPartiallyDelivered(piDir, taskIds),
                 );
               },
               onSettled: () => {

@@ -21,3 +21,5 @@ export type {
   ComparisonTerminalTask,
   ComparisonTerminalForegroundOptions,
 } from "./comparison-terminal-foreground.js";
+export { registerBackgroundTask } from "./background-registration.js";
+export type { BackgroundTaskRegistrationOptions } from "./background-registration.js";

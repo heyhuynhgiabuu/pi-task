@@ -84,6 +84,7 @@ import {
   createTaskWidgetController,
   executeTerminalForegroundTask,
   executeComparisonTerminalForeground,
+  registerBackgroundTask,
   restoreActiveBackgroundTasks,
   startBackgroundPolling,
   startToolStatsPolling,
@@ -134,7 +135,6 @@ import {
 } from "./tool/index.js";
 import type {
   BackgroundTask,
-  RegistryEntry,
   TerminalHandle,
 } from "./types.js";
 import { ignoreStaleExtensionCtx } from "./stale-ctx.js";
@@ -1919,48 +1919,19 @@ Both subagents are running in background. Results will be compared and delivered
         backend: selectedBackend,
       };
 
-      backgroundTasks.set(id, bgtask);
-
-      deliveryGuard.track(id, sessionViewOf(ctx));
-
-      // ── P0: Persistent registry ────────────────────────────────────────
-      const entry: RegistryEntry = {
+      registerBackgroundTask({
         id,
-        agentType: agent.name,
-        description: descText,
-        sessionName,
-        startedAt: bgtask.startedAt,
-        paneId,
-        handle,
+        task: bgtask,
         piDir,
-        dir: artifactsDir,
-        cwd: taskCwd,
-        conversationId,
-        maxTurns: bgtask.maxTurns,
-        ownerSessionId,
-        ownerLeafId,
-        ownerPid: process.pid,
-      };
-
-      // Write to JSON registry for on-load restore
-      updateRegistry(piDir, (entries) => [...entries, entry]);
-      upsertTaskSessionHistory(piDir, {
-        ...entry,
-        status: "running",
-        background: true,
+        pi,
+        backgroundTasks,
+        trackDelivery: () => deliveryGuard.track(id, sessionViewOf(ctx)),
+        ensureTaskWidget: () => ignoreStaleExtensionCtx(() => ensureTaskWidget(ctx)),
       });
-      // Also persist to session store via appendEntry (audit trail). This is
-      // best-effort because OpenPi can replace sessions while an older pi-task
-      // closure is still unwinding, making captured extension APIs stale. The
-      // JSON registry/history above are the durable source of truth.
-      ignoreStaleExtensionCtx(() => pi.appendEntry("task-registry", entry));
 
       // Do not kill a background subagent when the parent session aborts or is
       // replaced. Background tasks are intentionally detached; the registry and
       // polling loop own their lifecycle after the pane is spawned.
-
-      // ── Sticky widget ──────────────────────────────────────────────────
-      ignoreStaleExtensionCtx(() => ensureTaskWidget(ctx));
 
       return {
         content: [

@@ -33,13 +33,15 @@ function closeTaskResource(task: BackgroundTask): void {
 }
 
 /**
- * Per-process idempotency guard: a task id completes at most once. Without it,
- * a second completeTask call for the same id would re-deliver the task-complete
- * notification and re-close the terminal resource. The only callers (polling,
- * cancel) already guard via the live-map identity check, but this makes the
- * latent double-delivery footgun a no-op for any future caller.
+ * Per-process idempotency guard: one execution completes at most once. A task
+ * id may be intentionally reused by `resume`, so the execution start time is
+ * part of the key rather than treating the durable id as globally unique.
  */
-const completedTaskIds = new Set<string>();
+const completedTaskKeys = new Set<string>();
+
+function completionKey(id: string, task: BackgroundTask): string {
+  return `${id}\u0000${task.startedAt}`;
+}
 
 export interface CompletionDeliveryQueue {
   enqueue(delivery: () => void): void;
@@ -98,7 +100,8 @@ export function completeTask(
   writeRegistryFn: (piDir: string, entries: RegistryEntry[]) => void = writeRegistry,
   deliveryQueue?: CompletionDeliveryQueue,
 ): { cleanupSucceeded: boolean } {
-  if (completedTaskIds.has(id)) {
+  const key = completionKey(id, task);
+  if (completedTaskKeys.has(key)) {
     // Already fully processed in this process: never re-deliver or re-close.
     return { cleanupSucceeded: true };
   }
@@ -208,7 +211,7 @@ export function completeTask(
   // recorded as pending): mark settled BEFORE the best-effort removal write
   // so a failed removal can never trigger a retry that re-closes a resource
   // (herdr close is not idempotent).
-  completedTaskIds.add(id);
+  completedTaskKeys.add(key);
   if (cleanupSucceeded) {
     try {
       if (writeRegistryFn === writeRegistry) {

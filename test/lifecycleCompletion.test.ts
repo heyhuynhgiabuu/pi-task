@@ -273,7 +273,7 @@ test("completeTask records the terminal phase on the live task object", () => {
   assert.equal(task.status, "failed", "panel rows must see the terminal phase");
 });
 
-test("completeTask is idempotent per task id: a second call never re-delivers", () => {
+test("completeTask is idempotent for one execution: a second call never re-delivers", () => {
   const piDir = mkdtempSync(join(tmpdir(), "pi-task-completion-idempotent-"));
   const task: BackgroundTask = {
     dir: join(piDir, "artifacts", "tasks", "task-4"),
@@ -291,8 +291,28 @@ test("completeTask is idempotent per task id: a second call never re-delivers", 
   const closer = () => { resourceCloses++; };
   completeTask(pi, "task-4", task, "first", "done", piDir, closer);
   completeTask(pi, "task-4", task, "second", "cancelled", piDir, closer);
-  assert.equal(deliveries, 1, "a second completeTask for the same id must not re-deliver");
-  assert.equal(resourceCloses, 1, "a second completeTask must not re-close the resource");
+  assert.equal(deliveries, 1, "a second completeTask for one execution must not re-deliver");
+  assert.equal(resourceCloses, 1, "a second completeTask for one execution must not re-close the resource");
+});
+
+test("completeTask allows a resumed task id to complete as a new run", () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-completion-resume-id-"));
+  const mkTask = (startedAt: number): BackgroundTask => ({
+    dir: join(piDir, "artifacts", "tasks", "reused-id"),
+    agentType: "general",
+    sessionName: "task-reused-id",
+    originalPane: null,
+    description: `run-${startedAt}`,
+    startedAt,
+    toolUses: 0,
+    turns: 0,
+  });
+  let deliveries = 0;
+  const pi: any = { sendMessage: () => { deliveries++; } };
+  completeTask(pi, "reused-id", mkTask(1), "first", "done", piDir);
+  completeTask(pi, "reused-id", mkTask(2), "second", "done", piDir);
+  assert.equal(deliveries, 2, "a resumed run with the same id must complete independently");
+  assert.equal(readTaskSessionHistory(piDir).at(-1)?.description, "run-2");
 });
 
 test("completeTask still allows distinct task ids to complete independently", () => {

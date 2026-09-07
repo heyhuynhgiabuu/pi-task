@@ -88,8 +88,10 @@ import {
   restoreActiveBackgroundTasks,
   startBackgroundPolling,
   startToolStatsPolling,
+  durableParentOf,
+  transferTaskOwnership,
 } from "./lifecycle/index.js";
-import { DeliveryGuard, sessionViewOf, type SessionView } from "./panel/delivery.js";
+import { DeliveryGuard, sessionViewOf } from "./panel/delivery.js";
 import {
   formatSdkBackgroundReceipt,
   reconcileStaleSdkBackgroundTasks,
@@ -187,6 +189,7 @@ export default function (pi: ExtensionAPI) {
   }
   // ── Background task tracker ────────────────────────────────────────────
   const { piDir } = discoverAgents(process.cwd(), BUNDLED_AGENT_DIR);
+  const extensionPiDir = piDir;
   const backgroundTasks = new Map<string, BackgroundTask>();
   const foregroundTasks = new Map<string, BackgroundTask>();
   const asyncHerdr = createDefaultHerdrTerminalBackend();
@@ -218,15 +221,6 @@ export default function (pi: ExtensionAPI) {
   // Records which conversation spawned each background task so a result is
   // never delivered into a different conversation or branch.
   const deliveryGuard = new DeliveryGuard();
-  const durableParentOf = (
-    session: SessionView,
-  ): Pick<BackgroundTask, "ownerSessionId" | "ownerLeafId"> => {
-    const ownerSessionId = session.getSessionId();
-    return {
-      ownerSessionId: ownerSessionId || undefined,
-      ownerLeafId: ownerSessionId ? session.getLeafId() : undefined,
-    };
-  };
   const completionDeliveryQueue = createCompletionDeliveryQueue();
   const completeTaskWithDelivery: typeof completeTask = (
     piArg,
@@ -252,46 +246,6 @@ export default function (pi: ExtensionAPI) {
       undefined,
       completionDeliveryQueue,
     );
-
-  // Explicit resume moves lifecycle ownership (issue #20) to the resuming
-  // session: it now drives the pane, so the previous owner's process must
-  // stop restoring and controlling the task.
-  const transferTaskOwnership = (
-    registryEntry: RegistryEntry | undefined,
-    session: SessionView,
-  ): void => {
-    if (!registryEntry) return;
-    const sessionId = session.getSessionId();
-    // Without a session id ownership cannot be expressed; leave the entry as
-    // recorded rather than stripping it.
-    if (!sessionId) return;
-    const parent = durableParentOf(session);
-    if (
-      registryEntry.ownerSessionId === sessionId &&
-      registryEntry.ownerLeafId === parent.ownerLeafId &&
-      registryEntry.ownerPid === process.pid
-    ) {
-      return;
-    }
-    updateRegistry(piDir, (entries) => {
-      const idx = entries.findIndex((e) => e.id === registryEntry.id);
-      if (idx === -1) return entries;
-      entries[idx] = {
-        ...registryEntry,
-        ...parent,
-        ownerPid: process.pid,
-      };
-      return entries;
-    });
-    const history = findTaskSessionHistory(piDir, registryEntry.id);
-    if (history) {
-      upsertTaskSessionHistory(piDir, {
-        ...history,
-        ...parent,
-        ownerPid: process.pid,
-      });
-    }
-  };
 
   // ── Restore active tasks from registry on load ──────────────────────────
 
@@ -790,7 +744,7 @@ export default function (pi: ExtensionAPI) {
           };
                     backgroundTasks.set(id, bgtask);
                     deliveryGuard.track(id, sessionViewOf(ctx));
-                    transferTaskOwnership(entry, sessionViewOf(ctx));
+                    transferTaskOwnership(extensionPiDir, entry, sessionViewOf(ctx));
           const steerResult = steerRunningBackgroundTask(
             bgtask.paneId,
             buildTaskFollowUpPrompt({
@@ -939,7 +893,7 @@ export default function (pi: ExtensionAPI) {
           };
           backgroundTasks.set(id, bgtask);
           deliveryGuard.track(id, sessionViewOf(ctx));
-          transferTaskOwnership(registryEntry, sessionViewOf(ctx));
+          transferTaskOwnership(extensionPiDir, registryEntry, sessionViewOf(ctx));
           const steerResult = steerRunningBackgroundTask(
             bgtask.paneId,
             buildTaskFollowUpPrompt({

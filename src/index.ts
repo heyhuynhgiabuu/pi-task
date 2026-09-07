@@ -66,7 +66,6 @@ import {
   isTaskCompareAllowed,
   parseResultXml,
   resolveCompareModels,
-  shellQuote,
   type ComparisonRunResult,
 } from "./helpers.js";
 import {
@@ -113,6 +112,7 @@ import {
   steerRunningBackgroundTask,
   steerRunningBackgroundTaskAsync,
 } from "./subagent/steer.js";
+import { launchTerminalTask } from "./subagent/terminal-launch.js";
 import {
   checkTaskCompletion,
   waitForTaskCompletion as waitForSessionTaskCompletion,
@@ -122,10 +122,6 @@ import {
   killAgentPane,
   killAgentPaneStrictAsync,
   probePaneAsync,
-  setPaneRemainOnExit,
-  setPaneSelfDestruct,
-  splitWindowPane,
-  writePaneLaunchScript,
 } from "./subagent/tmux.js";
 import {
   buildTaskFollowUpPrompt,
@@ -1358,33 +1354,21 @@ Both subagents are running in background. Results will be compared and delivered
               herdrRequiredExtension ? [herdrRequiredExtension] : undefined,
             );
 
-            let handle: TerminalHandle;
-            let paneId: string;
-            let originalPane: string | null;
-            if (selectedBackend === "herdr") {
-              handle = await herdrBackend.launch({
-                agentArgs: piArgs,
-                initialPrompt: promptContent,
-                cwd: taskCwd,
-                env: { PI_TASK_TOOL_DISABLED: "1" },
-                label: `${agent.name}-${s.id}`,
-                workspaceGroup: taskParams.workspace_group,
-              });
-              paneId = handle.resourceId;
-              originalPane = process.env.HERDR_PANE_ID ?? null;
-            } else {
-              const shellCommand = `PI_TASK_TOOL_DISABLED=1 pi ${piArgs.map((a) => shellQuote(a)).join(" ")}`;
-              const sessionFile = join(s.sessionDir, s.sessionName + ".jsonl");
-              const childCommand = `cd ${shellQuote(taskCwd)} && ${shellCommand}`;
-              const terminalCommand = writePaneLaunchScript(s.sessionDir, sessionFile, childCommand);
-              const splitResult = splitWindowPane(taskCwd, terminalCommand);
-              paneId = splitResult.paneId;
-              originalPane = splitResult.originalPane;
-              handle = { backend: "tmux", resourceId: paneId };
-              setPaneRemainOnExit(paneId, !isBackground);
-              if (isBackground) setPaneSelfDestruct(paneId, true);
-            }
-            terminalTasks.push({ ...s, handle, paneId, originalPane, startedAt });
+            const launched = await launchTerminalTask({
+              backend: selectedBackend,
+              terminalBackend: herdrBackend,
+              agentArgs: piArgs,
+              initialPrompt: promptContent,
+              cwd: taskCwd,
+              sessionDir: s.sessionDir,
+              sessionName: s.sessionName,
+              environment: { PI_TASK_TOOL_DISABLED: "1" },
+              label: `${agent.name}-${s.id}`,
+              workspaceGroup: taskParams.workspace_group,
+              remainOnExit: !isBackground,
+              selfDestruct: isBackground,
+            });
+            terminalTasks.push({ ...s, ...launched, startedAt });
           }
         } catch (error) {
           for (const t of terminalTasks) {
@@ -1967,35 +1951,26 @@ Both subagents are running in background. Results will be compared and delivered
       let originalPane: string | null;
       let handle: TerminalHandle;
       try {
-        if (selectedBackend === "herdr") {
-          handle = await herdrBackend.launch({
-            agentArgs: piArgs,
-            initialPrompt: promptContent,
-            cwd: taskCwd,
-            env: { PI_TASK_TOOL_DISABLED: "1" },
-            label: `${agent.name}-${id.slice(0, 8)}`,
-            workspaceGroup: taskParams.workspace_group,
-          });
-          paneId = handle.resourceId;
-          originalPane = process.env.HERDR_PANE_ID ?? null;
-        } else {
-          const shellCommand = `PI_TASK_TOOL_DISABLED=1 pi ${piArgs.map((a) => shellQuote(a)).join(" ")}`;
-          const sessionFile = join(sessionDir, sessionName + ".jsonl");
-          const childCommand = `cd ${shellQuote(taskCwd)} && ${shellCommand}`;
-          const terminalCommand = writePaneLaunchScript(sessionDir, sessionFile, childCommand);
-          const splitResult = splitWindowPane(taskCwd, terminalCommand);
-          paneId = splitResult.paneId;
-          originalPane = splitResult.originalPane;
-          handle = { backend: "tmux", resourceId: paneId };
-          setPaneRemainOnExit(paneId, Boolean(foregroundTask));
-        }
+        const launched = await launchTerminalTask({
+          backend: selectedBackend,
+          terminalBackend: herdrBackend,
+          agentArgs: piArgs,
+          initialPrompt: promptContent,
+          cwd: taskCwd,
+          sessionDir,
+          sessionName,
+          environment: { PI_TASK_TOOL_DISABLED: "1" },
+          label: `${agent.name}-${id.slice(0, 8)}`,
+          workspaceGroup: taskParams.workspace_group,
+          remainOnExit: Boolean(foregroundTask),
+          selfDestruct: !foregroundTask,
+        });
+        ({ handle, paneId, originalPane } = launched);
         if (foregroundTask) {
           foregroundTask.backend = selectedBackend;
           foregroundTask.paneId = paneId;
           foregroundTask.handle = handle;
           foregroundTask.originalPane = originalPane;
-        } else if (selectedBackend === "tmux") {
-          setPaneSelfDestruct(paneId, true);
         }
       } catch (error) {
         foregroundTasks.delete(id);

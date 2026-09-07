@@ -144,3 +144,53 @@ test("finished rows expire from the idle widget after their linger window", () =
   );
   controller.dispose();
 });
+
+test("panel stop awaits async cleanup and suppresses duplicate requests", async () => {
+  const foreground = new Map<string, BackgroundTask>([["task-1", makeTask()]]);
+  let release!: () => void;
+  const cleanupFinished = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let cleanupCalls = 0;
+  let editorFactory: ((tui: unknown, theme: unknown, keybindings: unknown) => {
+    handleInput(data: string): void;
+  }) | undefined;
+  const context = {
+    mode: "tui",
+    hasUI: true,
+    ui: {
+      getEditorComponent: () => undefined,
+      setEditorComponent: (factory: typeof editorFactory) => {
+        editorFactory = factory;
+      },
+      notify: () => {},
+    },
+  } as any;
+  const controller = createTaskWidgetController(
+    foreground,
+    new Map(),
+    {
+      steerTask: () => null,
+      stopTask: async () => {
+        cleanupCalls++;
+        await cleanupFinished;
+        return null;
+      },
+    },
+  );
+  controller.ensurePanelEditor(context);
+  const editor = editorFactory?.({}, {}, {});
+  assert.ok(editor);
+
+  editor.handleInput("\x1b[B");
+  editor.handleInput("\x1b[B");
+  editor.handleInput("x");
+  await Promise.resolve();
+  editor.handleInput("x");
+  assert.equal(cleanupCalls, 1);
+
+  release();
+  await cleanupFinished;
+  await Promise.resolve();
+  controller.dispose();
+});

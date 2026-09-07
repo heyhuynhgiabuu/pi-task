@@ -111,7 +111,6 @@ import {
 import {
   hasTmux,
   killAgentPane,
-  killAgentPaneStrict,
   killAgentPaneStrictAsync,
   probePane,
   probePaneAsync,
@@ -371,15 +370,16 @@ export default function (pi: ExtensionAPI) {
     throw new Error(`Invalid PI_TASK_TOOL_NAME: ${taskToolName}`);
   }
   // ── Background task tracker ────────────────────────────────────────────
-      const { piDir } = discoverAgents(process.cwd(), BUNDLED_AGENT_DIR);
-      const backgroundTasks = new Map<string, BackgroundTask>();
-      const foregroundTasks = new Map<string, BackgroundTask>();
+  const { piDir } = discoverAgents(process.cwd(), BUNDLED_AGENT_DIR);
+  const backgroundTasks = new Map<string, BackgroundTask>();
+  const foregroundTasks = new Map<string, BackgroundTask>();
+  const asyncHerdr = createDefaultHerdrTerminalBackend();
   const taskWidget = createTaskWidgetController(foregroundTasks, backgroundTasks, {
     steerTask: (task, text) => {
       const result = steerRunningBackgroundTask(task.paneId, text, task.handle);
       return result.ok ? null : result.reason;
     },
-    stopTask: (task) => {
+    stopTask: async (task) => {
       if (task.backend === "sdk") {
         return "SDK tasks cannot be stopped from the panel yet.";
       }
@@ -388,9 +388,9 @@ export default function (pi: ExtensionAPI) {
           if (task.handle.foregroundProcessGroupId === undefined) {
             return "HerdR cleanup requires persisted agent identity";
           }
-          createSyncHerdrControl().close(task.handle);
+          await asyncHerdr.close(task.handle);
         } else if (task.paneId) {
-          killAgentPaneStrict(task.paneId, task.originalPane);
+          await killAgentPaneStrictAsync(task.paneId, task.originalPane);
         }
         return null;
       } catch (error) {
@@ -461,7 +461,6 @@ export default function (pi: ExtensionAPI) {
   // ── Restore active tasks from registry on load ──────────────────────────
 
   const syncHerdr = createSyncHerdrControl();
-  const asyncHerdr = createDefaultHerdrTerminalBackend();
   const registryEntryStatus = (entry: RegistryEntry): "alive" | "missing" | "unavailable" => {
     if (entry.handle?.backend === "herdr") {
       try {

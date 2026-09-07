@@ -29,7 +29,7 @@ export interface TaskWidgetControllerDeps {
   /** Steer a running task; returns an error message or null on success. */
   steerTask: (task: BackgroundTask, text: string) => string | null;
   /** Stop a running task's terminal resource; error message or null on success. */
-  stopTask: (task: BackgroundTask) => string | null;
+  stopTask: (task: BackgroundTask) => string | null | Promise<string | null>;
   /** Clock for linger/ordering logic (test seam; defaults to Date.now). */
   now?: () => number;
 }
@@ -63,6 +63,7 @@ export function createTaskWidgetController(
   let panelState: PanelViewState = { selection: null, viewTaskId: null };
   const now = () => deps?.now?.() ?? Date.now();
   const finishedTasks = new Map<string, FinishedTask>();
+  const stoppingTaskIds = new Set<string>();
   let activePane: TaskTranscriptPane | undefined;
 
   // ── Row building ──────────────────────────────────────────────────────────
@@ -252,11 +253,20 @@ export function createTaskWidgetController(
       return;
     }
     const task = findTask(taskId);
-    if (!task) return;
-    const error = deps?.stopTask(task);
-    if (error) {
-      widgetCtx?.ui.notify(error, "error");
-    }
+    if (!task || stoppingTaskIds.has(taskId)) return;
+    stoppingTaskIds.add(taskId);
+    Promise.resolve()
+      .then(() => deps?.stopTask(task))
+      .then((error) => {
+        if (error) widgetCtx?.ui.notify(error, "error");
+      })
+      .catch((error: unknown) => {
+        widgetCtx?.ui.notify(error instanceof Error ? error.message : String(error), "error");
+      })
+      .finally(() => {
+        stoppingTaskIds.delete(taskId);
+        requestRender();
+      });
   }
 
   const host: TaskPanelHost = {

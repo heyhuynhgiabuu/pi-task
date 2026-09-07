@@ -159,6 +159,46 @@ export async function probePaneAsync(
   }
 }
 
+export async function paneDeadAsync(
+  paneId: string,
+  run: AsyncTmuxCommand = defaultAsyncTmuxCommand,
+): Promise<boolean> {
+  const probe = await probePaneAsync(paneId, run);
+  if (probe.state === "missing" || probe.state === "unavailable") {
+    return probe.state === "missing";
+  }
+  try {
+    return (await run([
+      "display-message",
+      "-p",
+      "-t",
+      paneId,
+      "#{pane_dead}",
+    ])).trim() === "1";
+  } catch {
+    return false;
+  }
+}
+
+export async function capturePaneTailAsync(
+  paneId: string,
+  lines = 80,
+  run: AsyncTmuxCommand = defaultAsyncTmuxCommand,
+): Promise<string> {
+  try {
+    return await run([
+      "capture-pane",
+      "-p",
+      "-t",
+      paneId,
+      "-S",
+      `-${Math.max(1, lines)}`,
+    ]);
+  } catch {
+    return "";
+  }
+}
+
 export function paneExists(paneId: string): boolean {
   return probePane(paneId).state === "alive";
 }

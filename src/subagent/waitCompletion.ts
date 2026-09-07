@@ -3,11 +3,11 @@ import {
   getLastAssistantTextFromSessionDir,
 } from "../session-text.js";
 import {
-  enrichSubagentFailureMessage,
+  enrichSubagentFailureMessageAsync,
   sessionJsonlExists,
 } from "./failure-diagnostics.js";
 import { readExitSentinel } from "./exitSentinel.js";
-import { paneDead, probePane } from "./tmux.js";
+import { paneDeadAsync, probePane } from "./tmux.js";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -68,15 +68,15 @@ function readSessionResult(
 const POST_PANE_EXIT_FLUSH_MS = 2500;
 const POST_PANE_EXIT_RETRY_MS = 2500;
 
-function reportPaneExitFailure(
+async function reportPaneExitFailure(
   options: Pick<
     WaitForTaskCompletionOptions,
     "paneId" | "artifactsDir" | "taskId" | "sessionDir"
   >,
-): string {
+): Promise<string> {
   const base = "Subagent pane exited without producing a result.";
   if (!options.paneId) return base;
-  return enrichSubagentFailureMessage({
+  return enrichSubagentFailureMessageAsync({
     kind: "pane_exit",
     baseMessage: base,
     paneId: options.paneId,
@@ -86,20 +86,20 @@ function reportPaneExitFailure(
   });
 }
 
-function enrichEmptySessionFailure(
+async function enrichEmptySessionFailure(
   snapshot: TaskCompletionSnapshot,
   options: Pick<
     WaitForTaskCompletionOptions,
     "paneId" | "artifactsDir" | "taskId" | "sessionDir"
   >,
-): TaskCompletionSnapshot {
+): Promise<TaskCompletionSnapshot> {
   if (
     snapshot.status !== "failed" ||
     snapshot.content !== "Subagent finished without producing a result."
   ) {
     return snapshot;
   }
-  return { ...snapshot, content: reportPaneExitFailure(options) };
+  return { ...snapshot, content: await reportPaneExitFailure(options) };
 }
 
 function normalizeResourceState(value: ResourceProbe): ResourceState {
@@ -129,7 +129,7 @@ export async function checkTaskCompletion(
       options.sessionName,
       options.sinceMs,
     );
-    if (firstPass) return enrichEmptySessionFailure(firstPass, options);
+    if (firstPass) return await enrichEmptySessionFailure(firstPass, options);
     await sleep(POST_PANE_EXIT_RETRY_MS);
   }
 
@@ -166,7 +166,7 @@ export async function checkTaskCompletion(
 
   const finalResourceState = await getResourceState(options);
   if (deferredSessionFailure && finalResourceState === "missing") {
-    return enrichEmptySessionFailure(deferredSessionFailure, options);
+    return await enrichEmptySessionFailure(deferredSessionFailure, options);
   }
   if (
     (options.paneId || options.resourceExists) &&
@@ -179,7 +179,7 @@ export async function checkTaskCompletion(
 
   return {
     status: "failed",
-    content: reportPaneExitFailure(options),
+    content: await reportPaneExitFailure(options),
     source: "pane",
   };
 }
@@ -219,12 +219,12 @@ export async function waitForTaskCompletion(
     options.sessionName,
     options.sinceMs,
   );
-  if (finalSessionResult) return enrichEmptySessionFailure(finalSessionResult, options);
+  if (finalSessionResult) return await enrichEmptySessionFailure(finalSessionResult, options);
 
   const base = `Task timed out after ${Math.round(timeoutMs / 1000)}s without producing a result.`;
   let content = base;
-  if (options.paneId && paneDead(options.paneId)) {
-    content = enrichSubagentFailureMessage({
+  if (options.paneId && await paneDeadAsync(options.paneId)) {
+    content = await enrichSubagentFailureMessageAsync({
       kind: "timeout",
       baseMessage: base,
       paneId: options.paneId,
@@ -237,7 +237,7 @@ export async function waitForTaskCompletion(
     options.taskId &&
     !sessionJsonlExists(options.artifactsDir, options.taskId)
   ) {
-    content = enrichSubagentFailureMessage({
+    content = await enrichSubagentFailureMessageAsync({
       kind: "timeout",
       baseMessage: base,
       artifactsDir: options.artifactsDir,

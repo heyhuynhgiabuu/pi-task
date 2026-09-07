@@ -1,6 +1,12 @@
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { capturePaneTail, paneDead } from "./tmux.js";
+import {
+  capturePaneTail,
+  capturePaneTailAsync,
+  paneDead,
+  paneDeadAsync,
+  type AsyncTmuxCommand,
+} from "./tmux.js";
 
 const MAX_PANE_CHARS = 4000;
 
@@ -27,16 +33,17 @@ function sanitizePaneCapture(raw: string): string {
 
 export type SubagentFailureKind = "pane_exit" | "no_result" | "timeout";
 
-export function enrichSubagentFailureMessage(input: {
+export interface FailureDiagnosticsInput {
   kind: SubagentFailureKind;
   baseMessage: string;
   paneId?: string;
   artifactsDir?: string;
   taskId?: string;
   elapsedMs?: number;
-}): string {
-  const lines: string[] = [input.baseMessage, ""];
+}
 
+function buildFailureDiagnosticsPrefix(input: FailureDiagnosticsInput): string[] {
+  const lines: string[] = [input.baseMessage, ""];
   if (input.artifactsDir && input.taskId) {
     const sessionDir = sessionDirForTask(input.artifactsDir, input.taskId);
     const hasJsonl = sessionJsonlExists(input.artifactsDir, input.taskId);
@@ -49,7 +56,11 @@ export function enrichSubagentFailureMessage(input: {
     }
     lines.push("");
   }
+  return lines;
+}
 
+export function enrichSubagentFailureMessage(input: FailureDiagnosticsInput): string {
+  const lines = buildFailureDiagnosticsPrefix(input);
   if (input.paneId) {
     const dead = paneDead(input.paneId);
     lines.push(`Tmux pane ${input.paneId}: ${dead ? "dead" : "still alive"}`);
@@ -57,6 +68,27 @@ export function enrichSubagentFailureMessage(input: {
       lines.push("", "Last lines from subagent pane:", "---", sanitizePaneCapture(capturePaneTail(input.paneId, 120)), "---");
     }
   }
+  return lines.join("\n").trimEnd();
+}
 
+/** Async diagnostics for lifecycle paths; avoids synchronous tmux CLI calls. */
+export async function enrichSubagentFailureMessageAsync(
+  input: FailureDiagnosticsInput,
+  run?: AsyncTmuxCommand,
+): Promise<string> {
+  const lines = buildFailureDiagnosticsPrefix(input);
+  if (input.paneId) {
+    const dead = await paneDeadAsync(input.paneId, run);
+    lines.push(`Tmux pane ${input.paneId}: ${dead ? "dead" : "still alive"}`);
+    if (dead) {
+      lines.push(
+        "",
+        "Last lines from subagent pane:",
+        "---",
+        sanitizePaneCapture(await capturePaneTailAsync(input.paneId, 120, run)),
+        "---",
+      );
+    }
+  }
   return lines.join("\n").trimEnd();
 }

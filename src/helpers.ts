@@ -5,7 +5,7 @@
  * unit-testable with node:assert/strict.
  */
 
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, dirname, basename, resolve } from "node:path";
 import {
   parseToolList,
@@ -982,7 +982,71 @@ function stripProactivePrefix(description: string): string {
       return false;
     }
     
-    /** Count tool uses and turns from pi JSONL session files. */
+type JsonlScanCacheEntry<T> = {
+  signature: string;
+  value: T;
+};
+
+const JSONL_SCAN_CACHE_LIMIT = 128;
+const countToolUsesCache = new Map<
+  string,
+  JsonlScanCacheEntry<{ toolUses: number; turns: number }>
+>();
+const recentToolCallsCache = new Map<
+  string,
+  JsonlScanCacheEntry<{
+    toolUses: number;
+    turns: number;
+    recent: ToolCallRecord[];
+  }>
+>();
+
+/**
+ * Return a cheap directory fingerprint so repeated polling can reuse a scan
+ * while a session's JSONL files are unchanged. A failed stat is not cached:
+ * transient filesystem errors must not freeze stale progress in the widget.
+ */
+function jsonlDirectorySignature(sessionDir: string): string | undefined {
+  try {
+    if (!existsSync(sessionDir)) return "missing";
+
+    const files = readdirSync(sessionDir)
+      .filter((file) => file.endsWith(".jsonl"))
+      .sort();
+    return files
+      .map((file) => {
+        const stat = statSync(join(sessionDir, file));
+        return `${file}:${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}`;
+      })
+      .join("|");
+  } catch {
+    return undefined;
+  }
+}
+
+function cachedJsonlScan<T>(
+  cache: Map<string, JsonlScanCacheEntry<T>>,
+  key: string,
+  signature: string | undefined,
+  scan: () => T,
+): T {
+  if (signature !== undefined) {
+    const hit = cache.get(key);
+    if (hit?.signature === signature) return hit.value;
+  }
+
+  const value = scan();
+  if (signature !== undefined) {
+    if (cache.size >= JSONL_SCAN_CACHE_LIMIT && !cache.has(key)) {
+      const oldest = cache.keys().next().value;
+      if (oldest !== undefined) cache.delete(oldest);
+    }
+    cache.set(key, { signature, value });
+  }
+  return value;
+}
+
+/** Count tool uses and turns from pi JSONL session files. */
     export function countToolUses(
       sessionDir: string,
       sessionName?: string,
@@ -990,43 +1054,51 @@ function stripProactivePrefix(description: string): string {
       toolUses: number;
       turns: number;
     } {
-      let toolUses = 0;
-      let turns = 0;
-    
-      try {
-        if (!existsSync(sessionDir)) return { toolUses, turns };
-    
-        const files = readdirSync(sessionDir).filter((f) => f.endsWith(".jsonl"));
-        for (const file of files) {
-          const content = readFileSync(join(sessionDir, file), "utf-8");
-          if (!matchesJsonlSessionName(content, sessionName)) continue;
+      const signature = jsonlDirectorySignature(sessionDir);
+      const key = `${sessionDir}\0${sessionName ?? ""}`;
+      let scanFailed = false;
+      const result = cachedJsonlScan(countToolUsesCache, key, signature, () => {
+        let toolUses = 0;
+        let turns = 0;
 
-          for (const rawLine of content.split("\n")) {
-            const line = rawLine.trim();
-            if (!line) continue;
-    
-            try {
-              const entry = JSON.parse(line);
-              if (
-                entry.type === "message" &&
-                entry.message?.role === "assistant" &&
-                Array.isArray(entry.message.content)
-              ) {
-                turns++;
-                for (const block of entry.message.content) {
-                  if (block.type === "toolCall") toolUses++;
+        try {
+          if (!existsSync(sessionDir)) return { toolUses, turns };
+
+          const files = readdirSync(sessionDir).filter((f) => f.endsWith(".jsonl"));
+          for (const file of files) {
+            const content = readFileSync(join(sessionDir, file), "utf-8");
+            if (!matchesJsonlSessionName(content, sessionName)) continue;
+
+            for (const rawLine of content.split("\n")) {
+              const line = rawLine.trim();
+              if (!line) continue;
+
+              try {
+                const entry = JSON.parse(line);
+                if (
+                  entry.type === "message" &&
+                  entry.message?.role === "assistant" &&
+                  Array.isArray(entry.message.content)
+                ) {
+                  turns++;
+                  for (const block of entry.message.content) {
+                    if (block.type === "toolCall") toolUses++;
+                  }
                 }
+              } catch {
+                // Skip malformed lines
               }
-            } catch {
-              // Skip malformed lines
             }
           }
+        } catch {
+          // Session dir might not exist or be inaccessible
+          scanFailed = true;
         }
-      } catch {
-        // Session dir might not exist or be inaccessible
-      }
-    
-      return { toolUses, turns };
+
+        return { toolUses, turns };
+      });
+      if (scanFailed) countToolUsesCache.delete(key);
+      return { ...result };
     }
 
 // ─── JSONL Session Helpers — streaming ───────────────────────────────────────
@@ -1098,9 +1170,13 @@ export function summarizeArgs(toolName: string, args: unknown): string {
       turns: number;
       recent: ToolCallRecord[];
     } {
-  let toolUses = 0;
-  let turns = 0;
-  const calls: Array<{
+  const signature = jsonlDirectorySignature(sessionDir);
+  const key = `${sessionDir}\0${sessionName ?? ""}\0${limit}`;
+  let scanFailed = false;
+  const result = cachedJsonlScan(recentToolCallsCache, key, signature, () => {
+    let toolUses = 0;
+    let turns = 0;
+    const calls: Array<{
     name: string;
     detail: string;
     id: string;
@@ -1169,6 +1245,7 @@ export function summarizeArgs(toolName: string, args: unknown): string {
       }
     }
   } catch {
+    scanFailed = true;
     return { toolUses, turns, recent: [] };
   }
 
@@ -1191,8 +1268,11 @@ export function summarizeArgs(toolName: string, args: unknown): string {
     };
   });
 
-  const recent = all.slice(Math.max(0, all.length - limit));
-  return { toolUses, turns, recent };
+    const recent = all.slice(Math.max(0, all.length - limit));
+    return { toolUses, turns, recent };
+  });
+  if (scanFailed) recentToolCallsCache.delete(key);
+  return { ...result, recent: result.recent.map((call) => ({ ...call })) };
 }
 
 export function formatElapsed(ms: number): string {

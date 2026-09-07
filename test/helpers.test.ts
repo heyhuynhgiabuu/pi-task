@@ -5,7 +5,13 @@
  */
 
 import { strict as assert } from "node:assert";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import {
+  appendFileSync,
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
 import { resolveAgentToolAllowlist } from "../src/agent-tools.js";
@@ -417,6 +423,53 @@ import {
   assert.equal(r.toolUses, 0, t + " toolUses");
   assert.equal(r.turns, 0, t + " turns");
   assert.deepEqual(r.recent, [], t + " recent");
+}
+
+{
+  const t = "JSONL scan cache invalidates when a session file grows";
+  const dir = mkdtempSync(join(tmpdir(), "task-test-recent-cache-"));
+  try {
+    const file = join(dir, "session.jsonl");
+    writeFileSync(
+      file,
+      JSON.stringify({
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "c1", name: "read", arguments: {} }],
+        },
+      }) + "\n",
+    );
+
+    assert.equal(countToolUses(dir).toolUses, 1, t + " initial count");
+    assert.equal(readRecentToolCalls(dir).recent[0].status, "in_progress", t + " initial status");
+
+    appendFileSync(
+      file,
+      [
+        JSON.stringify({
+          type: "message",
+          message: { role: "toolResult", toolCallId: "c1", isError: false },
+        }),
+        JSON.stringify({
+          type: "message",
+          message: {
+            role: "assistant",
+            content: [{ type: "toolCall", id: "c2", name: "read", arguments: {} }],
+          },
+        }),
+      ].join("\n") + "\n",
+    );
+
+    assert.equal(countToolUses(dir).toolUses, 2, t + " updated count");
+    assert.equal(
+      readRecentToolCalls(dir).recent.find((call) => call.id === "c1")?.status,
+      "done",
+      t + " updated status",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 {

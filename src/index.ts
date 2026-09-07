@@ -108,7 +108,8 @@ import {
   createSyncHerdrControl,
   resolveHerdrPiIntegrationExtension,
 } from "./subagent/herdr.js";
-import { describeCommandFailure, selectTerminalBackend } from "./subagent/terminalBackend.js";
+import { describeCommandFailure } from "./subagent/terminalBackend.js";
+import { resolveTaskBackend } from "./subagent/selectBackend.js";
 import {
   steerRunningBackgroundTask,
   steerRunningBackgroundTaskAsync,
@@ -941,36 +942,23 @@ export default function (pi: ExtensionAPI) {
           await mkdir(sessionDir, { recursive: true });
 
       // ─── Build and run the sub-agent pi process ──────────────────────────
-      const legacyRequestedBackend = process.env.PI_TASK_USE_TMUX_BACKEND === "1"
-        ? "tmux"
-        : process.env.PI_TASK_USE_SDK_BACKEND === "1"
-          ? "sdk"
-          : undefined;
-      const requestedBackend = (legacyRequestedBackend ?? process.env.PI_TASK_BACKEND ?? "auto").trim().toLowerCase();
-      if (!["auto", "sdk", "tmux", "herdr"].includes(requestedBackend)) {
+      const backendResolution = await resolveTaskBackend();
+      if (!backendResolution.ok) {
         return {
-          content: [{ type: "text", text: `Invalid PI_TASK_BACKEND=${requestedBackend}. Expected auto, sdk, tmux, or herdr.` }],
-          details: { phase: "failed" as const, error: "invalid backend" },
+          content: [{ type: "text", text: backendResolution.error }],
+          details: {
+            phase: "failed" as const,
+            error: backendResolution.kind === "invalid"
+              ? "invalid backend"
+              : backendResolution.error,
+          },
         };
       }
-      const herdrBackend = createDefaultHerdrTerminalBackend();
-      const hasHerdr = requestedBackend === "auto" || requestedBackend === "herdr"
-        ? await herdrBackend.available()
-        : false;
-      const selectedBackend = selectTerminalBackend({
-        requested: requestedBackend as "auto" | "sdk" | "tmux" | "herdr",
-        hasHerdr,
-        hasTmux: hasTmux(),
-      });
-      if (!selectedBackend) {
-        const error = requestedBackend === "herdr"
-          ? "HerdR backend requires Pi to run inside an active HerdR pane with HERDR_SOCKET_PATH set. Start Pi from HerdR; `herdr integration install pi` is optional."
-          : `Requested ${requestedBackend} backend is unavailable.`;
-        return {
-          content: [{ type: "text", text: error }],
-          details: { phase: "failed" as const, error },
-        };
-      }
+      const {
+        requestedBackend,
+        selectedBackend,
+        herdrBackend,
+      } = backendResolution;
       const effectiveFast = resolveTaskFastMode(taskParams.fast, agent.fast);
 
       if (taskParams.compare) {

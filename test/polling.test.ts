@@ -18,6 +18,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { BACKGROUND_POLL_CONCURRENCY } from "../src/constants.js";
 import { startBackgroundPolling } from "../src/lifecycle/polling.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -313,6 +314,112 @@ function makeDeps(
   stop();
 
   assert.equal(completeCount, 1, `${t}: expected exactly one completion`);
+}
+
+{
+  const t = "a slow task does not block a sibling completion check";
+  const backgroundTasks = new Map<any, any>([
+    ["slow", {
+      dir: "/tmp/pi-task-artifacts",
+      sessionName: "slow",
+      paneId: "%1",
+      originalPane: null,
+      startedAt: Date.now(),
+    }],
+    ["fast", {
+      dir: "/tmp/pi-task-artifacts",
+      sessionName: "fast",
+      paneId: "%2",
+      originalPane: null,
+      startedAt: Date.now(),
+    }],
+  ]);
+  let releaseSlow!: () => void;
+  const slowCheck = new Promise<void>((resolve) => {
+    releaseSlow = resolve;
+  });
+  let slowStarted = false;
+  let fastCompletedBeforeSlowReleased = false;
+  const stop = startBackgroundPolling(
+    makeDeps({
+      backgroundTasks,
+      checkTaskCompletion: async ({ taskId }: { taskId?: string }) => {
+        if (taskId === "slow") {
+          slowStarted = true;
+          await slowCheck;
+          return { status: "running", content: "" };
+        }
+        fastCompletedBeforeSlowReleased = true;
+        return { status: "completed", content: "fast done" };
+      },
+      completeTask: () => {},
+    }),
+    5,
+  );
+  try {
+    await sleep(40);
+    assert.equal(slowStarted, true, `${t}: slow check started`);
+    assert.equal(
+      fastCompletedBeforeSlowReleased,
+      true,
+      `${t}: fast sibling was checked before slow check released`,
+    );
+  } finally {
+    stop();
+    releaseSlow();
+    await sleep(20);
+  }
+}
+
+{
+  const t = "polling bounds concurrent completion checks";
+  const backgroundTasks = new Map<any, any>(
+    Array.from({ length: 6 }, (_, index) => [
+      `task-${index}`,
+      {
+        dir: "/tmp/pi-task-artifacts",
+        sessionName: `task-${index}`,
+        paneId: `%${index}`,
+        originalPane: null,
+        startedAt: Date.now(),
+      },
+    ]),
+  );
+  let activeChecks = 0;
+  let maxActiveChecks = 0;
+  let startedChecks = 0;
+  const releases: Array<() => void> = [];
+  const stop = startBackgroundPolling(
+    makeDeps({
+      backgroundTasks,
+      checkTaskCompletion: async () => {
+        startedChecks += 1;
+        activeChecks += 1;
+        maxActiveChecks = Math.max(maxActiveChecks, activeChecks);
+        await new Promise<void>((resolve) => releases.push(resolve));
+        activeChecks -= 1;
+        return { status: "running", content: "" };
+      },
+    }),
+    5,
+  );
+  try {
+    await sleep(40);
+    assert.equal(
+      startedChecks,
+      BACKGROUND_POLL_CONCURRENCY,
+      `${t}: only the configured number of checks start in the first wave`,
+    );
+    assert.equal(
+      maxActiveChecks,
+      BACKGROUND_POLL_CONCURRENCY,
+      `${t}: active checks are bounded at the configured limit`,
+    );
+  } finally {
+    stop();
+    for (const release of releases) release();
+    await sleep(20);
+  }
 }
 
 {

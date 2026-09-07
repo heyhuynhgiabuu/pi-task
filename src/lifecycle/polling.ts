@@ -1,6 +1,10 @@
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { WRAP_UP_GRACE_TURNS, turnLimitWrapUpPrompt } from "../constants.js";
+import {
+  BACKGROUND_POLL_CONCURRENCY,
+  WRAP_UP_GRACE_TURNS,
+  turnLimitWrapUpPrompt,
+} from "../constants.js";
 import {
   getLastAssistantResultFromSessionDir,
   getLastAssistantTextFromSessionDir,
@@ -89,121 +93,144 @@ export function startBackgroundPolling(
     }
     pollErrors.delete(id);
   };
+  const pollTask = async (id: string, task: BackgroundTask): Promise<void> => {
+    if (task.backend === "sdk") return;
+    try {
+      const sessionDir = join(task.dir, "sessions", id);
+      const elapsed = Date.now() - task.startedAt;
+      if (elapsed > deps.TASK_TIMEOUT_MS) {
+        if (deps.backgroundTasks.get(id) !== task) return;
+        const terminalResult = getLastAssistantResultFromSessionDir(
+          sessionDir,
+          task.sessionName,
+          task.startedAt,
+        );
+        const timeoutContent =
+          terminalResult?.content ||
+          `Task timed out after ${Math.round(deps.TASK_TIMEOUT_MS / 1000)}s without producing a result.`;
+        settle(
+          id,
+          task,
+          timeoutContent,
+          terminalResult?.status === "completed" ? "done" :
+            terminalResult?.status === "failed" ? "failed" : "timeout",
+        );
+        return;
+      }
+
+      // Turn-based soft limit (issue #19): steer a wrap-up at the limit,
+      // allow a bounded grace of further turns, then settle with whatever
+      // the subagent produced instead of discarding it. SDK tasks are
+      // skipped above (no terminal session to steer).
+      if (task.maxTurns !== undefined) {
+        const readPartial = () =>
+          getLastAssistantTextFromSessionDir(
+            sessionDir,
+            task.sessionName,
+            task.startedAt,
+          );
+        const settleAtLimit = (reason: string) =>
+          settle(
+            id,
+            task,
+            `${readPartial() || "No assistant output captured."}\n\nTask reached the ${task.maxTurns}-turn limit${reason}`,
+            "timeout",
+          );
+        if (!task.wrapUp && task.turns >= task.maxTurns) {
+          task.wrapUp = { turnsAtStart: task.turns };
+          const steered = deps.steerTask?.(task, turnLimitWrapUpPrompt(task.maxTurns)) ?? false;
+          if (!steered) {
+            if (deps.backgroundTasks.get(id) !== task) return;
+            settleAtLimit("; wrap-up steering failed.");
+            return;
+          }
+        } else if (
+          task.wrapUp &&
+          task.turns >= task.wrapUp.turnsAtStart + WRAP_UP_GRACE_TURNS
+        ) {
+          if (deps.backgroundTasks.get(id) !== task) return;
+          settleAtLimit(` and did not wrap up within ${WRAP_UP_GRACE_TURNS} further turns.`);
+          return;
+        }
+      }
+
+      const snapshot = await deps.checkTaskCompletion({
+        sessionDir,
+        sessionName: task.sessionName,
+        paneId: task.paneId,
+        artifactsDir: task.dir,
+        taskId: id,
+        sinceMs: task.startedAt,
+        resourceExists: deps.resourceExists ? () => deps.resourceExists!(task) : undefined,
+        exitSentinelPath: task.exitSentinelPath,
+      });
+
+      if (stopped) return;
+
+      if (snapshot.status === "completed") {
+        if (deps.backgroundTasks.get(id) !== task) return;
+        settle(id, task, snapshot.content, "done");
+      } else if (snapshot.status === "failed" || snapshot.status === "timeout") {
+        if (deps.backgroundTasks.get(id) !== task) return;
+        settle(
+          id,
+          task,
+          snapshot.content,
+          snapshot.status === "timeout" ? "timeout" : "failed",
+        );
+      }
+    } catch (error) {
+      if (error instanceof Error && error.name === "HerdrUnavailableError") {
+        return;
+      }
+      const count = (pollErrors.get(id) ?? 0) + 1;
+      pollErrors.set(id, count);
+      if (count >= deps.MAX_POLL_ERRORS) {
+        if (deps.backgroundTasks.get(id) !== task) return;
+        try {
+          settle(
+            id,
+            task,
+            `Background task polling failed: ${error instanceof Error ? error.message : String(error)}`,
+            "failed",
+          );
+        } catch {
+          // A durable-write failure while reporting the poll failure must
+          // not escape the tick as an unhandled rejection; keep the task
+          // so a later tick can retry settlement.
+        }
+      }
+    }
+  };
+
   const tick = async () => {
     if (stopped || inFlight) return;
     inFlight = true;
 
     try {
-      for (const [id, task] of deps.backgroundTasks) {
-        if (task.backend === "sdk") continue;
-        try {
-          const sessionDir = join(task.dir, "sessions", id);
-          const elapsed = Date.now() - task.startedAt;
-          if (elapsed > deps.TASK_TIMEOUT_MS) {
-            if (deps.backgroundTasks.get(id) !== task) continue;
-            const terminalResult = getLastAssistantResultFromSessionDir(
-              sessionDir,
-              task.sessionName,
-              task.startedAt,
-            );
-            const timeoutContent =
-              terminalResult?.content ||
-              `Task timed out after ${Math.round(deps.TASK_TIMEOUT_MS / 1000)}s without producing a result.`;
-            settle(
-              id,
-              task,
-              timeoutContent,
-              terminalResult?.status === "completed" ? "done" :
-                terminalResult?.status === "failed" ? "failed" : "timeout",
-            );
-            continue;
-          }
+      const pendingTasks = Array.from(deps.backgroundTasks.entries())
+        .filter(([, task]) => task.backend !== "sdk");
+      if (pendingTasks.length === 0) return;
 
-          // Turn-based soft limit (issue #19): steer a wrap-up at the limit,
-          // allow a bounded grace of further turns, then settle with whatever
-          // the subagent produced instead of discarding it. SDK tasks are
-          // skipped above (no terminal session to steer).
-          if (task.maxTurns !== undefined) {
-            const readPartial = () =>
-              getLastAssistantTextFromSessionDir(
-                sessionDir,
-                task.sessionName,
-                task.startedAt,
-              );
-            const settleAtLimit = (reason: string) =>
-              settle(
-                id,
-                task,
-                `${readPartial() || "No assistant output captured."}\n\nTask reached the ${task.maxTurns}-turn limit${reason}`,
-                "timeout",
-              );
-            if (!task.wrapUp && task.turns >= task.maxTurns) {
-              task.wrapUp = { turnsAtStart: task.turns };
-              const steered = deps.steerTask?.(task, turnLimitWrapUpPrompt(task.maxTurns)) ?? false;
-              if (!steered) {
-                if (deps.backgroundTasks.get(id) !== task) continue;
-                settleAtLimit("; wrap-up steering failed.");
-                continue;
-              }
-            } else if (
-              task.wrapUp &&
-              task.turns >= task.wrapUp.turnsAtStart + WRAP_UP_GRACE_TURNS
-            ) {
-              if (deps.backgroundTasks.get(id) !== task) continue;
-              settleAtLimit(` and did not wrap up within ${WRAP_UP_GRACE_TURNS} further turns.`);
-              continue;
-            }
-          }
-
-          const snapshot = await deps.checkTaskCompletion({
-            sessionDir,
-            sessionName: task.sessionName,
-            paneId: task.paneId,
-            artifactsDir: task.dir,
-            taskId: id,
-                sinceMs: task.startedAt,
-                resourceExists: deps.resourceExists ? () => deps.resourceExists!(task) : undefined,
-                exitSentinelPath: task.exitSentinelPath,
-              });
-
-          if (stopped) return;
-
-          if (snapshot.status === "completed") {
-            if (deps.backgroundTasks.get(id) !== task) continue;
-            settle(id, task, snapshot.content, "done");
-          } else if (snapshot.status === "failed" || snapshot.status === "timeout") {
-            if (deps.backgroundTasks.get(id) !== task) continue;
-            settle(
-              id,
-              task,
-              snapshot.content,
-              snapshot.status === "timeout" ? "timeout" : "failed",
-            );
-          }
-        } catch (error) {
-          if (error instanceof Error && error.name === "HerdrUnavailableError") {
-            continue;
-          }
-          const count = (pollErrors.get(id) ?? 0) + 1;
-          pollErrors.set(id, count);
-          if (count >= deps.MAX_POLL_ERRORS) {
-            if (deps.backgroundTasks.get(id) !== task) continue;
-            try {
-              settle(
-                id,
-                task,
-                `Background task polling failed: ${error instanceof Error ? error.message : String(error)}`,
-                "failed",
-              );
-            } catch {
-              // A durable-write failure while reporting the poll failure must
-              // not escape the tick as an unhandled rejection; keep the task
-              // so a later tick can retry settlement.
-              continue;
-            }
-          }
+      // Poll tasks independently so one slow pane cannot hold up all siblings,
+      // but cap backend probes to avoid replacing head-of-line blocking with a
+      // burst of unbounded tmux/HerdR work.
+      const concurrency = Math.max(1, Math.floor(BACKGROUND_POLL_CONCURRENCY));
+      let nextIndex = 0;
+      const worker = async (): Promise<void> => {
+        while (!stopped) {
+          const index = nextIndex++;
+          const entry = pendingTasks[index];
+          if (!entry) return;
+          await pollTask(entry[0], entry[1]);
         }
-      }
+      };
+      await Promise.all(
+        Array.from(
+          { length: Math.min(concurrency, pendingTasks.length) },
+          () => worker(),
+        ),
+      );
     } finally {
       inFlight = false;
     }

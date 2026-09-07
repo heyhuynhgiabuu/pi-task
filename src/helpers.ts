@@ -193,28 +193,7 @@ export const TASK_BACKGROUND_DEFAULT = true;
 
 export const TASK_PROMPT_INSTRUCTIONS = `Your final assistant message IS the result the parent agent will read.
 
-When you are done, end with the XML envelope described below (or the <result> block from your agent instructions). Do not write a RESULT.md file — the parent reads your final assistant message from the session JSONL, not from any file.`;
-
-/**
- * XML envelope for the task result. The parent agent parses the child
- * subagent's final message with `parseResultXml`, which reads `<status>`,
- * `<summary>`, `<findings>`, `<evidence>`, and `<files>` tags. Append
- * this to the child prompt so the child knows to wrap its final result
- * in these tags (the parent then extracts them into the result section).
- */
-export const TASK_RESULT_XML_INSTRUCTIONS = `When the task is complete, wrap the final result in this XML envelope (or the agent's <result> block with the same inner tags). Nothing after the closing tag:
-
-<status>success | failure | blocked | partial</status>
-<summary>One-line summary of the outcome.</summary>
-<findings>Key findings. Plain text, multiple lines OK.</findings>
-<evidence>Citations, URLs, command snippets. <sources> is accepted as an alias for evidence.</evidence>
-<files>Files created or modified. Leave empty if none.</files>
-<caveats>Risks, gaps, uncertainty. <blockers> is accepted as an alias.</caveats>
-<next_steps>Follow-up actions. <checks> is accepted as an alias.</next_steps>
-<confidence>high | medium | low</confidence>
-
-<decisions> is merged into findings. The parent parses these tags for the task UI.`;
-
+End with a concise, self-contained plain-text or Markdown report. Start with one of these lines: "Status: success", "Status: failure", "Status: blocked", or "Status: partial". Then put the outcome first and include the reasoning, evidence, files, checks, caveats, and next steps that matter. Do not emit an XML or JSON wrapper. Do not write a RESULT.md file — the parent reads your final assistant message from the session JSONL, not from any file.`;
 
 export const TASK_TOOL_DESCRIPTION = `Launch a subagent for a complex, multistep task that benefits from isolated context. The subagent starts with fresh context — everything it needs goes in the prompt: parent-synthesized facts, decisions, and proposed-change semantics (file paths alone are not a context handoff).
 
@@ -247,7 +226,8 @@ Task control:
 /** @deprecated Import from ./agent-tools.js */
 export { ALL_TOOL_NAMES } from "./agent-tools.js";
 
-// Cached regex patterns for XML result parsing
+// Cached regex patterns for backwards-compatible XML result parsing.
+// New tasks use plain-text/Markdown final reports instead.
 const STATUS_RE = /<status>([\s\S]*?)<\/status>/i;
 const DEFAULT_DISALLOWED_TOOLS = ["xai_web_search", "xai_generate_text"];
 const SUMMARY_RE = /<summary>([\s\S]*?)<\/summary>/i;
@@ -261,7 +241,7 @@ const SOURCES_RE = /<sources>([\s\S]*?)<\/sources>/i;
 const BLOCKERS_RE = /<blockers>([\s\S]*?)<\/blockers>/i;
 const CHECKS_RE = /<checks>([\s\S]*?)<\/checks>/i;
 const DECISIONS_RE = /<decisions>([\s\S]*?)<\/decisions>/i;
-const PLAIN_SUMMARY_MAX_CHARS = 500;
+const PLAIN_STATUS_RE = /^\s*(?:[#>*-]\s*)*\**\s*(?:status|outcome)\s*(?:\**\s*:\s*|\s*:\s*\**\s*)(success|failure|blocked|partial)\b/im;
 
 // ─── Result Parsing ──────────────────────────────────────────────────────────
 
@@ -291,17 +271,26 @@ function hasStructuredResultTags(raw: string): boolean {
   return tags.some((re) => extractTag(raw, re).length > 0);
 }
 
+function extractPlainStatus(raw: string): string {
+  return raw.match(PLAIN_STATUS_RE)?.[1]?.toLowerCase() ?? "unknown";
+}
+
+/**
+ * Parse legacy XML result envelopes and current plain-text/Markdown reports.
+ * The function name is retained because older child sessions still emit XML.
+ * Plain reports stay intact so the parent can read the child's full reasoning
+ * instead of receiving an arbitrary summary prefix.
+ */
 export function parseResultXml(raw: string): ParsedResult {
   const status = extractTag(raw, STATUS_RE);
+  const trimmed = raw.trim();
 
-  if (!hasStructuredResultTags(raw)) {
-    const trimmed = raw.trim();
+  // A plain report may quote an XML tag while discussing legacy output. Only
+  // treat tags as a result envelope when the report itself starts with XML.
+  if (!hasStructuredResultTags(raw) || !trimmed.startsWith("<")) {
     return {
-      status: "unknown",
-      summary:
-        trimmed.length > PLAIN_SUMMARY_MAX_CHARS
-          ? trimmed.slice(0, PLAIN_SUMMARY_MAX_CHARS)
-          : trimmed,
+      status: extractPlainStatus(raw),
+      summary: raw.trim(),
       findings: "",
       evidence: "",
       files: "",

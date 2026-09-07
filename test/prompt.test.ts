@@ -58,6 +58,7 @@ process.on("exit", () => {
   assert.match(prompt, /## Handoff integrity/);
   assert.match(prompt, /A referenced file is evidence, not a context handoff/);
   assert.match(prompt, /enumerate every proposed change/);
+  assert.doesNotMatch(prompt, /<result>|<status>|<summary>|<findings>|<evidence>/, t + " no XML result wrapper");
 
   const followUp = buildTaskFollowUpPrompt({
     prompt: "Continue the audit.",
@@ -727,12 +728,9 @@ if (process.platform !== "win32") {
 }
 
 {
-  const t = "TASK_PROMPT_INSTRUCTIONS aligned with XML";
-  assert.ok(
-    !TASK_PROMPT_INSTRUCTIONS.includes("Do not wrap it in XML"),
-    t,
-  );
-  assert.ok(TASK_PROMPT_INSTRUCTIONS.includes("XML envelope"), t);
+  const t = "TASK_PROMPT_INSTRUCTIONS prefers plain text";
+  assert.ok(TASK_PROMPT_INSTRUCTIONS.includes("plain-text or Markdown"), t);
+  assert.ok(TASK_PROMPT_INSTRUCTIONS.includes("Do not emit an XML or JSON wrapper"), t);
 }
 
 {

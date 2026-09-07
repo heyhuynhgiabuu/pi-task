@@ -1,4 +1,4 @@
-import { TASK_PROMPT_INSTRUCTIONS, TASK_RESULT_XML_INSTRUCTIONS } from "../helpers.js";
+import { TASK_PROMPT_INSTRUCTIONS } from "../helpers.js";
 
 export interface TaskHandoffOptions {
   prompt: string;
@@ -30,7 +30,7 @@ This task-specific message is the complete handoff from the parent agent. The pa
 - Before acting, extract the goal, constraints, parent-provided facts, proposed changes, and acceptance criteria into a checklist.
 - For an audit, enumerate every proposed change and state whether it is present, absent, or inconsistent with the current code.
 - If the instructions refer to proposed changes or prior decisions without stating them, report the missing handoff instead of inventing requirements.
-- If required reviewer context is missing, stop and return <status>blocked</status> rather than a successful speculative audit.`;
+- If required reviewer context is missing, stop and report the handoff as blocked rather than performing a successful speculative audit.`;
 
 function renderParentHandoff(options: TaskHandoffOptions): string[] {
   const parentContext = options.parentContext?.trim() || "(none supplied)";
@@ -76,7 +76,5 @@ export function buildTaskPrompt(options: BuildTaskPromptOptions): string {
     TASK_HANDOFF_INTEGRITY,
     "",
     TASK_PROMPT_INSTRUCTIONS,
-    "",
-    TASK_RESULT_XML_INSTRUCTIONS,
   ].join("\n");
 }

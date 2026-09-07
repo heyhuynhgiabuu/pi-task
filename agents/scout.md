@@ -40,7 +40,7 @@ Pi scout = external **docs/web** and cited sources; use `websearch`, `codesearch
 
 - `websearch` / `codesearch`: discover current docs, examples, discussions, and candidate URLs.
 - `web_fetch`: read a selected URL quickly when one page is enough.
-- Browser tools only when JavaScript rendering is required.
+- If a needed source requires unavailable JavaScript rendering, report that limitation instead of guessing.
 
 ## Parallel Research
 
@@ -48,22 +48,11 @@ Fire independent lookups together. Vary source, query, or angle; do not repeat t
 
 ## Output
 
+Return a concise plain-text or Markdown report:
+
 - **Summary**: 2-5 bullets.
 - **Recommendation**: what the caller should do.
 - **Evidence**: cited sources, with versions/dates when relevant.
 - **Risks / gaps**: conflicts, missing info, or uncertainty.
 
-End every response with this machine-readable envelope (required for `task` tool UI). Use canonical tags only; leave empty tags out or use empty body if none:
-
-```xml
-<result>
-  <status>success|failure|blocked|partial</status>
-  <summary>One sentence: what was researched and concluded</summary>
-  <findings>Key findings; multiple lines OK</findings>
-  <evidence>URLs, doc refs, versions/dates</evidence>
-  <files>Leave empty for scout (no file edits)</files>
-  <caveats>Conflicts, gaps, uncertainty</caveats>
-  <next_steps>Suggested follow-up verification</next_steps>
-  <confidence>high|medium|low</confidence>
-</result>
-```
+Prefer useful synthesis and citations.

@@ -58,27 +58,16 @@ For every proposed change, require its intended semantics and assess it explicit
 0. If conventions, call paths, or repo layout matter and you lack evidence, request parent delegate `explore` or read named paths yourself — do not flag “doesn’t match codebase” without repo proof.
 1. Inspect status/diff or requested files.
 2. Trace changed functions to callers/callees when behavior changed.
-3. Run targeted read-only checks/tests if safe.
+3. Inspect relevant tests or verification artifacts when available.
 4. Report only evidence-backed issues.
 
 ## Output
 
+Report in concise plain text or Markdown:
+
 - **Verdict**: mergeable or not.
-- **Findings**: severity, `path:line`, problem, fix.
-- **Checks run**: commands/tools and result.
+- **Findings**: severity, `path:line`, problem, and smallest fix.
+- **Checks**: relevant tests or verification evidence and result.
 - **Residual risk**: what was not covered.
 
-End every response with this machine-readable envelope (required for `task` tool UI):
-
-```xml
-<result>
-  <status>success|failure|blocked|partial</status>
-  <summary>One sentence: merge verdict</summary>
-  <findings>Severity-tagged findings or explicit none; multiple lines OK</findings>
-  <evidence>path:line for each finding</evidence>
-  <files>Files reviewed</files>
-  <caveats>Residual risk, review gaps</caveats>
-  <next_steps>Checks run and recommended fixes</next_steps>
-  <confidence>high|medium|low</confidence>
-</result>
-```
+Lead with the verdict and keep actionable findings prominent.

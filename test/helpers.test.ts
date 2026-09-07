@@ -20,7 +20,7 @@ import {
   formatBackgroundReceipt,
   formatForegroundProgressText,
   TASK_BACKGROUND_DEFAULT,
-  TASK_RESULT_XML_INSTRUCTIONS,
+  TASK_PROMPT_INSTRUCTIONS,
   TASK_TOOL_DESCRIPTION,
   countToolUses,
   formatToolCallsSummaryBlock,
@@ -93,10 +93,10 @@ import {
 }
 
 {
-  const t = "parseResultXml truncates summary to 500 chars for plain text";
+  const t = "parseResultXml preserves full plain-text reports";
   const longText = "x".repeat(600);
   const r = parseResultXml(longText);
-  assert.equal(r.summary.length, 500, t);
+  assert.equal(r.summary, longText, t);
 }
 
 {
@@ -104,6 +104,24 @@ import {
   const r = parseResultXml("<status>failure</status>\nSomething broke");
   assert.equal(r.status, "failure", t + " status");
   assert.equal(r.summary, "", t + " summary");
+}
+
+{
+  const t = "parseResultXml recognizes Markdown status lines";
+  for (const [raw, expected] of [
+    ["Status: success\nDone", "success"],
+    ["**Status**: failure\nBroken", "failure"],
+    ["- **Outcome:** blocked\nMissing context", "blocked"],
+    ["### Status: partial\nSome work remains", "partial"],
+  ] as const) {
+    assert.equal(parseResultXml(raw).status, expected, `${t}: ${raw}`);
+  }
+}
+
+{
+  const t = "parseResultXml keeps quoted legacy tags as plain text";
+  const raw = "The report mentions <status>success</status> as a legacy example.";
+  assert.equal(parseResultXml(raw).summary, raw, t);
 }
 
 {
@@ -1373,17 +1391,9 @@ import {
 
 
 {
-  const t = "XML instructions preserve the required task result tags";
-  for (const tag of ["status", "summary", "findings", "evidence", "files"]) {
-    assert.ok(
-      TASK_RESULT_XML_INSTRUCTIONS.includes(`<${tag}>`),
-      `${t}: has opening ${tag}`,
-    );
-    assert.ok(
-      TASK_RESULT_XML_INSTRUCTIONS.includes(`</${tag}>`),
-      `${t}: has closing ${tag}`,
-    );
-  }
+  const t = "task result instructions prefer plain text";
+  assert.match(TASK_PROMPT_INSTRUCTIONS, /plain-text or Markdown/);
+  assert.match(TASK_PROMPT_INSTRUCTIONS, /Do not emit an XML or JSON wrapper/);
 }
 
 {
@@ -1594,6 +1604,15 @@ console.log("ALL TASK HELPER TESTS PASSED");
   const okRaw = "<status>success</status>\n<summary>done</summary>";
   const okText = taskResultContentText(parseResultXml(okRaw), assessTaskResult(parseResultXml(okRaw)));
   assert.equal(okText, "done", t + " (canonical: exact passthrough, no warning)");
+  const plainRaw = "Status: partial\n\nConclusion\n\nEvidence and caveats that the parent must see.";
+  const plainParsed = parseResultXml(plainRaw);
+  assert.equal(plainParsed.status, "partial", t + " (plain status parsed)");
+  assert.equal(assessTaskResult(plainParsed).valid, true, t + " (plain report is valid)");
+  assert.equal(
+    taskResultContentText(plainParsed, assessTaskResult(plainParsed)),
+    plainRaw,
+    t + " (plain report is not truncated)",
+  );
 }
 
 {

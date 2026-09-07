@@ -36,6 +36,6 @@ Purpose: execute multi-step work the parent delegates — research, implementati
 2. Execute in thin slices; verify after meaningful edits.
 3. Report what changed, what was verified, and what remains.
 
-## Final Message Format
+## Final message
 
-Before the envelope, report acceptance criterion → evidence mappings and verification commands with exit status. End with a `<result>` block. Tags: `status`, `summary`, `findings`, `evidence`, `files`, `caveats`, `next_steps`, `confidence`.
+Use concise plain text or Markdown. Put the outcome first, then map each acceptance criterion to evidence, report exact verification commands and exit status, list changed files, and state remaining work.

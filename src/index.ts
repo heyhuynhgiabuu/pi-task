@@ -215,11 +215,24 @@ interface RestoredComparisonRecord {
   history?: TaskSessionHistoryEntry;
 }
 
+export type ComparisonRestoreDeferReason = "mixed_owner" | "partial_owner";
+
+export interface ComparisonRestoreDiagnostic {
+  groupId: string;
+  taskIds: [string, string];
+  reason: ComparisonRestoreDeferReason;
+}
+
+export type ComparisonRestoreObserver = (
+  diagnostic: ComparisonRestoreDiagnostic,
+) => void;
+
 export function restoreComparisonGroups(
   piDir: string,
   backgroundTasks: Map<string, BackgroundTask>,
   coordinator: ComparisonCoordinator,
   currentSessionId?: string,
+  onDeferredGroup?: ComparisonRestoreObserver,
 ): ComparisonRunResult[] {
   const byGroup = new Map<string, Map<string, RestoredComparisonRecord>>();
   const add = (record: RestoredComparisonRecord): void => {
@@ -310,6 +323,15 @@ export function restoreComparisonGroups(
       distinctOwners.size > 1 ||
       (hasOwnership && ownerSessionIds.some((owner) => owner === undefined))
     ) {
+      try {
+        onDeferredGroup?.({
+          groupId,
+          taskIds: [first.id, second.id],
+          reason: distinctOwners.size > 1 ? "mixed_owner" : "partial_owner",
+        });
+      } catch {
+        // Diagnostics are best-effort and must not block durable replay.
+      }
       continue;
     }
 
@@ -668,6 +690,12 @@ export default function (pi: ExtensionAPI) {
       backgroundTasks,
       comparisonCoordinator,
       sessionId,
+      ({ groupId, taskIds, reason }) => {
+        console.warn(
+          `[pi-task] deferred comparison group ${groupId} (${reason}); ` +
+            `ownership is not atomic for ${taskIds.join(", ")}`,
+        );
+      },
     );
     for (const run of restoredComparisonRuns) {
       const allowed = deliveryGuard.allows(currentSession, run.taskId);

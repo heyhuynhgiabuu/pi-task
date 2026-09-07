@@ -805,8 +805,22 @@ test("restoreComparisonGroups defers groups split across owner sessions", () => 
   }
 
   const coordinator = new ComparisonCoordinator();
-  const pending = restoreComparisonGroups(piDir, new Map(), coordinator, "sess-a");
+  const diagnostics: unknown[] = [];
+  const pending = restoreComparisonGroups(
+    piDir,
+    new Map(),
+    coordinator,
+    "sess-a",
+    (diagnostic) => diagnostics.push(diagnostic),
+  );
   assert.deepEqual(pending, [], "mixed-owner groups are not replayed as partial reports");
+  assert.deepEqual(diagnostics, [
+    {
+      groupId,
+      taskIds: ["task-m0", "task-m1"],
+      reason: "mixed_owner",
+    },
+  ], "mixed-owner deferral is observable");
   assert.equal(coordinator.isComparisonTask("task-m0"), false, "mixed group is not registered");
   assert.equal(coordinator.isComparisonTask("task-m1"), false, "mixed group is not registered");
 });
@@ -831,6 +845,7 @@ test("restoreComparisonGroups defers partially migrated owner metadata", () => {
     comparisonIndex: id.endsWith("m0") ? 0 : 1,
   });
   const coordinator = new ComparisonCoordinator();
+  const diagnostics: unknown[] = [];
   const pending = restoreComparisonGroups(
     piDir,
     new Map([
@@ -839,9 +854,20 @@ test("restoreComparisonGroups defers partially migrated owner metadata", () => {
     ]),
     coordinator,
     "sess-a",
+    (diagnostic) => {
+      diagnostics.push(diagnostic);
+      throw new Error("diagnostic observer failure");
+    },
   );
 
   assert.deepEqual(pending, [], "partially migrated groups are deferred");
+  assert.deepEqual(diagnostics, [
+    {
+      groupId: "partial-owner-group",
+      taskIds: ["task-m0", "task-m1"],
+      reason: "partial_owner",
+    },
+  ], "partial-owner deferral is observable");
   assert.equal(coordinator.isComparisonTask("task-m0"), false, "partial group is not registered");
   assert.equal(coordinator.isComparisonTask("task-m1"), false, "partial group is not registered");
 });

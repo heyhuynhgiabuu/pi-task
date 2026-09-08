@@ -37,3 +37,5 @@ export type {
   ConversationResumeResolution,
   ConversationResumeResult,
 } from "./conversation-resume.js";
+export { resolveTaskResume } from "./task-resume.js";
+export type { TaskResumeOptions, TaskResumeResolution, TaskResumeResult } from "./task-resume.js";

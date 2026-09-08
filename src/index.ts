@@ -16,7 +16,6 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -33,13 +32,9 @@ import { registerTaskFastModeBridge } from "./fast-mode.js";
 export { createTaskFastModeStream, registerTaskFastModeBridge } from "./fast-mode.js";
 export type { TaskToolParameters } from "./tool/schema.js";
 import {
-  findJsonlSessionByName,
   normalizeConversationId,
-  findTaskSessionHistory,
-  repairTaskSessionRef,
   markComparisonGroupDelivered,
   markComparisonGroupPartiallyDelivered,
-  readRegistry,
   readTaskSessionHistory,
   readTaskSessionsRegistry,
   writeTaskSessionsRegistry,
@@ -76,13 +71,13 @@ import {
   startBackgroundPolling,
   startToolStatsPolling,
   durableParentOf,
-  transferTaskOwnership,
   createRegistryEntryStatus,
   executeSdkTask,
   executeSdkComparison,
   executeComparisonTerminalBackground,
   launchComparisonTerminalTasks,
   resolveConversationResume,
+  resolveTaskResume,
   createComparisonSettledHandler,
 } from "./lifecycle/index.js";
 import { DeliveryGuard, sessionViewOf } from "./panel/delivery.js";
@@ -109,7 +104,6 @@ import {
   probePaneAsync,
 } from "./subagent/tmux.js";
 import {
-  buildTaskFollowUpPrompt,
   buildTaskPrompt,
   createTaskCompleteRenderer,
   renderCall,
@@ -583,156 +577,27 @@ export default function (pi: ExtensionAPI) {
         resumeSessionRef = resumeResolution.resumeSessionRef;
         persistedTaskCwd = resumeResolution.persistedTaskCwd;
       } else if (taskParams.task_id) {
-        // Look up active tasks first, then durable completed-session history.
-        const entries = readRegistry(piDir);
-        const registryEntry = entries.find(
-          (e) => e.id === taskParams.task_id || e.sessionName === taskParams.task_id,
-        );
-        let entry =
-          registryEntry ??
-          findTaskSessionHistory(piDir, taskParams.task_id) ??
-          findJsonlSessionByName(piDir, taskParams.task_id, agent.name);
+        const taskResumeResolution = resolveTaskResume({
+          requestedTaskId: taskParams.task_id!,
+          taskParams,
+          agentName: agent.name,
+          piDir,
+          artifactsDir,
+          conversationId,
+          extensionPiDir,
+          ctx,
+          backgroundTasks,
+          deliveryGuard,
+          registryEntryStatus,
+        });
+        if (taskResumeResolution.kind === "handled") return taskResumeResolution.result;
+        taskParams = taskResumeResolution.taskParams;
+        id = taskResumeResolution.id;
+        sessionName = taskResumeResolution.sessionName;
+        resume = taskResumeResolution.resume;
+        resumeSessionRef = taskResumeResolution.resumeSessionRef;
+        persistedTaskCwd = taskResumeResolution.persistedTaskCwd;
 
-        // Older history entries can lack the JSONL path needed by
-        // `pi --session`, or hold a stale one. Repair it (and the durable
-        // record) before the spawn reuses it.
-        if (entry) entry = repairTaskSessionRef(piDir, entry);
-        if (entry?.comparisonGroupId) {
-          return {
-            content: [{ type: "text" as const, text: "Comparison tasks cannot be resumed individually." }],
-            details: { phase: "failed" as const, error: "resume_unsupported_for_compare", task_id: entry.id },
-            isError: true,
-          };
-        }
-        if (!entry) {
-          taskParams = { ...taskParams, task_id: undefined };
-          id = `${Date.now().toString(36)}-${randomUUID().slice(0, 4)}`;
-          sessionName = conversationId ?? `task-${id}`;
-        } else {
-        persistedTaskCwd = entry.cwd;
-        if (entry.cleanupPending) {
-          return {
-            content: [{ type: "text" as const, text: `Task "${taskParams.task_id}" is cancelled but backend cleanup is still pending; retry after the resource is cleaned up.` }],
-            details: { phase: "failed" as const, error: "cleanup_pending", task_id: entry.id },
-            isError: true,
-          };
-        }
-        // repairTaskSessionRef ran above: a present sessionRef implies the
-        // file exists (valid refs are kept, stale ones re-discovered). A
-        // stale recorded dir must not block resume when the transcript is
-        // discoverable — the spawn writes runtime files under the current
-        // artifacts root and heals the record.
-        if (!existsSync(entry.dir) && !entry.sessionRef) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Task "${taskParams.task_id}" artifact directory no longer exists: ${entry.dir}`,
-              },
-            ],
-            details: {
-              phase: "failed" as const,
-              error: "Task artifact dir missing",
-            },
-            isError: true,
-          };
-        }
-        // Resume: reuse the existing session name; runtime files are
-        // flat in artifactsDir, no per-task subdir.
-         id = entry.id;
-         sessionName = entry.sessionName;
-         resume = true;
-         resumeSessionRef = entry.sessionRef;
-
-        // If background and the terminal resource is still alive, reattach to the tracker.
-        const entryStatus = registryEntryStatus(entry);
-        if (entryStatus === "unavailable") {
-          return {
-            content: [{ type: "text" as const, text: "The HerdR session for this task is temporarily unavailable. The durable task record was preserved; retry when HerdR reconnects." }],
-            details: { phase: "failed" as const, error: "HerdR temporarily unavailable" },
-            isError: true,
-          };
-        }
-        if (entryStatus === "alive") {
-          if (taskParams.background === false) {
-            return {
-              content: [{ type: "text" as const, text: `Task "${taskParams.task_id}" is already running in the background and cannot be relaunched as foreground.` }],
-              details: { phase: "failed" as const, error: "active task cannot run foreground", task_id: id },
-              isError: true,
-            };
-          }
-          const bgtask: BackgroundTask = {
-            dir: artifactsDir,
-            cwd: entry.cwd,
-            agentType: entry.agentType,
-            sessionName,
-            paneId: entry.handle?.resourceId ?? entry.paneId,
-            handle: entry.handle,
-            backend: entry.handle?.backend ?? "tmux",
-            originalPane: null,
-            description: taskParams.description || entry.description,
-            startedAt: entry.startedAt,
-            toolUses: 0,
-            turns: 0,
-            maxTurns: entry.maxTurns,
-            conversationId: entry.conversationId,
-            ...durableParentOf(sessionViewOf(ctx)),
-            recentCalls: [],
-          };
-          backgroundTasks.set(id, bgtask);
-          deliveryGuard.track(id, sessionViewOf(ctx));
-          transferTaskOwnership(extensionPiDir, registryEntry, sessionViewOf(ctx));
-          const steerResult = steerRunningBackgroundTask(
-            bgtask.paneId,
-            buildTaskFollowUpPrompt({
-              prompt: taskParams.prompt,
-              parentContext: taskParams.parent_context,
-              proposedChanges: taskParams.proposed_changes,
-            }),
-            bgtask.handle,
-          );
-          if (!steerResult.ok) {
-            return {
-              content: [{ type: "text" as const, text: `Task "${taskParams.task_id}" was restored, but the follow-up prompt could not be delivered (${steerResult.reason}).` }],
-              details: { phase: "failed" as const, error: `resume steering failed: ${steerResult.reason}` },
-              isError: true,
-            };
-          }
-
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Resumed task "${taskParams.task_id}" and delivered the follow-up prompt. The subagent is still running in background; avoid relaunching overlapping work. Use /task-sessions to inspect it, and it will notify on completion.`,
-              },
-            ],
-            details: {
-              task_id: id,
-              agent_type: entry.agentType,
-              description: taskParams.description || entry.description,
-              conversation_id: entry.conversationId ?? conversationId,
-              tmux_session: sessionName,
-              background: true,
-            },
-          };
-        }
-
-        if (!resumeSessionRef) {
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Task "${taskParams.task_id}" was found, but its session JSONL file could not be resolved. Cannot resume without a --session file path.`,
-              },
-            ],
-            details: {
-              phase: "failed" as const,
-              error: "Task session file missing",
-            },
-            isError: true,
-          };
-        }
-        }
        } else {
          id = `${Date.now().toString(36)}-${randomUUID().slice(0, 4)}`;
          sessionName = conversationId ?? `task-${id}`;

@@ -743,14 +743,19 @@ describe("claude restart recovery (issue #22)", () => {
     };
   }
 
-  function writeClaudeTranscript(cwd: string, sessionId: string, stopReason: string | null) {
+  function writeClaudeTranscript(
+    cwd: string,
+    sessionId: string,
+    stopReason: string | null,
+    timestamp = new Date().toISOString(),
+  ) {
     const transcript = claudeSessionFilePath(cwd, sessionId);
     mkdirSync(dirname(transcript), { recursive: true });
     writeFileSync(
       transcript,
       JSON.stringify({
         type: "assistant",
-        timestamp: new Date().toISOString(),
+        timestamp,
         message: {
           role: "assistant",
           stop_reason: stopReason,
@@ -770,7 +775,8 @@ describe("claude restart recovery (issue #22)", () => {
     const cwd = join(piDir, "repo");
     const claudeSessionId = "a1111111-2222-4333-8444-555555555555";
     assert.ok(UUID_RE.test(claudeSessionId));
-    writeClaudeTranscript(cwd, claudeSessionId, "end_turn");
+    const completionTimestamp = "2026-09-08T10:00:05.000Z";
+    writeClaudeTranscript(cwd, claudeSessionId, "end_turn", completionTimestamp);
     writeJson(join(piDir, "task-registry.json"), [
       claudeEntry(piDir, {
         id: "task-claude-done",
@@ -792,10 +798,22 @@ describe("claude restart recovery (issue #22)", () => {
       [],
       "settled claude entry removed from the registry",
     );
-    const history = readJson<Array<{ id: string; status: string; claudeSessionId?: string }>>(
+    const history = readJson<Array<{
+      id: string;
+      status: string;
+      runtime?: string;
+      claudeSessionId?: string;
+      completedAt?: number;
+    }>>(
       join(piDir, "task-session-history.json"),
     );
     assert.equal(history[0]?.status, "done", "claude transcript proves completion");
+    assert.equal(history[0]?.runtime, "claude", "history preserves the runtime");
+    assert.equal(
+      history[0]?.completedAt,
+      Date.parse(completionTimestamp),
+      "history uses the Claude completion timestamp",
+    );
     assert.equal(
       history[0]?.claudeSessionId,
       claudeSessionId,

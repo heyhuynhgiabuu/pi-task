@@ -6,7 +6,11 @@ import {
   writeRegistry,
 } from "../conversation.js";
 import { hasAgentFinished, getLastMessageTimestampFromSessionDir } from "../session-text.js";
-import { claudeSessionFilePath, hasClaudeFinished } from "../subagent/claudeSession.js";
+import {
+  claudeSessionFilePath,
+  getLastClaudeMessageTimestamp,
+  hasClaudeFinished,
+} from "../subagent/claudeSession.js";
 import { killAgentPane, paneExists } from "../subagent/tmux.js";
 import { taskRuntime, type BackgroundTask, type RegistryEntry } from "../types.js";
 
@@ -34,6 +38,14 @@ function restoredClaudeSessionFile(entry: RegistryEntry): string | undefined {
   return sessionId ? claudeSessionFilePath(entry.cwd, sessionId) : undefined;
 }
 
+function restoredClaudeCompletionAt(
+  entry: RegistryEntry,
+  sinceMs: number,
+): number | undefined {
+  const file = restoredClaudeSessionFile(entry);
+  return file ? getLastClaudeMessageTimestamp(file, sinceMs) : undefined;
+}
+
 export function restoreActiveBackgroundTasks(
   piDir: string,
   backgroundTasks: Map<string, BackgroundTask>,
@@ -56,6 +68,7 @@ export function restoreActiveBackgroundTasks(
       agentType: entry.agentType,
       description: entry.description,
       sessionName: entry.sessionName,
+      runtime: entry.runtime,
       ...(entry.claudeSessionId !== undefined
         ? { claudeSessionId: entry.claudeSessionId }
         : {}),
@@ -178,11 +191,13 @@ export function restoreActiveBackgroundTasks(
         // both siblings' history records, and a receipt-only task would
         // otherwise vanish from history when its registry entry is removed.
         const receiptSessionDirs = [join(entry.dir, "sessions", entry.id), entry.dir];
-        const receiptCompletedAt = receiptSessionDirs
-          .map((dir) =>
-            getLastMessageTimestampFromSessionDir(dir, entry.sessionName, entry.startedAt),
-          )
-          .find((ts) => ts !== undefined) ?? Date.now();
+        const receiptCompletedAt =
+          restoredClaudeCompletionAt(entry, entry.startedAt) ??
+          receiptSessionDirs
+            .map((dir) =>
+              getLastMessageTimestampFromSessionDir(dir, entry.sessionName, entry.startedAt),
+            )
+            .find((ts) => ts !== undefined) ?? Date.now();
         upsertTaskSessionHistory(piDir, {
           id: entry.id,
           status: entry.cleanupPhase ?? "failed",
@@ -190,6 +205,7 @@ export function restoreActiveBackgroundTasks(
           agentType: entry.agentType,
           description: entry.description,
           sessionName: entry.sessionName,
+          runtime: entry.runtime,
           ...(entry.claudeSessionId !== undefined
             ? { claudeSessionId: entry.claudeSessionId }
             : {}),
@@ -251,11 +267,13 @@ export function restoreActiveBackgroundTasks(
       // Faithful completion time from the session itself: restore can happen
       // long after the child finished, and recovered comparison reports would
       // otherwise inflate durations by the outage length.
-      const completedAt = sessionDirs
-        .map((dir) =>
-          getLastMessageTimestampFromSessionDir(dir, entry.sessionName, entry.startedAt),
-        )
-        .find((ts) => ts !== undefined) ?? Date.now();
+      const completedAt =
+        restoredClaudeCompletionAt(entry, entry.startedAt) ??
+        sessionDirs
+          .map((dir) =>
+            getLastMessageTimestampFromSessionDir(dir, entry.sessionName, entry.startedAt),
+          )
+          .find((ts) => ts !== undefined) ?? Date.now();
       terminalReceipt(entry, "done", completedAt);
       if (closeEntryResource(entry, paneId, paneAlive)) staleIds.push(entry.id);
       return;

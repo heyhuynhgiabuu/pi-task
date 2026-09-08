@@ -211,6 +211,13 @@ function agentFrom(value: unknown): HerdrAgentInfo {
   return agent as HerdrAgentInfo;
 }
 
+function agentKindMatches(
+  agent: HerdrAgentInfo,
+  expectedKind: AgentRuntimeKind | undefined,
+): boolean {
+  return expectedKind === undefined || agent.agent === expectedKind;
+}
+
 function processInfoFrom(value: unknown): {
   pane_id: string;
   foreground_process_group_id: number;
@@ -465,9 +472,12 @@ async function readStartedAgent(
   expectedKind: AgentRuntimeKind = "pi",
 ): Promise<HerdrAgentInfo> {
   const promptIdentity = await readAgent(run, created.pane_id);
+  const kindMatches = expectedKind === "claude"
+    ? promptIdentity.agent === expectedKind
+    : promptIdentity.agent === undefined || promptIdentity.agent === expectedKind;
   if (
     promptIdentity.terminal_id !== created.terminal_id ||
-    (promptIdentity.agent !== undefined && promptIdentity.agent !== expectedKind)
+    !kindMatches
   ) {
     throw new HerdrIdentityError(
       `HerdR agent identity did not match started pane ${created.pane_id}`,
@@ -601,11 +611,13 @@ export function createHerdrTerminalBackend(
       throw new Error("HerdR ownership mismatch: terminal changed");
     }
     if (
+      handle.agentKind !== undefined ||
       handle.agentName !== undefined ||
       handle.foregroundProcessGroupId !== undefined
     ) {
       const agent = await readAgent(run, handle.resourceId);
       if (
+        !agentKindMatches(agent, handle.agentKind) ||
         agent.terminal_id !== handle.terminalId ||
         (handle.agentName !== undefined && agent.name !== handle.agentName) ||
         (handle.foregroundProcessGroupId !== undefined &&
@@ -917,6 +929,7 @@ export function createSyncHerdrControl(
         );
         if (pane.terminal_id !== handle.terminalId) return false;
         if (
+          handle.agentKind === undefined &&
           handle.agentName === undefined &&
           handle.foregroundProcessGroupId === undefined
         ) {
@@ -946,6 +959,7 @@ export function createSyncHerdrControl(
           processBefore.foreground_process_group_id ===
             processAfter.foreground_process_group_id &&
           agent.terminal_id === handle.terminalId &&
+          (handle.agentKind === undefined || agent.agent === handle.agentKind) &&
           (handle.agentName === undefined || agent.name === handle.agentName) &&
           (handle.foregroundProcessGroupId === undefined ||
             processAfter.foreground_process_group_id === handle.foregroundProcessGroupId)

@@ -238,3 +238,16 @@ test("buildClaudeArgs: readonly agent requesting a mutating tool rejects", () =>
     /readonly: true but tools: requests the mutating Claude Code tool "Bash"/,
   );
 });
+
+test("buildClaudeArgs: declared Pi skills are rejected instead of being silently dropped", () => {
+  assert.throws(
+    () =>
+      buildClaudeArgs({
+        agent: claudeAgent({ skills: ["verification-before-completion"] }),
+        sessionId: "sid",
+        promptContent: "p",
+        deferTaskPrompt: true,
+      }),
+    /Claude Code runtime does not support Pi skills/,
+  );
+});

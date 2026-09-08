@@ -13,6 +13,7 @@ import {
   claudeSlug,
   claudeToolUseCount,
   claudeTurnCount,
+  getLastClaudeMessageTimestamp,
   getLastClaudeAssistantText,
   hasClaudeFinished,
 } from "../src/subagent/claudeSession.js";
@@ -330,6 +331,23 @@ for (const reason of ["stop_sequence", "max_tokens"]) {
     );
   } finally {
     rmSync(home, { recursive: true, force: true });
+  }
+}
+
+{
+  const t = "last Claude assistant timestamp supports restart completion history";
+  const file = makeTranscript([
+    { ...assistant("tool_use"), timestamp: "2026-09-08T10:00:00.000Z" },
+    { ...assistant("end_turn"), timestamp: "2026-09-08T10:00:05.000Z" },
+  ]);
+  try {
+    assert.equal(
+      getLastClaudeMessageTimestamp(file),
+      Date.parse("2026-09-08T10:00:05.000Z"),
+      t,
+    );
+  } finally {
+    cleanup(file);
   }
 }
 

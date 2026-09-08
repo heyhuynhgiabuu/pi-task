@@ -92,6 +92,11 @@ export interface BuildClaudeArgsOptions {
  * (Claude Code treats the first positional argument as the initial prompt).
  */
 export function buildClaudeArgs(opts: BuildClaudeArgsOptions): string[] {
+  if (opts.agent.skills?.length) {
+    throw new Error(
+      "Claude Code runtime does not support Pi skills; remove the agent's skills or switch the agent to the pi runtime.",
+    );
+  }
   const args: string[] = [];
   // Tool policy is translated per runtime: explicit tools/disallowed_tools map
   // onto --tools/--disallowedTools (unmappable names throw); readonly: true

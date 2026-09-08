@@ -70,7 +70,7 @@ function claudeText(msg: ClaudeEntry["message"]): string {
 function forEachClaudeAssistant(
   filePath: string,
   sinceMs: number | undefined,
-  visit: (msg: ClaudeEntry["message"]) => void,
+  visit: (msg: ClaudeEntry["message"], timestamp?: string) => void,
 ): void {
   if (!existsSync(filePath)) return;
   let content: string;
@@ -89,7 +89,7 @@ function forEachClaudeAssistant(
         const timestampMs = Date.parse(entry.timestamp);
         if (Number.isFinite(timestampMs) && timestampMs < sinceMs) continue;
       }
-      visit(entry.message);
+      visit(entry.message, entry.timestamp);
     } catch {
       /* skip malformed JSONL rows */
     }
@@ -167,4 +167,18 @@ export function claudeToolUseCount(filePath: string, sinceMs?: number): number {
     }
   });
   return count;
+}
+
+/** Timestamp of the latest assistant row in a Claude transcript. */
+export function getLastClaudeMessageTimestamp(
+  filePath: string,
+  sinceMs?: number,
+): number | undefined {
+  let last: number | undefined;
+  forEachClaudeAssistant(filePath, sinceMs, (_msg, timestamp) => {
+    if (!timestamp) return;
+    const timestampMs = Date.parse(timestamp);
+    if (Number.isFinite(timestampMs)) last = timestampMs;
+  });
+  return last;
 }

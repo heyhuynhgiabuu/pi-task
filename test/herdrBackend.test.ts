@@ -162,6 +162,10 @@ test("grouped HerdR launch starts Pi in the new workspace root pane", async () =
   const handle = await backend.launch({
     cwd: "/repo",
     agentArgs: ["--session", "task"],
+    env: {
+      REVIEW_MODE: "auto",
+      TRACE_CONTEXT: "a=b",
+    },
     workspaceGroup: "parallel-retry",
   });
 
@@ -181,6 +185,10 @@ test("grouped HerdR launch starts Pi in the new workspace root pane", async () =
       "create",
       "--cwd",
       "/repo",
+      "--env",
+      "REVIEW_MODE=auto",
+      "--env",
+      "TRACE_CONTEXT=a=b",
       "--label",
       "parallel-retry",
       "--no-focus",
@@ -312,6 +320,10 @@ test("ungrouped HerdR launch splits the caller pane before starting Pi", async (
   const handle = await backend.launch({
     cwd: "/repo",
     agentArgs: ["--session", "task"],
+    env: {
+      EMPTY_VALUE: "",
+      TRACE_CONTEXT: "a=b",
+    },
   });
 
   assert.deepEqual(handle, {
@@ -331,6 +343,10 @@ test("ungrouped HerdR launch splits the caller pane before starting Pi", async (
       "right",
       "--cwd",
       "/repo",
+      "--env",
+      "EMPTY_VALUE=",
+      "--env",
+      "TRACE_CONTEXT=a=b",
       "--no-focus",
     ],
     [
@@ -431,7 +447,7 @@ test("HerdR submits the initial task prompt with a bounded lifecycle wait", asyn
   );
 });
 
-test("HerdR retries only a stalled prompt and requires a newer sequence", async () => {
+test("HerdR 0.9.0 retries a stalled prompt without a server baseline", async () => {
   const calls: string[][] = [];
   let agentGets = 0;
   let retrySent = false;
@@ -468,7 +484,7 @@ test("HerdR retries only a stalled prompt and requires a newer sequence", async 
           error: {
             code: "agent_prompt_stalled",
             message:
-              "agent prompt produced no observed state change within 5000 ms; status is idle and state_change_seq remained 10",
+              "agent prompt produced no observed working or blocked state within 5000 ms; current status is idle",
           },
         });
         throw error;

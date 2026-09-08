@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { shellQuote } from "../helpers.js";
+import { resolveSubagentEnvironment } from "./environment.js";
 import type {
   TerminalBackend,
   TerminalBackendKind,
@@ -33,6 +34,14 @@ export interface TerminalTaskLaunchResult {
   originalPane: string | null;
 }
 
+export function buildTmuxEnvironmentPrefix(
+  environment: Readonly<Record<string, string>>,
+): string {
+  return Object.entries(environment)
+    .map(([name, value]) => `${name}=${shellQuote(value)}`)
+    .join(" ");
+}
+
 export async function launchTerminalTask({
   backend,
   terminalBackend,
@@ -47,12 +56,19 @@ export async function launchTerminalTask({
   remainOnExit,
   selfDestruct,
 }: TerminalTaskLaunchOptions): Promise<TerminalTaskLaunchResult> {
+  const environmentResult = resolveSubagentEnvironment(process.env, environment);
+  if (!environmentResult.ok) throw new Error(environmentResult.error);
+  for (const diagnostic of environmentResult.diagnostics) {
+    console.warn(`[pi-task] ${diagnostic.message}`);
+  }
+  const childEnvironment = environmentResult.environment;
+
   if (backend === "herdr") {
     const handle = await terminalBackend.launch({
       agentArgs,
       initialPrompt,
       cwd,
-      env: environment,
+      env: childEnvironment,
       label,
       workspaceGroup,
     });
@@ -63,9 +79,7 @@ export async function launchTerminalTask({
     };
   }
 
-  const envPrefix = Object.entries(environment)
-    .map(([key, value]) => `${key}=${value}`)
-    .join(" ");
+  const envPrefix = buildTmuxEnvironmentPrefix(childEnvironment);
   const shellCommand = `${envPrefix} pi ${agentArgs.map((arg) => shellQuote(arg)).join(" ")}`;
   const sessionFile = join(sessionDir, sessionName + ".jsonl");
   const childCommand = `cd ${shellQuote(cwd)} && ${shellCommand}`;

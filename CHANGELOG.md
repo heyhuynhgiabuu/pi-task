@@ -6,13 +6,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Terminal subagents support neutral, opt-in environment forwarding through `PI_SUBAGENT_FORWARD_<NAME>`, with configurable prefixes, deterministic conflict diagnostics, and matching tmux/HerdR behavior.
+
+### Fixed
+
+- Tmux terminal launches now shell-quote child environment values instead of interpolating them as executable shell text.
+
+## [0.7.1] - 2026-09-08
+
 ### Fixed
 
 - Durable conversation resume now repairs and validates the child JSONL path before relaunching; provider error/aborted results no longer reuse stale assistant text; tmux outages remain retryable instead of being treated as dead panes; and SDK background records are reconciled after a host restart.
+- HerdR 0.9.0 stalled-prompt responses that omit the server lifecycle baseline now fall back to the captured pre-submit sequence while retaining identity-safe retry checks.
 
 ### Changed
 
-- Peer dependency ranges now pin the tested Pi 0.85.x and TypeBox 1.3.x compatibility lines instead of accepting arbitrary versions.
+- Peer/dev dependency ranges now target the tested Pi 0.85.1 compatibility line; the lockfile updates matching transitive Pi packages to 0.85.1, while TypeBox remains pinned to 1.3.7 as required by Pi.
 - Unchanged terminal-session JSONL scans reuse bounded file-signature caches, reducing repeated tool-stat parsing during polling without changing progress semantics.
 - Mixed or partially-owned comparison groups now emit a diagnostic when restore defers them, while preserving the no-cross-session-report safety policy.
 - Registry and task-history persistence uses atomic replacement with a cross-process lock. Background completion delivery defaults to `followUp` and debounces notifications settling together; `steer` remains an explicit opt-in.

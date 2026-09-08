@@ -401,12 +401,11 @@ async function retryStalledPrompt(
   retryTimeoutMs: number,
   retryPollMs: number,
 ): Promise<void> {
-  const stalledBaseline = stalledPromptBaseline(error);
-  if (stalledBaseline === undefined) {
-    throw new HerdrIdentityError(
-      "HerdR stalled prompt did not include HerdR's state sequence baseline",
-    );
-  }
+  // Older HerdR releases included their lifecycle baseline in the stalled
+  // error. HerdR 0.9.0 still reports the exact error code but omits that
+  // baseline; use the identity captured before submission as the fallback.
+  const stalledBaseline =
+    stalledPromptBaseline(error) ?? promptIdentity.state_change_seq;
   let beforeRetry: HerdrAgentInfo;
   try {
     beforeRetry = await readAgent(run, promptIdentity.pane_id);

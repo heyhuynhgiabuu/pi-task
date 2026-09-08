@@ -28,6 +28,7 @@ export interface SdkComparisonSibling {
   agent: AgentConfig;
   desc: string;
   sessionName: string;
+  sessionDir: string;
 }
 
 export interface SdkComparisonExecutionOptions {

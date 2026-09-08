@@ -46,8 +46,6 @@ import {
       discoverAgents,
   resolveTaskAgentPreflight,
   resolveTaskFastMode,
-  envTurnLimit,
-  formatBackgroundReceipt,
   formatComparisonReport,
   isTaskCompareAllowed,
   resolveCompareModels,
@@ -64,9 +62,8 @@ import {
   completeTask,
   createCompletionDeliveryQueue,
   createTaskWidgetController,
-  executeTerminalForegroundTask,
   executeComparisonTerminalForeground,
-  registerBackgroundTask,
+  executeTerminalTask,
   restoreActiveBackgroundTasks,
   startBackgroundPolling,
   startToolStatsPolling,
@@ -88,13 +85,11 @@ import {
   createSyncHerdrControl,
   resolveHerdrPiIntegrationExtension,
 } from "./subagent/herdr.js";
-import { describeCommandFailure } from "./subagent/terminalBackend.js";
 import { resolveTaskBackend } from "./subagent/selectBackend.js";
 import {
   steerRunningBackgroundTask,
   steerRunningBackgroundTaskAsync,
 } from "./subagent/steer.js";
-import { launchTerminalTask } from "./subagent/terminal-launch.js";
 import {
   checkTaskCompletion,
 } from "./subagent/waitCompletion.js";
@@ -110,10 +105,7 @@ import {
   renderResult,
   taskParametersSchema,
 } from "./tool/index.js";
-import type {
-  BackgroundTask,
-  TerminalHandle,
-} from "./types.js";
+import type { BackgroundTask } from "./types.js";
 import { ignoreStaleExtensionCtx } from "./stale-ctx.js";
 import { resolveTaskCwd } from "./task-cwd.js";
 import { serializeTaskAdmission } from "./task-admission.js";
@@ -995,136 +987,35 @@ export default function (pi: ExtensionAPI) {
             });
           }
 
-      let paneId: string;
-      let originalPane: string | null;
-      let handle: TerminalHandle;
-      try {
-        const launched = await launchTerminalTask({
-          backend: selectedBackend,
-          terminalBackend: herdrBackend,
-          agentArgs: piArgs,
-          initialPrompt: promptContent,
-          cwd: taskCwd,
-          sessionDir,
-          sessionName,
-          environment: { PI_TASK_TOOL_DISABLED: "1" },
-          label: `${agent.name}-${id.slice(0, 8)}`,
-          workspaceGroup: taskParams.workspace_group,
-          remainOnExit: Boolean(foregroundTask),
-          selfDestruct: !foregroundTask,
-        });
-        ({ handle, paneId, originalPane } = launched);
-        if (foregroundTask) {
-          foregroundTask.backend = selectedBackend;
-          foregroundTask.paneId = paneId;
-          foregroundTask.handle = handle;
-          foregroundTask.originalPane = originalPane;
-        }
-      } catch (error) {
-        foregroundTasks.delete(id);
-        clearTaskWidgetIfIdle();
-        const reason = describeCommandFailure(error);
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Failed to create ${selectedBackend} execution pane for the agent: ${reason}`,
-            },
-          ],
-          details: { phase: "failed" as const, error: `${selectedBackend} launch failed`, reason },
-          isError: true,
-        };
-      }
-
-      // ── FOREGROUND MODE: block until result, return directly ────────────
-      const owner = durableParentOf(sessionViewOf(ctx));
-      const ownerSessionId = owner.ownerSessionId;
-      const ownerLeafId = owner.ownerLeafId;
-      if (!isBackground) {
-        return executeTerminalForegroundTask({
-          id,
-          agentType: agent.name,
-          description: descText,
-          sessionName,
-          sessionDir,
-          artifactsDir,
-          taskCwd,
-          conversationId,
-          piDir,
-          handle,
-          paneId,
-          originalPane,
-          startedAt: foregroundTask?.startedAt ?? Date.now(),
-          ownerSessionId,
-          ownerLeafId,
-          selectedBackend,
-          terminalBackend: herdrBackend,
-          signal,
-          onUpdate,
-          foregroundTasks,
-          clearTaskWidgetIfIdle,
-        });
-      }
-
-      // ── BACKGROUND MODE (default): add to tracker, return immediately ─────
-
-      const bgtask: BackgroundTask = {
-        dir: artifactsDir,
-        cwd: taskCwd,
-        agentType: agent.name,
-        sessionName,
-        paneId,
-        handle,
-        originalPane,
-        description: descText,
-        startedAt: Date.now(),
-        toolUses: 0,
-        turns: 0,
-        maxTurns: agent.maxTurns ?? envTurnLimit(),
-        conversationId,
-        ownerSessionId,
-        ownerLeafId,
-        recentCalls: [],
-        backend: selectedBackend,
-      };
-
-      registerBackgroundTask({
+      return executeTerminalTask({
         id,
-        task: bgtask,
+        agentName: agent.name,
+        description: descText,
+        sessionName,
+        sessionDir,
+        artifactsDir,
+        cwd: taskCwd,
+        conversationId,
         piDir,
+        prompt: promptContent,
+        piArgs,
+        selectedBackend,
+        requestedBackend,
+        terminalBackend: herdrBackend,
+        workspaceGroup: taskParams.workspace_group,
+        foregroundTask,
+        agentMaxTurns: () => agent.maxTurns,
+        signal,
+        onUpdate,
+        ctx,
         pi,
         backgroundTasks,
-        trackDelivery: () => deliveryGuard.track(id, sessionViewOf(ctx)),
-        ensureTaskWidget: () => ignoreStaleExtensionCtx(() => ensureTaskWidget(ctx)),
+        foregroundTasks,
+        deliveryGuard,
+        clearTaskWidgetIfIdle,
+        ensureTaskWidget: () =>
+          ignoreStaleExtensionCtx(() => ensureTaskWidget(ctx)),
       });
-
-      // Do not kill a background subagent when the parent session aborts or is
-      // replaced. Background tasks are intentionally detached; the registry and
-      // polling loop own their lifecycle after the pane is spawned.
-
-      return {
-        content: [
-          {
-            type: "text" as const,
-                text: formatBackgroundReceipt({
-                  taskId: id,
-                  agentType: agent.name,
-                  sessionPath: join(sessionDir, `${sessionName}.jsonl`),
-                  backend: selectedBackend,
-                  backendReason: requestedBackend === "auto" && selectedBackend !== "herdr"
-                    ? "HerdR unavailable"
-                    : undefined,
-                }),
-          },
-        ],
-        details: {
-          task_id: id,
-          agent_type: agent.name,
-          description: descText,
-          tmux_session: sessionName,
-          background: true,
-        },
-      };
       });
     },
 

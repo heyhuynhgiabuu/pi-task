@@ -39,3 +39,5 @@ export type {
 } from "./conversation-resume.js";
 export { resolveTaskResume } from "./task-resume.js";
 export type { TaskResumeOptions, TaskResumeResolution, TaskResumeResult } from "./task-resume.js";
+export { executeTerminalTask } from "./terminal-execution.js";
+export type { TerminalExecutionOptions } from "./terminal-execution.js";

@@ -91,6 +91,11 @@ export class ComparisonCoordinator {
     return this.taskToGroup.has(taskId);
   }
 
+  /** Roll back an admission that created a group before durable registration completed. */
+  discardGroup(groupId: string): void {
+    this.clearGroup(groupId);
+  }
+
   private clearGroup(groupId: string): void {
     const group = this.groups.get(groupId);
     if (!group) return;

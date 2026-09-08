@@ -17,7 +17,7 @@
 
 import { randomUUID } from "node:crypto";
 import { writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -32,9 +32,11 @@ import { registerTaskFastModeBridge } from "./fast-mode.js";
 export { createTaskFastModeStream, registerTaskFastModeBridge } from "./fast-mode.js";
 export type { TaskToolParameters } from "./tool/schema.js";
 import {
+  DurableStateError,
   normalizeConversationId,
   markComparisonGroupDelivered,
   markComparisonGroupPartiallyDelivered,
+  readRegistry,
   readTaskSessionHistory,
   readTaskSessionsRegistry,
 } from "./conversation.js";
@@ -64,6 +66,7 @@ import {
   startBackgroundPolling,
   startToolStatsPolling,
   durableParentOf,
+  restoreBackgroundTaskDeliveryGuards,
   createRegistryEntryStatus,
   executeSdkTask,
   executeComparisonTask,
@@ -258,34 +261,57 @@ export default function (pi: ExtensionAPI) {
     }
     const currentSession = sessionViewOf(ctx);
     if (currentSession.getSessionId()) {
-      for (const history of readTaskSessionHistory(piDir)) {
-        if (history.ownerSessionId === undefined) continue;
+      restoreBackgroundTaskDeliveryGuards(
+        backgroundTasks,
+        sessionId,
+        deliveryGuard,
+      );
+    }
+
+    let durableHistory: ReturnType<typeof readTaskSessionHistory>;
+    try {
+      durableHistory = readTaskSessionHistory(piDir);
+    } catch (error) {
+      // Corrupt history is not an empty history: keep the file intact and
+      // defer delivery/replay until a later startup can read it safely.
+      console.error(
+        `[pi-task] durable history restore skipped: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return;
+    }
+
+    if (currentSession.getSessionId()) {
+      for (const history of durableHistory) {
+        // Registry-adopted tasks are authoritative when a transfer left the
+        // two durable records temporarily out of sync.
+        if (history.ownerSessionId === undefined || backgroundTasks.has(history.id)) continue;
         deliveryGuard.restore(history.id, {
           sessionId: history.ownerSessionId,
           leafId: history.ownerLeafId ?? null,
         });
       }
-      for (const [id, task] of backgroundTasks) {
-        if (task.ownerSessionId === undefined) continue;
-        deliveryGuard.restore(id, {
-          sessionId: task.ownerSessionId,
-          leafId: task.ownerLeafId ?? null,
-        });
-      }
     }
 
-    const restoredComparisonRuns = restoreComparisonGroups(
-      piDir,
-      backgroundTasks,
-      comparisonCoordinator,
-      sessionId,
-      ({ groupId, taskIds, reason }) => {
-        console.warn(
-          `[pi-task] deferred comparison group ${groupId} (${reason}); ` +
-            `ownership is not atomic for ${taskIds.join(", ")}`,
-        );
-      },
-    );
+    let restoredComparisonRuns: ReturnType<typeof restoreComparisonGroups>;
+    try {
+      restoredComparisonRuns = restoreComparisonGroups(
+        piDir,
+        backgroundTasks,
+        comparisonCoordinator,
+        sessionId,
+        ({ groupId, taskIds, reason }) => {
+          console.warn(
+            `[pi-task] deferred comparison group ${groupId} (${reason}); ` +
+              `ownership is not atomic for ${taskIds.join(", ")}`,
+          );
+        },
+      );
+    } catch (error) {
+      console.error(
+        `[pi-task] comparison replay skipped: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return;
+    }
     for (const run of restoredComparisonRuns) {
       const allowed = deliveryGuard.allows(currentSession, run.taskId);
       // Replay is best-effort: a non-stale send failure must not abort the
@@ -375,6 +401,7 @@ export default function (pi: ExtensionAPI) {
         parameters: taskParametersSchema(),
 
         async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      try {
       const controlError = taskControlRequestError(params);
       if (controlError) {
         return {
@@ -538,13 +565,18 @@ export default function (pi: ExtensionAPI) {
         : taskId
           ? `${piDir}\u0000task:${taskId}`
           : undefined;
-      return serializeTaskAdmission(admissionKey, async () => {
-      const taskSessionsRegistry = conversationId
-        ? readTaskSessionsRegistry(piDir)
-        : {};
-      const registeredTaskId = conversationId
-        ? taskSessionsRegistry[conversationId]?.task_id
-        : undefined;
+      return await serializeTaskAdmission(admissionKey, async () => {
+        const taskSessionsRegistry = conversationId
+          ? readTaskSessionsRegistry(piDir)
+          : {};
+        // Validate every durable source before resolving/resuming or launching
+        // a child. Missing files remain valid empty state; unreadable files
+        // fail before any backend resource can be created.
+        readRegistry(piDir);
+        readTaskSessionHistory(piDir);
+        const registeredTaskId = conversationId
+          ? taskSessionsRegistry[conversationId]?.task_id
+          : undefined;
 
       if (
         taskParams.task_id &&
@@ -862,6 +894,22 @@ export default function (pi: ExtensionAPI) {
           ignoreStaleExtensionCtx(() => ensureTaskWidget(ctx)),
       });
       });
+      } catch (error) {
+        if (!(error instanceof DurableStateError)) throw error;
+        return {
+          content: [{
+            type: "text" as const,
+            text: `${error.message} Repair the durable file before retrying the task operation.`,
+          }],
+          details: {
+            phase: "failed" as const,
+            error: "durable_state_unreadable",
+            file: basename(error.file),
+            reason: error.reason,
+          },
+          isError: true,
+        };
+      }
     },
 
         renderCall,
@@ -873,16 +921,25 @@ export default function (pi: ExtensionAPI) {
     handler: async (_args, ctx) => {
       const cwd = ctx.sessionManager?.getCwd?.() ?? process.cwd();
       const { piDir } = discoverAgents(cwd);
-      const registry = readTaskSessionsRegistry(piDir);
-      const rows = Object.entries(registry)
-        .sort(([a], [b]) => a.localeCompare(b))
-        .map(([conversationId, entry]) => `- ${conversationId} -> ${entry.task_id}`);
-      ctx.ui.notify(
-        rows.length > 0
-          ? `Durable pi-task conversations:\n${rows.join("\n")}`
-          : "No durable pi-task conversations found.",
-        "info",
-      );
+      try {
+        const registry = readTaskSessionsRegistry(piDir);
+        const rows = Object.entries(registry)
+          .sort(([a], [b]) => a.localeCompare(b))
+          .map(([conversationId, entry]) => `- ${conversationId} -> ${entry.task_id}`);
+        ctx.ui.notify(
+          rows.length > 0
+            ? `Durable pi-task conversations:\n${rows.join("\n")}`
+            : "No durable pi-task conversations found.",
+          "info",
+        );
+      } catch (error) {
+        ctx.ui.notify(
+          error instanceof Error
+            ? `${error.message} Repair the file before retrying.`
+            : `Could not read durable pi-task conversations: ${String(error)}`,
+          "error",
+        );
+      }
     },
   });
 }

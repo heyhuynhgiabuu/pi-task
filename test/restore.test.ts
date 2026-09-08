@@ -37,6 +37,16 @@ function writeSession(dir: string, sessionName: string, stopReason?: string) {
 }
 
 describe("restoreActiveBackgroundTasks", () => {
+  it("retains an unreadable registry for a later repair", async () => {
+    const piDir = makePiDir();
+    const registryPath = join(piDir, "task-registry.json");
+    const corrupt = "{not-json";
+    writeFileSync(registryPath, corrupt, "utf8");
+
+    await assert.doesNotReject(() => restoreActiveBackgroundTasks(piDir, new Map()));
+    assert.equal(readFileSync(registryPath, "utf8"), corrupt);
+  });
+
   it("marks completed registry entries done and removes them from registry", async () => {
     const piDir = makePiDir();
     const taskDir = join(piDir, "artifacts", "sessions", "task-1");
@@ -840,7 +850,13 @@ describe("claude restart recovery (issue #22)", () => {
 
   function claudeEntry(
     piDir: string,
-    over: { id: string; cwd: string; sessionName: string; claudeSessionId?: string },
+    over: {
+      id: string;
+      cwd: string;
+      sessionName: string;
+      claudeSessionId?: string;
+      startedAt?: number;
+    },
   ) {
     mkdirSync(join(piDir, "artifacts"), { recursive: true });
     mkdirSync(over.cwd, { recursive: true });
@@ -851,7 +867,7 @@ describe("claude restart recovery (issue #22)", () => {
       sessionName: over.sessionName,
       runtime: "claude",
       ...(over.claudeSessionId !== undefined ? { claudeSessionId: over.claudeSessionId } : {}),
-      startedAt: Date.now() - 1000,
+      startedAt: over.startedAt ?? Date.now() - 1000,
       handle: { backend: "herdr", resourceId: "w1:p9", socketPath: "/tmp/h.sock", terminalId: "t9" },
       agentType: "general",
       description: "claude runtime recovery",
@@ -899,6 +915,7 @@ describe("claude restart recovery (issue #22)", () => {
         cwd,
         sessionName: "task-task-claude-done",
         claudeSessionId,
+        startedAt: Date.parse(completionTimestamp) - 1000,
       }),
     ]);
 

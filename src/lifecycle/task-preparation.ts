@@ -1,10 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import {
-  readTaskSessionsRegistry,
-  writeTaskSessionsRegistry,
-} from "../conversation.js";
+import { updateTaskSessionsRegistry } from "../conversation.js";
 import {
   TASK_BACKGROUND_DEFAULT,
   type AgentConfig,
@@ -111,12 +108,13 @@ export async function prepareTaskExecution({
 
   if (conversationId) {
     await mkdir(artifactsDir, { recursive: true });
-    const taskSessionsRegistry = readTaskSessionsRegistry(piDir);
-    taskSessionsRegistry[conversationId] = {
-      task_id: id,
-      updated_at: new Date().toISOString(),
-    };
-    writeTaskSessionsRegistry(piDir, taskSessionsRegistry);
+    updateTaskSessionsRegistry(piDir, (registry) => ({
+      ...registry,
+      [conversationId]: {
+        task_id: id,
+        updated_at: new Date().toISOString(),
+      },
+    }));
   }
 
   const descText = taskParams.description || "";

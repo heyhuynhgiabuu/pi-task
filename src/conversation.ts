@@ -23,18 +23,57 @@ export interface TaskSessionRegistryEntry {
   updated_at: string;
 }
 
+export type DurableStateFailure = "read" | "parse" | "shape";
+
+/** A durable state file exists but cannot safely participate in a read. */
+export class DurableStateError extends Error {
+  readonly file: string;
+  readonly reason: DurableStateFailure;
+
+  constructor(file: string, reason: DurableStateFailure) {
+    super(`Unreadable durable state: ${basename(file)} (${reason}).`);
+    this.name = "DurableStateError";
+    this.file = file;
+    this.reason = reason;
+  }
+}
+
 function ensureDir(path: string): void {
   mkdirSync(path, { recursive: true });
 }
 
-function readJsonFile<T>(file: string, fallback: T): T {
+type DurableJsonRead =
+  | { kind: "missing" }
+  | { kind: "valid"; value: unknown }
+  | { kind: "unreadable"; reason: DurableStateFailure };
+
+function readJsonFile(file: string): DurableJsonRead {
+  if (!existsSync(file)) return { kind: "missing" };
+
+  let raw: string;
   try {
-    if (!existsSync(file)) return fallback;
-    const parsed = JSON.parse(readFileSync(file, "utf-8")) as unknown;
-    return parsed as T;
+    raw = readFileSync(file, "utf-8");
   } catch {
-    return fallback;
+    return { kind: "unreadable", reason: "read" };
   }
+  try {
+    return { kind: "valid", value: JSON.parse(raw) as unknown };
+  } catch {
+    return { kind: "unreadable", reason: "parse" };
+  }
+}
+
+function readDurableJson(file: string): unknown | undefined {
+  const result = readJsonFile(file);
+  if (result.kind === "missing") return undefined;
+  if (result.kind === "unreadable") {
+    throw new DurableStateError(file, result.reason);
+  }
+  return result.value;
+}
+
+function unreadableShape(file: string): never {
+  throw new DurableStateError(file, "shape");
 }
 
 const LOCK_STALE_MS = 5 * 60 * 1000;
@@ -144,16 +183,16 @@ function getTaskSessionsRegistryPath(piDir: string): string {
   return join(getArtifactDir(piDir), TASK_SESSIONS_REGISTRY);
 }
 
-export function readTaskSessionsRegistry(
-  piDir: string,
+function parseTaskSessionsRegistry(
+  file: string,
+  parsed: unknown,
 ): Record<string, TaskSessionRegistryEntry> {
-  const raw = readJsonFile<Record<string, unknown>>(
-    getTaskSessionsRegistryPath(piDir),
-    {},
-  );
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    unreadableShape(file);
+  }
   const out: Record<string, TaskSessionRegistryEntry> = {};
-  for (const [key, value] of Object.entries(raw)) {
-    if (!value || typeof value !== "object") continue;
+  for (const [key, value] of Object.entries(parsed)) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
     const record = value as Record<string, unknown>;
     if (typeof record.task_id !== "string") continue;
     out[key] = {
@@ -167,12 +206,37 @@ export function readTaskSessionsRegistry(
   return out;
 }
 
+export function readTaskSessionsRegistry(
+  piDir: string,
+): Record<string, TaskSessionRegistryEntry> {
+  const file = getTaskSessionsRegistryPath(piDir);
+  const parsed = readDurableJson(file);
+  return parsed === undefined ? {} : parseTaskSessionsRegistry(file, parsed);
+}
+
 export function writeTaskSessionsRegistry(
   piDir: string,
   registry: Record<string, TaskSessionRegistryEntry>,
 ): void {
   const file = getTaskSessionsRegistryPath(piDir);
   withFileLock(file, () => writeJsonFile(file, registry));
+}
+
+/** Apply a conversation-map update while holding its cross-process lock. */
+export function updateTaskSessionsRegistry(
+  piDir: string,
+  update: (
+    registry: Record<string, TaskSessionRegistryEntry>,
+  ) => Record<string, TaskSessionRegistryEntry>,
+): Record<string, TaskSessionRegistryEntry> {
+  const file = getTaskSessionsRegistryPath(piDir);
+  return withFileLock(file, () => {
+    const parsed = readDurableJson(file);
+    const current = parsed === undefined ? {} : parseTaskSessionsRegistry(file, parsed);
+    const next = update(current);
+    writeJsonFile(file, next);
+    return next;
+  });
 }
 
 function getRegistryPath(piDir: string): string {
@@ -200,8 +264,10 @@ export function migrateRegistryEntry(entry: Record<string, unknown> | RegistryEn
 }
 
 export function readRegistry(piDir: string): RegistryEntry[] {
-  const parsed = readJsonFile<unknown>(getRegistryPath(piDir), []);
-  if (!Array.isArray(parsed)) return [];
+  const file = getRegistryPath(piDir);
+  const parsed = readDurableJson(file);
+  if (parsed === undefined) return [];
+  if (!Array.isArray(parsed)) unreadableShape(file);
   return parsed
     .filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object")
     .map((entry) => migrateRegistryEntry(entry));
@@ -221,12 +287,13 @@ export function updateRegistry(
 ): RegistryEntry[] {
   const file = getRegistryPath(piDir);
   return withFileLock(file, () => {
-    const parsed = readJsonFile<unknown>(file, []);
-    const current = Array.isArray(parsed)
-      ? parsed
+    const parsed = readDurableJson(file);
+    if (parsed !== undefined && !Array.isArray(parsed)) unreadableShape(file);
+    const current = parsed === undefined
+      ? []
+      : parsed
           .filter((entry): entry is Record<string, unknown> => Boolean(entry) && typeof entry === "object")
-          .map((entry) => migrateRegistryEntry(entry))
-      : [];
+          .map((entry) => migrateRegistryEntry(entry));
     const next = update(current);
     writeJsonFile(file, next.map((entry) => migrateRegistryEntry(entry)));
     return next;
@@ -248,7 +315,11 @@ function parseTaskSessionHistory(parsed: unknown): TaskSessionHistoryEntry[] {
 }
 
 export function readTaskSessionHistory(piDir: string): TaskSessionHistoryEntry[] {
-  return parseTaskSessionHistory(readJsonFile<unknown>(getTaskSessionHistoryPath(piDir), []));
+  const file = getTaskSessionHistoryPath(piDir);
+  const parsed = readDurableJson(file);
+  if (parsed === undefined) return [];
+  if (!Array.isArray(parsed)) unreadableShape(file);
+  return parseTaskSessionHistory(parsed);
 }
 
 export function upsertTaskSessionHistory(
@@ -257,7 +328,9 @@ export function upsertTaskSessionHistory(
 ): void {
   const file = getTaskSessionHistoryPath(piDir);
   withFileLock(file, () => {
-    const entries = parseTaskSessionHistory(readJsonFile<unknown>(file, []));
+    const parsed = readDurableJson(file);
+    if (parsed !== undefined && !Array.isArray(parsed)) unreadableShape(file);
+    const entries = parseTaskSessionHistory(parsed ?? []);
     const idx = entries.findIndex((existing) => existing.id === entry.id);
     if (idx >= 0) {
       entries[idx] = { ...entries[idx], ...entry };
@@ -276,7 +349,9 @@ export function markComparisonGroupDelivered(
   const ids = new Set(taskIds);
   const file = getTaskSessionHistoryPath(piDir);
   withFileLock(file, () => {
-    const entries = parseTaskSessionHistory(readJsonFile<unknown>(file, []));
+    const parsed = readDurableJson(file);
+    if (parsed !== undefined && !Array.isArray(parsed)) unreadableShape(file);
+    const entries = parseTaskSessionHistory(parsed ?? []);
     let changed = false;
     const updated = entries.map((entry) => {
       if (!ids.has(entry.id) || entry.comparisonDelivered === true) return entry;
@@ -295,7 +370,9 @@ export function markComparisonGroupPartiallyDelivered(
   const ids = new Set(taskIds);
   const historyFile = getTaskSessionHistoryPath(piDir);
   withFileLock(historyFile, () => {
-    const entries = parseTaskSessionHistory(readJsonFile<unknown>(historyFile, []));
+    const parsed = readDurableJson(historyFile);
+    if (parsed !== undefined && !Array.isArray(parsed)) unreadableShape(historyFile);
+    const entries = parseTaskSessionHistory(parsed ?? []);
     let changed = false;
     const updated = entries.map((entry) => {
       if (!ids.has(entry.id) || entry.comparisonPartialDelivered === true) return entry;

@@ -1,5 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { basename } from "node:path";
 import {
+  DurableStateError,
   readRegistry,
   readTaskSessionHistory,
 } from "./conversation.js";
@@ -100,11 +102,30 @@ function errorResult(
   };
 }
 
+function durableStateErrorResult(
+  request: TaskControlRequest,
+  error: DurableStateError,
+): TaskControlToolResult {
+  const file = basename(error.file);
+  return errorResult(
+    request,
+    `${error.message} Cannot inspect or modify tasks until ${file} is repaired.`,
+    "durable_state_unreadable",
+    { file, reason: error.reason },
+  );
+}
+
 export function handleTaskControl(
   request: TaskControlRequest,
   deps: TaskControlDependencies,
 ): TaskControlToolResult {
-  const record = findTaskRecord(request.taskId, taskControlRecords(deps));
+  let record: TaskControlRecord | undefined;
+  try {
+    record = findTaskRecord(request.taskId, taskControlRecords(deps));
+  } catch (error) {
+    if (error instanceof DurableStateError) return durableStateErrorResult(request, error);
+    throw error;
+  }
   if (!record) {
     return errorResult(request, `Task "${request.taskId}" was not found.`, "task_not_found");
   }
@@ -145,7 +166,13 @@ export function handleTaskControl(
     );
   }
 
-  const entry = readRegistry(deps.piDir).find((candidate) => candidate.id === record.id);
+  let entry: RegistryEntry | undefined;
+  try {
+    entry = readRegistry(deps.piDir).find((candidate) => candidate.id === record.id);
+  } catch (error) {
+    if (error instanceof DurableStateError) return durableStateErrorResult(request, error);
+    throw error;
+  }
   if (!entry) {
     return errorResult(
       request,

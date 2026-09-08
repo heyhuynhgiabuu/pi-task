@@ -5,8 +5,12 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   findJsonlSessionByName,
+  readRegistry,
   readTaskSessionHistory,
+  readTaskSessionsRegistry,
   repairTaskSessionRef,
+  updateRegistry,
+  updateTaskSessionsRegistry,
   upsertTaskSessionHistory,
 } from "../src/conversation.js";
 
@@ -39,6 +43,60 @@ function seedHistory(
   });
   return sessionName;
 }
+
+test("fails closed on an unreadable top-level registry", () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-registry-corrupt-"));
+  const registryPath = join(piDir, "task-registry.json");
+  const corrupt = "{not-json";
+  writeFileSync(registryPath, corrupt, "utf-8");
+
+  assert.throws(
+    () => readRegistry(piDir),
+    /unreadable durable state/i,
+  );
+  assert.throws(() => updateRegistry(piDir, () => []), /unreadable durable state/i);
+  assert.equal(readFileSync(registryPath, "utf-8"), corrupt);
+});
+
+test("fails closed on an unreadable top-level conversation map", () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-conversation-map-corrupt-"));
+  const artifactsDir = join(piDir, "artifacts");
+  mkdirSync(artifactsDir, { recursive: true });
+  const mapPath = join(artifactsDir, "task-sessions.json");
+  const corrupt = "{not-json";
+  writeFileSync(mapPath, corrupt, "utf-8");
+
+  assert.throws(() => readTaskSessionsRegistry(piDir), /unreadable durable state/i);
+  assert.throws(
+    () => updateTaskSessionsRegistry(piDir, () => ({})),
+    /unreadable durable state/i,
+  );
+  assert.equal(readFileSync(mapPath, "utf-8"), corrupt);
+});
+
+test("fails closed on an unreadable top-level history", () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-history-corrupt-"));
+  const historyPath = join(piDir, "task-session-history.json");
+  const corrupt = "[not-json";
+  writeFileSync(historyPath, corrupt, "utf-8");
+
+  assert.throws(() => readTaskSessionHistory(piDir), /unreadable durable state/i);
+  assert.throws(
+    () => upsertTaskSessionHistory(piDir, {
+      id: "task-history-corrupt",
+      agentType: "general",
+      description: "must not overwrite",
+      sessionName: "task-history-corrupt",
+      startedAt: Date.now(),
+      piDir,
+      dir: join(piDir, "artifacts", "tasks"),
+      status: "done",
+      background: true,
+    }),
+    /unreadable durable state/i,
+  );
+  assert.equal(readFileSync(historyPath, "utf-8"), corrupt);
+});
 
 test("finds a session via the artifact root recorded in history", () => {
   const piDir = mkdtempSync(join(tmpdir(), "pi-task-lookup-dir-"));

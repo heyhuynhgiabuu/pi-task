@@ -6,6 +6,9 @@ import {
   turnLimitWrapUpPrompt,
 } from "../constants.js";
 import {
+  DurableStateError,
+} from "../conversation.js";
+import {
   getLastAssistantResultFromSessionDir,
   getLastAssistantTextFromSessionDir,
 } from "../session-text.js";
@@ -59,6 +62,7 @@ export function startBackgroundPolling(
   let stopped = false;
   let inFlight = false;
   const pollErrors = new Map<string, number>();
+  const durableStateReported = new Set<string>();
 
   // Terminal settlement shared by the timeout, completed, failed, and
   // poll-error paths: deliver durably, then retire the task from the maps.
@@ -94,6 +98,17 @@ export function startBackgroundPolling(
       // Widget refresh is best-effort.
     }
     pollErrors.delete(id);
+    durableStateReported.delete(id);
+  };
+  const reportDurableStateBlocked = (id: string, error: unknown): boolean => {
+    if (!(error instanceof DurableStateError)) return false;
+    // Keep the diagnostic bounded while retaining the task for retry after the
+    // unreadable durable file is repaired.
+    if (!durableStateReported.has(id)) {
+      durableStateReported.add(id);
+      console.error(`[pi-task] background task ${id} settlement blocked: ${error.message}`);
+    }
+    return true;
   };
   const pollTask = async (id: string, task: BackgroundTask): Promise<void> => {
     if (task.backend === "sdk") return;
@@ -193,6 +208,7 @@ export function startBackgroundPolling(
       if (error instanceof Error && error.name === "HerdrUnavailableError") {
         return;
       }
+      if (reportDurableStateBlocked(id, error)) return;
       const count = (pollErrors.get(id) ?? 0) + 1;
       pollErrors.set(id, count);
       if (count >= deps.MAX_POLL_ERRORS) {
@@ -204,10 +220,11 @@ export function startBackgroundPolling(
             `Background task polling failed: ${error instanceof Error ? error.message : String(error)}`,
             "failed",
           );
-        } catch {
+        } catch (settlementError) {
           // A durable-write failure while reporting the poll failure must
           // not escape the tick as an unhandled rejection; keep the task
           // so a later tick can retry settlement.
+          reportDurableStateBlocked(id, settlementError);
         }
       }
     }

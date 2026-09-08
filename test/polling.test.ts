@@ -19,6 +19,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { BACKGROUND_POLL_CONCURRENCY } from "../src/constants.js";
+import { DurableStateError } from "../src/conversation.js";
 import { startBackgroundPolling } from "../src/lifecycle/polling.js";
 import { startToolStatsPolling } from "../src/lifecycle/toolStats.js";
 
@@ -509,6 +510,89 @@ console.log("ALL POLLING TESTS PASSED");
     assert.equal(unhandled.length, 0, `${t}: no unhandled rejections (${unhandled.map(String).join("; ")})`);
   } finally {
     process.off("unhandledRejection", onUnhandled);
+  }
+}
+
+{
+  const t = "DurableStateError during max-poll settlement logs once";
+  const backgroundTasks = new Map<any, any>();
+  const taskId = "t-durable-state-max-poll";
+  backgroundTasks.set(taskId, {
+    dir: "/tmp/pi-task-durable-state-max-poll",
+    sessionName: "task-durable-state-max-poll",
+    paneId: "%11",
+    originalPane: null,
+    startedAt: Date.now(),
+  });
+  const diagnostics: string[] = [];
+  const previousError = console.error;
+  console.error = (...args: unknown[]) => diagnostics.push(args.map(String).join(" "));
+  const stop = startBackgroundPolling(
+    makeDeps({
+      backgroundTasks,
+      MAX_POLL_ERRORS: 1,
+      checkTaskCompletion: async () => {
+        throw new Error("transient poll failure");
+      },
+      completeTask: () => {
+        throw new DurableStateError(
+          "/tmp/pi-task-durable-state-max-poll/task-registry.json",
+          "parse",
+        );
+      },
+    }),
+    5,
+  );
+  try {
+    await sleep(35);
+    assert.equal(backgroundTasks.has(taskId), true, t + ": task is retained");
+    assert.equal(diagnostics.length, 1, t + ": diagnostic is bounded");
+  } finally {
+    stop();
+    console.error = previousError;
+  }
+}
+
+{
+  const t = "DurableStateError during settlement retains the task and logs once";
+  const backgroundTasks = new Map<any, any>();
+  const taskId = "t-durable-state";
+  backgroundTasks.set(taskId, {
+    dir: "/tmp/pi-task-durable-state",
+    sessionName: "task-durable-state",
+    paneId: "%10",
+    originalPane: null,
+    startedAt: Date.now(),
+  });
+  let blocked = true;
+  let completeCalls = 0;
+  const diagnostics: string[] = [];
+  const previousError = console.error;
+  console.error = (...args: unknown[]) => diagnostics.push(args.map(String).join(" "));
+  const stop = startBackgroundPolling(
+    makeDeps({
+      backgroundTasks,
+      checkTaskCompletion: async () => ({ status: "completed", content: "done" }),
+      completeTask: () => {
+        completeCalls += 1;
+        if (blocked) {
+          throw new DurableStateError("/tmp/pi-task-durable-state/task-registry.json", "parse");
+        }
+      },
+    }),
+    5,
+  );
+  try {
+    await sleep(35);
+    assert.ok(completeCalls > 0, t + ": settlement was attempted");
+    assert.equal(backgroundTasks.has(taskId), true, t + ": task is retained");
+    assert.equal(diagnostics.length, 1, t + ": diagnostic is bounded");
+    blocked = false;
+    await sleep(35);
+    assert.equal(backgroundTasks.has(taskId), false, t + ": task settles after repair");
+  } finally {
+    stop();
+    console.error = previousError;
   }
 }
 

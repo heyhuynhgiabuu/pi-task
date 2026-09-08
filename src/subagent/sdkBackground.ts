@@ -1,4 +1,5 @@
 import {
+  DurableStateError,
   readTaskSessionHistory,
   upsertTaskSessionHistory,
 } from "../conversation.js";
@@ -43,6 +44,12 @@ type HistoryExtras = Partial<
   >
 >;
 
+function reportDurableRecordFailure(error: unknown, phase: string): void {
+  if (error instanceof DurableStateError) {
+    console.error(`[pi-task] SDK background ${phase} durable record failed: ${error.message}`);
+  }
+}
+
 export function startSdkBackgroundTask(input: SdkBackgroundTaskInput): void {
   const now = input.now ?? Date.now;
 
@@ -76,7 +83,8 @@ export function startSdkBackgroundTask(input: SdkBackgroundTaskInput): void {
 
   try {
     record("running");
-  } catch {
+  } catch (error) {
+    reportDurableRecordFailure(error, "launch");
     // A durable-write failure at launch must not prevent the task from
     // starting; the lifecycle handlers below keep their own guards.
   }
@@ -98,7 +106,8 @@ export function startSdkBackgroundTask(input: SdkBackgroundTaskInput): void {
           resultValid: assessment.valid,
           completedAt: now(),
         });
-      } catch {
+      } catch (error) {
+        reportDurableRecordFailure(error, "completion");
         // See the step-guard note above.
       }
       const notify = () => {
@@ -119,7 +128,8 @@ export function startSdkBackgroundTask(input: SdkBackgroundTaskInput): void {
       const status: TaskSessionHistoryEntry["status"] = timeout ? "timeout" : "failed";
       try {
         record(status, { completedAt: now() });
-      } catch {
+      } catch (error) {
+        reportDurableRecordFailure(error, "failure");
         // Best-effort durable record of the failure.
       }
       const notify = () => {

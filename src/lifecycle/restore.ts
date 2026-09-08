@@ -59,7 +59,17 @@ export async function restoreActiveBackgroundTasks(
   closeResource?: (entry: RegistryEntry) => void | Promise<void>,
   session?: { sessionId: string; isProcessAlive?: (pid: number) => boolean },
 ): Promise<void> {
-  const registry = readRegistry(piDir);
+  let registry: RegistryEntry[];
+  try {
+    registry = readRegistry(piDir);
+  } catch (error) {
+    // A corrupt top-level registry is not an empty registry: preserve it and
+    // let the next startup retry after repair instead of adopting nothing.
+    console.error(
+      `[pi-task] background restore skipped: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return;
+  }
   const staleIds: string[] = [];
   const ownerAlive = session?.isProcessAlive ?? defaultProcessAlive;
   const terminalReceipt = (

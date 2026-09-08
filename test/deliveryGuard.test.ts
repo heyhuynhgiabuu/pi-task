@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import { restoreBackgroundTaskDeliveryGuards } from "../src/lifecycle/ownership.js";
 import { DeliveryGuard } from "../src/panel/delivery.js";
 
 function makeSession(over: Partial<{
@@ -42,6 +43,21 @@ test("DeliveryGuard restores a durable parent context after restart", () => {
     branchIds: ["root", "leaf-9"],
   });
   guard.restore("t1", { sessionId: "sess-1", leafId: "leaf-1" });
+  assert.equal(guard.allows(otherBranch, "t1"), false);
+});
+
+test("restores active task delivery guards independently of durable history", () => {
+  const guard = new DeliveryGuard();
+  const tasks = new Map([
+    ["t1", { ownerSessionId: "sess-1", ownerLeafId: "leaf-1" }],
+  ]);
+  restoreBackgroundTaskDeliveryGuards(tasks, "sess-1", guard);
+
+  const otherBranch = makeSession({
+    id: "sess-1",
+    leafId: "leaf-9",
+    branchIds: ["root", "leaf-9"],
+  });
   assert.equal(guard.allows(otherBranch, "t1"), false);
 });
 

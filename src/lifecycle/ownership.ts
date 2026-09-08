@@ -3,7 +3,7 @@ import {
   updateRegistry,
   upsertTaskSessionHistory,
 } from "../conversation.js";
-import type { SessionView } from "../panel/delivery.js";
+import type { DeliveryGuard, SessionView } from "../panel/delivery.js";
 import type { BackgroundTask, RegistryEntry } from "../types.js";
 
 /** Return the durable parent context for a task spawned from a Pi session. */
@@ -15,6 +15,25 @@ export function durableParentOf(
     ownerSessionId: ownerSessionId || undefined,
     ownerLeafId: ownerSessionId ? session.getLeafId() : undefined,
   };
+}
+
+/** Restore delivery ownership for tasks already adopted from the registry. */
+export function restoreBackgroundTaskDeliveryGuards(
+  backgroundTasks: ReadonlyMap<
+    string,
+    Pick<BackgroundTask, "ownerSessionId" | "ownerLeafId">
+  >,
+  sessionId: string,
+  deliveryGuard: DeliveryGuard,
+): void {
+  if (!sessionId) return;
+  for (const [id, task] of backgroundTasks) {
+    if (task.ownerSessionId === undefined) continue;
+    deliveryGuard.restore(id, {
+      sessionId: task.ownerSessionId,
+      leafId: task.ownerLeafId ?? null,
+    });
+  }
 }
 
 /** Transfer durable lifecycle ownership to the session resuming a task. */

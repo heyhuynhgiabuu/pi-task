@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -295,6 +295,42 @@ test("task tool explains malformed control payloads instead of reporting a gener
       invalidStart.details?.reason,
       "agent_type must be a string; prompt must be a string; description must be a string",
     );
+
+    mkdirSync(join(isolatedCwd, ".pi"), { recursive: true });
+    writeFileSync(join(isolatedCwd, ".pi", "task-registry.json"), "{not-json", "utf-8");
+    const corruptState = await tool.execute("call-4", {
+      operation: "status",
+      task_id: "none",
+    }, new AbortController().signal, undefined, { cwd: isolatedCwd });
+    assert.equal(corruptState.content[0]?.text, "Unreadable durable state: task-registry.json (parse). Cannot inspect or modify tasks until task-registry.json is repaired.");
+    assert.equal(corruptState.details?.error, "durable_state_unreadable");
+
+    // Launches use the same tool boundary. A rejected admission promise must
+    // become the structured durable-state result rather than a raw rejection.
+    rmSync(join(isolatedCwd, ".pi", "task-registry.json"), { force: true });
+    mkdirSync(join(isolatedCwd, ".pi", "agents"), { recursive: true });
+    writeFileSync(
+      join(isolatedCwd, ".pi", "agents", "reviewer.md"),
+      "---\\ndescription: Test reviewer\\n---\\n\\nReview the requested files.",
+      "utf-8",
+    );
+    mkdirSync(join(isolatedCwd, ".pi", "artifacts"), { recursive: true });
+    const mapPath = join(isolatedCwd, ".pi", "artifacts", "task-sessions.json");
+    const corruptMap = "{not-json";
+    writeFileSync(mapPath, corruptMap, "utf-8");
+    const corruptLaunch = await tool.execute("call-5", {
+      agent_type: "reviewer",
+      description: "Review source changes",
+      prompt: "Review the current working tree.",
+      parent_context: "The launch boundary must preserve durable state.",
+      proposed_changes: ["No design changes"],
+      conversation_id: "corrupt-conversation",
+    }, new AbortController().signal, undefined, { cwd: isolatedCwd });
+    assert.equal(corruptLaunch.details?.error, "durable_state_unreadable");
+    assert.equal(corruptLaunch.details?.file, "task-sessions.json");
+    assert.equal(corruptLaunch.isError, true);
+    assert.match(corruptLaunch.content[0]?.text ?? "", /repair the durable file/i);
+    assert.equal(readFileSync(mapPath, "utf-8"), corruptMap);
   } finally {
     process.chdir(originalCwd);
     rmSync(isolatedCwd, { recursive: true, force: true });
@@ -410,6 +446,26 @@ test("status control reads durable history without touching backend resources", 
   assert.equal(result.isError, undefined);
   assert.equal(result.details.task_id, "task-history");
   assert.equal(result.details.status, "done");
+});
+
+test("status reports unreadable durable state instead of treating it as empty", () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-control-corrupt-"));
+  writeFileSync(join(piDir, "task-registry.json"), "{not-json", "utf-8");
+
+  const result = handleTaskControl(
+    { operation: "status", taskId: "task-corrupt" },
+    {
+      pi: {} as never,
+      piDir,
+      backgroundTasks: new Map(),
+      registryEntryStatus: () => "missing",
+      clearTaskWidgetIfIdle: () => {},
+    },
+  );
+
+  assert.equal(result.isError, true);
+  assert.equal(result.details.error, "durable_state_unreadable");
+  assert.match(result.content[0].text, /unreadable durable state/i);
 });
 
 test("cancel control refuses an active SDK task explicitly", () => {

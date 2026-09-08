@@ -8,6 +8,7 @@ import { describeCommandFailure } from "../subagent/terminalBackend.js";
 import {
   launchTerminalTask,
 } from "../subagent/terminal-launch.js";
+import { killAgentPaneStrictAsync } from "../subagent/tmux.js";
 import type {
   TerminalBackend,
   TerminalBackendKind,
@@ -55,6 +56,19 @@ export interface TerminalExecutionOptions {
   ensureTaskWidget: () => void;
 }
 
+async function closeLaunchedResource(
+  handle: TerminalHandle,
+  paneId: string,
+  originalPane: string | null,
+  terminalBackend: TerminalBackend,
+): Promise<void> {
+  if (handle.backend === "herdr") {
+    await terminalBackend.close(handle);
+  } else {
+    await killAgentPaneStrictAsync(paneId, originalPane);
+  }
+}
+
 export async function executeTerminalTask({
   id,
   agentName,
@@ -87,6 +101,9 @@ export async function executeTerminalTask({
   ensureTaskWidget,
 }: TerminalExecutionOptions) {
   const claudeRuntime = runtime === "claude";
+  const owner = durableParentOf(sessionViewOf(ctx));
+  const ownerSessionId = owner.ownerSessionId;
+  const ownerLeafId = owner.ownerLeafId;
   let paneId: string;
   let originalPane: string | null;
   let handle: TerminalHandle;
@@ -133,37 +150,52 @@ export async function executeTerminalTask({
     };
   }
 
-  const owner = durableParentOf(sessionViewOf(ctx));
-  const ownerSessionId = owner.ownerSessionId;
-  const ownerLeafId = owner.ownerLeafId;
   // ── FOREGROUND MODE: block until result, return directly ────────────
   if (foregroundTask !== undefined) {
-    return executeTerminalForegroundTask({
-      id,
-      agentType: agentName,
-      description,
-      sessionName,
-      sessionDir,
-      artifactsDir,
-      taskCwd: cwd,
-      conversationId,
-      piDir,
-      runtime,
-      claudeSessionId,
-      claudeSessionFile,
-      handle,
-      paneId,
-      originalPane,
-      startedAt: foregroundTask?.startedAt ?? Date.now(),
-      ownerSessionId,
-      ownerLeafId,
-      selectedBackend,
-      terminalBackend,
-      signal,
-      onUpdate,
-      foregroundTasks,
-      clearTaskWidgetIfIdle,
-    });
+    try {
+      return await executeTerminalForegroundTask({
+        id,
+        agentType: agentName,
+        description,
+        sessionName,
+        sessionDir,
+        artifactsDir,
+        taskCwd: cwd,
+        conversationId,
+        piDir,
+        runtime,
+        claudeSessionId,
+        claudeSessionFile,
+        handle,
+        paneId,
+        originalPane,
+        startedAt: foregroundTask?.startedAt ?? Date.now(),
+        ownerSessionId,
+        ownerLeafId,
+        selectedBackend,
+        terminalBackend,
+        signal,
+        onUpdate,
+        foregroundTasks,
+        clearTaskWidgetIfIdle,
+      });
+    } catch (error) {
+      foregroundTasks.delete(id);
+      deliveryGuard.forget(id);
+      try {
+        await closeLaunchedResource(handle, paneId, originalPane, terminalBackend);
+      } catch (cleanupError) {
+        console.error(
+          `[pi-task] foreground task ${id} cleanup failed: ${describeCommandFailure(cleanupError)}`,
+        );
+      }
+      try {
+        clearTaskWidgetIfIdle();
+      } catch {
+        // Widget refresh is best-effort while unwinding a failed task.
+      }
+      throw error;
+    }
   }
 
   // ── BACKGROUND MODE (default): add to tracker, return immediately ─────
@@ -190,15 +222,33 @@ export async function executeTerminalTask({
     backend: selectedBackend,
   };
 
-  registerBackgroundTask({
-    id,
-    task: bgtask,
-    piDir,
-    pi,
-    backgroundTasks,
-    trackDelivery: () => deliveryGuard.track(id, sessionViewOf(ctx)),
-    ensureTaskWidget,
-  });
+  try {
+    registerBackgroundTask({
+      id,
+      task: bgtask,
+      piDir,
+      pi,
+      backgroundTasks,
+      trackDelivery: () => deliveryGuard.track(id, sessionViewOf(ctx)),
+      ensureTaskWidget,
+    });
+  } catch (error) {
+    backgroundTasks.delete(id);
+    deliveryGuard.forget(id);
+    try {
+      await closeLaunchedResource(handle, paneId, originalPane, terminalBackend);
+    } catch (cleanupError) {
+      console.error(
+        `[pi-task] background task ${id} cleanup failed: ${describeCommandFailure(cleanupError)}`,
+      );
+    }
+    try {
+      clearTaskWidgetIfIdle();
+    } catch {
+      // Widget refresh is best-effort while unwinding a failed task.
+    }
+    throw error;
+  }
 
   // Do not kill a background subagent when the parent session aborts or is
   // replaced. Background tasks are intentionally detached; the registry and

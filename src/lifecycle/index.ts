@@ -25,3 +25,5 @@ export { registerBackgroundTask } from "./background-registration.js";
 export type { BackgroundTaskRegistrationOptions } from "./background-registration.js";
 export { executeSdkTask } from "./sdk-execution.js";
 export type { SdkTaskExecutionOptions } from "./sdk-execution.js";
+export { executeSdkComparison } from "./comparison-sdk-execution.js";
+export type { SdkComparisonExecutionOptions, SdkComparisonSibling } from "./comparison-sdk-execution.js";

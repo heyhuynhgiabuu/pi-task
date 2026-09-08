@@ -51,22 +51,15 @@ import {
   buildPiArgs,
   buildTaskToolDescription,
       discoverAgents,
-      subscribeToolEvents,
   resolveTaskAgentPreflight,
   resolveTaskFastMode,
   envTurnLimit,
-  assessTaskResult,
   formatBackgroundReceipt,
   formatComparisonReport,
   isTaskCompareAllowed,
-  parseResultXml,
   resolveCompareModels,
-  type ComparisonRunResult,
 } from "./helpers.js";
-import {
-  ComparisonCoordinator,
-  persistComparisonTaskHistory,
-} from "./comparison.js";
+import { ComparisonCoordinator } from "./comparison.js";
 import { restoreComparisonGroups } from "./comparison-restore.js";
 export { restoreComparisonGroups } from "./comparison-restore.js";
 export type {
@@ -88,14 +81,11 @@ import {
   transferTaskOwnership,
   createRegistryEntryStatus,
   executeSdkTask,
+  executeSdkComparison,
   createComparisonSettledHandler,
 } from "./lifecycle/index.js";
 import { DeliveryGuard, sessionViewOf } from "./panel/delivery.js";
-import {
-  reconcileStaleSdkBackgroundTasks,
-  startSdkBackgroundTask,
-} from "./subagent/sdkBackground.js";
-import { runSdkSubagent } from "./subagent/runSdk.js";
+import { reconcileStaleSdkBackgroundTasks } from "./subagent/sdkBackground.js";
 import { resolveAgentSkillPaths } from "./subagent/skills.js";
 import {
   createDefaultHerdrTerminalBackend,
@@ -1007,297 +997,34 @@ export default function (pi: ExtensionAPI) {
         });
 
         if (selectedBackend === "sdk") {
-          if (!isBackground) {
-            const fgTasks = siblings.map((s) => {
-              const fg: BackgroundTask = {
-                dir: artifactsDir,
-                cwd: taskCwd,
-                agentType: agent.name,
-                sessionName: s.sessionName,
-                backend: "sdk",
-                originalPane: null,
-                description: s.desc,
-                startedAt: Date.now(),
-                toolUses: 0,
-                turns: 0,
-                ...durableParentOf(sessionViewOf(ctx)),
-                recentCalls: [],
-                comparisonGroupId: groupId,
-                comparisonModel: s.model,
-                comparisonDescription: descText,
-                comparisonIndex: s.index,
-              };
-              foregroundTasks.set(s.id, fg);
-              return fg;
-            });
-            ignoreStaleExtensionCtx(() => ensureTaskWidget(ctx));
-
-            try {
-              for (let i = 0; i < siblings.length; i++) {
-                persistComparisonTaskHistory(piDir, {
-                  id: siblings[i]!.id,
-                  task: fgTasks[i]!,
-                  status: "running",
-                  background: false,
-                });
-              }
-              const runs = (await Promise.all(
-                siblings.map(async (s, i) => {
-                  const fg = fgTasks[i]!;
-                  try {
-                    const res = await runSdkSubagent({
-                      onSession: (session) => subscribeToolEvents(session, fg, 10, taskWidget.requestRender),
-                      sessionName: fg.sessionName,
-                      prompt: promptContent,
-                      agent: s.agent,
-                      cwd: taskCwd,
-                      ctx,
-                      model: s.model,
-                      thinkingLevel: s.agent.thinking,
-                      tools: toolSelection.tools,
-                      excludeTools: toolSelection.excludeTools,
-                      systemPrompt: agent.body,
-                      skillPaths,
-                      fast: effectiveFast,
-                      signal,
-                      timeoutMs: TASK_TIMEOUT_MS,
-                    });
-                    const parsed = parseResultXml(res.output);
-                    const assess = assessTaskResult(parsed);
-                    const run = {
-                      model: s.model,
-                      taskId: s.id,
-                      status: assess.reportedStatus,
-                      rawStatus: assess.rawStatus,
-                      summary: parsed.summary,
-                      findings: parsed.findings,
-                      evidence: parsed.evidence,
-                      files: parsed.files,
-                      caveats: parsed.caveats,
-                      nextSteps: parsed.next_steps,
-                      toolUses: fg.toolUses,
-                      durationMs: Date.now() - fg.startedAt,
-                      sessionPath: res.sessionPath ?? undefined,
-                    } satisfies ComparisonRunResult;
-                    persistComparisonTaskHistory(piDir, {
-                      id: s.id,
-                      task: fg,
-                      status: "done",
-                      background: false,
-                      sessionRef: run.sessionPath,
-                      reportedStatus: assess.reportedStatus,
-                      rawStatus: assess.rawStatus,
-                      resultValid: assess.valid,
-                      completedAt: Date.now(),
-                    });
-                    return run;
-                  } catch (err) {
-                    const error = err instanceof Error ? err.message : String(err);
-                    const run = {
-                      model: s.model,
-                      taskId: s.id,
-                      status: "failure",
-                      rawStatus: "failed",
-                      summary: "",
-                      findings: "",
-                      evidence: "",
-                      files: "",
-                      caveats: "",
-                      nextSteps: "",
-                      toolUses: fg.toolUses,
-                      durationMs: Date.now() - fg.startedAt,
-                      error,
-                    } satisfies ComparisonRunResult;
-                    persistComparisonTaskHistory(piDir, {
-                      id: s.id,
-                      task: fg,
-                      status: "failed",
-                      background: false,
-                      reportedStatus: "failure",
-                      rawStatus: "failed",
-                      resultValid: false,
-                      completedAt: Date.now(),
-                    });
-                    return run;
-                  }
-                }),
-              )) as [ComparisonRunResult, ComparisonRunResult];
-
-              const report = formatComparisonReport({
-                agentType: agent.name,
-                description: descText,
-                runs,
-              });
-
-              return {
-                content: [{ type: "text" as const, text: report }],
-                details: {
-                  phase: "done" as const,
-                  compare: true,
-                  agent_type: agent.name,
-                  description: descText,
-                  models: [modelA, modelB],
-                  runs,
-                },
-              };
-            } finally {
-              for (const s of siblings) foregroundTasks.delete(s.id);
-              clearTaskWidgetIfIdle();
-            }
-          }
-
-          // SDK Background
-          comparisonCoordinator.registerGroup(
-            groupId,
+          return executeSdkComparison({
+            siblings,
             baseId,
-            agent.name,
-            descText,
-            [id0, id1],
-            [modelA, modelB],
-          );
-
-          for (const s of siblings) {
-            const bg: BackgroundTask = {
-              dir: artifactsDir,
-              cwd: taskCwd,
-              agentType: agent.name,
-              sessionName: s.sessionName,
-              backend: "sdk",
-              originalPane: null,
-              description: s.desc,
-              startedAt: Date.now(),
-              toolUses: 0,
-              turns: 0,
-              ...durableParentOf(sessionViewOf(ctx)),
-              recentCalls: [],
-              comparisonGroupId: groupId,
-              comparisonModel: s.model,
-              comparisonDescription: descText,
-              comparisonIndex: s.index,
-            };
-            backgroundTasks.set(s.id, bg);
-            deliveryGuard.track(s.id, sessionViewOf(ctx));
-
-            startSdkBackgroundTask({
-              id: s.id,
-              agentType: agent.name,
-              description: s.desc,
-              sessionName: s.sessionName,
-              startedAt: bg.startedAt,
-              piDir,
-              artifactsDir,
-              cwd: taskCwd,
-              comparisonGroupId: groupId,
-              comparisonModel: s.model,
-              comparisonDescription: descText,
-              comparisonIndex: s.index,
-              ...durableParentOf(sessionViewOf(ctx)),
-              run: () =>
-                runSdkSubagent({
-                  onSession: (session) => subscribeToolEvents(session, bg, 10, taskWidget.requestRender),
-                  sessionName: s.sessionName,
-                  prompt: promptContent,
-                  agent: s.agent,
-                  cwd: taskCwd,
-                  ctx,
-                  model: s.model,
-                  thinkingLevel: s.agent.thinking,
-                  tools: toolSelection.tools,
-                  excludeTools: toolSelection.excludeTools,
-                  systemPrompt: agent.body,
-                  skillPaths,
-                  fast: effectiveFast,
-                  timeoutMs: TASK_TIMEOUT_MS,
-                }),
-              onComplete: (result) => {
-                bg.status = "done";
-                const parsed = parseResultXml(result.output);
-                const assess = assessTaskResult(parsed);
-                comparisonCoordinator.recordTaskSettled(
-                  s.id,
-                  {
-                    model: s.model,
-                    taskId: s.id,
-                    status: assess.reportedStatus,
-                    rawStatus: assess.rawStatus,
-                    summary: parsed.summary,
-                    findings: parsed.findings,
-                    evidence: parsed.evidence,
-                    files: parsed.files,
-                    caveats: parsed.caveats,
-                    nextSteps: parsed.next_steps,
-                    toolUses: bg.toolUses,
-                    durationMs: Date.now() - bg.startedAt,
-                    sessionPath: result.sessionPath ?? undefined,
-                  },
-                  pi,
-                  deliveryGuard.allows(sessionViewOf(ctx), s.id),
-                  undefined,
-                  (taskId) => {
-                    const current = taskWidget.getContext();
-                    return current ? deliveryGuard.allows(sessionViewOf(current), taskId) : true;
-                  },
-                  (taskIds) => markComparisonGroupPartiallyDelivered(piDir, taskIds),
-                );
-              },
-              onFailed: (error) => {
-                bg.status = "failed";
-                comparisonCoordinator.recordTaskSettled(
-                  s.id,
-                  {
-                    model: s.model,
-                    taskId: s.id,
-                    status: "failure",
-                    rawStatus: "failed",
-                    summary: "",
-                    findings: "",
-                    evidence: "",
-                    files: "",
-                    caveats: "",
-                    nextSteps: "",
-                    toolUses: bg.toolUses,
-                    durationMs: Date.now() - bg.startedAt,
-                    error: error instanceof Error ? error.message : String(error),
-                  },
-                  pi,
-                  deliveryGuard.allows(sessionViewOf(ctx), s.id),
-                  undefined,
-                  (taskId) => {
-                    const current = taskWidget.getContext();
-                    return current ? deliveryGuard.allows(sessionViewOf(current), taskId) : true;
-                  },
-                  (taskIds) => markComparisonGroupPartiallyDelivered(piDir, taskIds),
-                );
-              },
-              onSettled: () => {
-                taskWidget.noteTaskFinished(s.id, bg);
-                backgroundTasks.delete(s.id);
-                clearTaskWidgetIfIdle();
-              },
-            });
-          }
-          ignoreStaleExtensionCtx(() => ensureTaskWidget(ctx));
-
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Dual-model evaluation started for agent "${agent.name}":
-- Model A: \`${modelA}\` (task \`${id0}\`)
-- Model B: \`${modelB}\` (task \`${id1}\`)
-
-Both subagents are running in background. Results will be compared and delivered once both complete.`,
-              },
-            ],
-            details: {
-              phase: "running" as const,
-              compare: true,
-              agent_type: agent.name,
-              description: descText,
-              models: [modelA, modelB],
-              task_ids: [id0, id1],
-            },
-          };
+            groupId,
+            agent,
+            description: descText,
+            prompt: promptContent,
+            cwd: taskCwd,
+            ctx,
+            pi,
+            piDir,
+            artifactsDir,
+            skillPaths,
+            fast: effectiveFast,
+            signal,
+            isBackground,
+            toolSelection,
+            foregroundTasks,
+            backgroundTasks,
+            deliveryGuard,
+            comparisonCoordinator,
+            taskWidget,
+            ensureTaskWidget: () =>
+              ignoreStaleExtensionCtx(() => ensureTaskWidget(ctx)),
+            clearTaskWidgetIfIdle,
+            markComparisonGroupPartiallyDelivered: (taskIds) =>
+              markComparisonGroupPartiallyDelivered(piDir, taskIds),
+          });
         }
 
         // Terminal backend (tmux / HerdR)

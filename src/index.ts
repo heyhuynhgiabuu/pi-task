@@ -81,6 +81,7 @@ import {
   executeSdkTask,
   executeSdkComparison,
   executeComparisonTerminalBackground,
+  launchComparisonTerminalTasks,
   createComparisonSettledHandler,
 } from "./lifecycle/index.js";
 import { DeliveryGuard, sessionViewOf } from "./panel/delivery.js";
@@ -103,7 +104,6 @@ import {
 } from "./subagent/waitCompletion.js";
 import {
   hasTmux,
-  killAgentPane,
   killAgentPaneStrictAsync,
   probePaneAsync,
 } from "./subagent/tmux.js";
@@ -1027,64 +1027,29 @@ export default function (pi: ExtensionAPI) {
         }
 
         // Terminal backend (tmux / HerdR)
-        const terminalTasks: Array<(typeof siblings)[number] & { handle: TerminalHandle; paneId: string; originalPane: string | null; startedAt: number }> = [];
         const herdrRequiredExtension =
           selectedBackend === "herdr"
             ? resolveHerdrPiIntegrationExtension()
             : undefined;
+        let terminalTasks: Awaited<ReturnType<typeof launchComparisonTerminalTasks>>;
         try {
-          for (const s of siblings) {
-            const startedAt = Date.now();
-            let promptLaunch: { systemPromptPath: string; deferTaskPrompt: boolean } | undefined;
-            if (selectedBackend === "herdr") {
-              promptLaunch = {
-                systemPromptPath: join(s.sessionDir, "agent-system-prompt.md"),
-                deferTaskPrompt: true,
-              };
-              await writeFile(promptLaunch.systemPromptPath, s.agent.body, "utf8");
-            }
-
-            const piArgs = buildPiArgs(
-              s.agent,
-              s.sessionName,
-              s.sessionDir,
-              promptContent,
-              false,
-              parentToolNames,
-              taskToolName,
-              undefined,
-              promptLaunch,
-              skillPaths,
-              effectiveFast,
-              TASK_EXTENSION_PATH,
-              herdrRequiredExtension ? [herdrRequiredExtension] : undefined,
-            );
-
-            const launched = await launchTerminalTask({
-              backend: selectedBackend,
-              terminalBackend: herdrBackend,
-              agentArgs: piArgs,
-              initialPrompt: promptContent,
-              cwd: taskCwd,
-              sessionDir: s.sessionDir,
-              sessionName: s.sessionName,
-              environment: { PI_TASK_TOOL_DISABLED: "1" },
-              label: `${agent.name}-${s.id}`,
-              workspaceGroup: taskParams.workspace_group,
-              remainOnExit: !isBackground,
-              selfDestruct: isBackground,
-            });
-            terminalTasks.push({ ...s, ...launched, startedAt });
-          }
+          terminalTasks = await launchComparisonTerminalTasks({
+            siblings,
+            agentName: agent.name,
+            selectedBackend,
+            terminalBackend: herdrBackend,
+            prompt: promptContent,
+            cwd: taskCwd,
+            parentToolNames,
+            taskToolName,
+            skillPaths,
+            fast: effectiveFast,
+            taskExtensionPath: TASK_EXTENSION_PATH,
+            herdrRequiredExtension,
+            workspaceGroup: taskParams.workspace_group,
+            isBackground,
+          });
         } catch (error) {
-          for (const t of terminalTasks) {
-            try {
-              if (t.handle.backend === "herdr") await herdrBackend.close(t.handle);
-              else killAgentPane(t.paneId, t.originalPane);
-            } catch {
-              // Best effort cleanup of already created panes
-            }
-          }
           const message = error instanceof Error ? error.message : String(error);
           return {
             content: [{ type: "text" as const, text: `Failed to create ${selectedBackend} execution panes for comparison: ${message}` }],

@@ -29,3 +29,5 @@ export { executeSdkComparison } from "./comparison-sdk-execution.js";
 export type { SdkComparisonExecutionOptions, SdkComparisonSibling } from "./comparison-sdk-execution.js";
 export { executeComparisonTerminalBackground } from "./comparison-terminal-background.js";
 export type { ComparisonTerminalBackgroundOptions } from "./comparison-terminal-background.js";
+export { launchComparisonTerminalTasks } from "./comparison-terminal-launch.js";
+export type { ComparisonTerminalLaunchOptions, ComparisonTerminalLaunchSibling } from "./comparison-terminal-launch.js";

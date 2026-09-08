@@ -42,8 +42,6 @@ import {
   readRegistry,
   readTaskSessionHistory,
   readTaskSessionsRegistry,
-  updateRegistry,
-  upsertTaskSessionHistory,
   writeTaskSessionsRegistry,
 } from "./conversation.js";
 import {
@@ -82,6 +80,7 @@ import {
   createRegistryEntryStatus,
   executeSdkTask,
   executeSdkComparison,
+  executeComparisonTerminalBackground,
   createComparisonSettledHandler,
 } from "./lifecycle/index.js";
 import { DeliveryGuard, sessionViewOf } from "./panel/delivery.js";
@@ -1163,113 +1162,26 @@ export default function (pi: ExtensionAPI) {
         }
 
         // Terminal Background
-        comparisonCoordinator.registerGroup(
+        return executeComparisonTerminalBackground({
+          tasks: terminalTasks,
           groupId,
           baseId,
-          agent.name,
-          descText,
-          [id0, id1],
-          [modelA, modelB],
-        );
-
-        const maxTurns = agent.maxTurns ?? envTurnLimit();
-        for (const t of terminalTasks) {
-          const bg: BackgroundTask = {
-            dir: artifactsDir,
-            cwd: taskCwd,
-            agentType: agent.name,
-            sessionName: t.sessionName,
-            backend: selectedBackend,
-            paneId: t.paneId,
-            handle: t.handle,
-            originalPane: t.originalPane,
-            description: t.desc,
-            startedAt: t.startedAt,
-            toolUses: 0,
-            turns: 0,
-            maxTurns,
-            recentCalls: [],
-            comparisonGroupId: groupId,
-            comparisonModel: t.model,
-            comparisonDescription: descText,
-            comparisonIndex: t.index,
-            ownerSessionId,
-            ownerLeafId,
-          };
-          backgroundTasks.set(t.id, bg);
-          deliveryGuard.track(t.id, sessionViewOf(ctx));
-
-          upsertTaskSessionHistory(piDir, {
-            id: t.id,
-            agentType: agent.name,
-            description: t.desc,
-            sessionName: t.sessionName,
-            startedAt: bg.startedAt,
-            paneId: t.paneId,
-            handle: t.handle,
-            piDir,
-            dir: artifactsDir,
-            cwd: taskCwd,
-            status: "running",
-            background: true,
-            ownerSessionId,
-            ownerLeafId,
-            ownerPid: process.pid,
-            comparisonGroupId: groupId,
-            comparisonModel: t.model,
-            comparisonDescription: descText,
-            comparisonIndex: t.index,
-          });
-
-        }
-
-        const comparisonIds = new Set(terminalTasks.map((t) => t.id));
-        updateRegistry(piDir, (existingEntries) => [
-          ...existingEntries.filter((entry) => !comparisonIds.has(entry.id)),
-          ...terminalTasks.map((t) => ({
-            id: t.id,
-            agentType: agent.name,
-            description: t.desc,
-            sessionName: t.sessionName,
-            startedAt: t.startedAt,
-            paneId: t.paneId,
-            handle: t.handle,
-            backend: selectedBackend,
-            piDir,
-            dir: artifactsDir,
-            cwd: taskCwd,
-            maxTurns,
-            ownerSessionId,
-            ownerLeafId,
-            ownerPid: process.pid,
-            comparisonGroupId: groupId,
-            comparisonModel: t.model,
-            comparisonDescription: descText,
-            comparisonIndex: t.index,
-          })),
-        ]);
-        ignoreStaleExtensionCtx(() => ensureTaskWidget(ctx));
-
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Dual-model evaluation started for agent "${agent.name}":
-- Model A: \`${modelA}\` (task \`${id0}\`, pane \`${terminalTasks[0]!.paneId}\`)
-- Model B: \`${modelB}\` (task \`${id1}\`, pane \`${terminalTasks[1]!.paneId}\`)
-
-Both subagents are running in background. Results will be compared and delivered once both complete.`,
-            },
-          ],
-          details: {
-            phase: "running" as const,
-            compare: true,
-            agent_type: agent.name,
-            description: descText,
-            models: [modelA, modelB],
-            task_ids: [id0, id1],
-          },
-        };
+          agentType: agent.name,
+          description: descText,
+          agentMaxTurns: agent.maxTurns,
+          selectedBackend,
+          piDir,
+          artifactsDir,
+          cwd: taskCwd,
+          ctx,
+          ownerSessionId,
+          ownerLeafId,
+          backgroundTasks,
+          deliveryGuard,
+          comparisonCoordinator,
+          ensureTaskWidget: () =>
+            ignoreStaleExtensionCtx(() => ensureTaskWidget(ctx)),
+        });
       }
       let promptLaunch:
         | { systemPromptPath: string; deferTaskPrompt: boolean }

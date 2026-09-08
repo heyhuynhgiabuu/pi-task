@@ -27,3 +27,5 @@ export { executeSdkTask } from "./sdk-execution.js";
 export type { SdkTaskExecutionOptions } from "./sdk-execution.js";
 export { executeSdkComparison } from "./comparison-sdk-execution.js";
 export type { SdkComparisonExecutionOptions, SdkComparisonSibling } from "./comparison-sdk-execution.js";
+export { executeComparisonTerminalBackground } from "./comparison-terminal-background.js";
+export type { ComparisonTerminalBackgroundOptions } from "./comparison-terminal-background.js";

@@ -1,10 +1,12 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { basename } from "node:path";
+import { existsSync } from "node:fs";
+import { basename, join } from "node:path";
 import {
   DurableStateError,
   readRegistry,
   readTaskSessionHistory,
 } from "./conversation.js";
+import { countToolUses } from "./helpers.js";
 import {
   completeTask as persistCompletedTask,
   type ComparisonSettledHook,
@@ -18,6 +20,8 @@ import {
   type TaskControlRecord,
   type TaskControlRequest,
 } from "./task-control.js";
+import { claudeToolUseCount, claudeTurnCount } from "./subagent/claudeSession.js";
+import { readExitSentinel } from "./subagent/exitSentinel.js";
 import type { BackgroundTask, RegistryEntry } from "./types.js";
 
 export type TaskResourceStatus = "alive" | "missing" | "unavailable";
@@ -115,6 +119,72 @@ function durableStateErrorResult(
   );
 }
 
+function taskStatusMetrics(record: TaskControlRecord): {
+  toolUses: number;
+  turns: number;
+} | undefined {
+  if (record.toolUses !== undefined || record.turns !== undefined) {
+    return {
+      toolUses: record.toolUses ?? 0,
+      turns: record.turns ?? 0,
+    };
+  }
+
+  if (record.runtime === "claude") {
+    if (!record.claudeSessionFile || !existsSync(record.claudeSessionFile)) return undefined;
+    return {
+      toolUses: claudeToolUseCount(record.claudeSessionFile, record.startedAt),
+      turns: claudeTurnCount(record.claudeSessionFile, record.startedAt),
+    };
+  }
+
+  if (
+    typeof record.dir !== "string" ||
+    typeof record.id !== "string" ||
+    record.id.length === 0 ||
+    /[\\/\0]/.test(record.id)
+  ) return undefined;
+  const sessionDir = join(record.dir, "sessions", record.id);
+  if (!existsSync(sessionDir)) return undefined;
+  return countToolUses(sessionDir, record.sessionName);
+}
+
+function taskStatusDetails(record: TaskControlRecord): Record<string, unknown> {
+  const metrics = taskStatusMetrics(record);
+  const startedAt = Number.isFinite(record.startedAt) ? record.startedAt : undefined;
+  const completedAt = record.completedAt !== undefined && Number.isFinite(record.completedAt)
+    ? record.completedAt
+    : undefined;
+  const elapsedMs = startedAt === undefined
+    ? undefined
+    : Math.max(0, (completedAt ?? Date.now()) - startedAt);
+  const sentinel = record.status !== "running" && record.exitSentinelPath
+    ? readExitSentinel(record.exitSentinelPath, record.id)
+    : null;
+
+  return {
+    operation: "status",
+    task_id: record.id,
+    agent_type: record.agentType,
+    session_name: record.sessionName,
+    conversation_id: record.conversationId,
+    backend: record.backend,
+    runtime: record.runtime ?? "pi",
+    status: record.status,
+    cleanup_pending: record.cleanupPending,
+    cwd: record.cwd,
+    session_ref: record.sessionRef,
+    started_at: record.startedAt,
+    ...(completedAt !== undefined ? { completed_at: completedAt } : {}),
+    ...(elapsedMs !== undefined ? { elapsed_ms: elapsedMs } : {}),
+    ...(metrics ? { tool_uses: metrics.toolUses, turn_count: metrics.turns } : {}),
+    ...(record.rawStatus !== undefined ? { raw_status: record.rawStatus } : {}),
+    ...(record.resultValid !== undefined ? { result_valid: record.resultValid } : {}),
+    ...(sentinel ? { exit_code: sentinel.exitCode } : {}),
+    phase: record.status === "running" ? "running" : "done",
+  };
+}
+
 export function handleTaskControl(
   request: TaskControlRequest,
   deps: TaskControlDependencies,
@@ -133,18 +203,7 @@ export function handleTaskControl(
   if (request.operation === "status") {
     return {
       content: [{ type: "text", text: taskControlText(record) }],
-      details: {
-        operation: "status",
-        task_id: record.id,
-        agent_type: record.agentType,
-        session_name: record.sessionName,
-        conversation_id: record.conversationId,
-        backend: record.backend,
-        status: record.status,
-        cleanup_pending: record.cleanupPending,
-        cwd: record.cwd,
-        phase: record.status === "running" ? "running" : "done",
-      },
+      details: taskStatusDetails(record),
     };
   }
 

@@ -1,3 +1,5 @@
+import { getExitSentinelPath } from "./subagent/exitSentinel.js";
+import { claudeSessionFilePath } from "./subagent/claudeSession.js";
 import type {
   BackgroundTask,
   ExecutionBackend,
@@ -45,6 +47,13 @@ export interface TaskControlRecord {
   cwd?: string;
   dir: string;
   sessionRef?: string;
+  runtime?: "pi" | "claude";
+  claudeSessionFile?: string;
+  toolUses?: number;
+  turns?: number;
+  rawStatus?: string;
+  resultValid?: boolean;
+  exitSentinelPath?: string;
   startedAt: number;
   completedAt?: number;
   status: TaskLifecycleStatus;
@@ -68,16 +77,43 @@ function inferBackend(
   return backend ?? handle?.backend ?? (paneId ? "tmux" : "sdk");
 }
 
+function isSafeTaskId(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && !/[\\/\0]/.test(value);
+}
+
+function exitSentinelPath(
+  entry: Pick<RegistryEntry, "id" | "piDir">,
+  backend: ExecutionBackend,
+): string | undefined {
+  if (backend === "sdk" || !isSafeTaskId(entry.id) || typeof entry.piDir !== "string") {
+    return undefined;
+  }
+  return getExitSentinelPath(entry.piDir, entry.id);
+}
+
+function claudeTranscriptPath(
+  entry: Pick<RegistryEntry, "runtime" | "claudeSessionId" | "cwd">,
+): string | undefined {
+  if (entry.runtime !== "claude" || !entry.claudeSessionId || !entry.cwd) return undefined;
+  return claudeSessionFilePath(entry.cwd, entry.claudeSessionId);
+}
+
 export function fromBackgroundTask(id: string, task: BackgroundTask): TaskControlRecord {
+  const backend = inferBackend(task.backend, task.handle, task.paneId);
   return {
     id,
     agentType: task.agentType,
     description: task.description,
     sessionName: task.sessionName,
     conversationId: task.conversationId,
-    backend: inferBackend(task.backend, task.handle, task.paneId),
+    backend,
     cwd: task.cwd,
     dir: task.dir,
+    runtime: task.runtime ?? "pi",
+    claudeSessionFile: task.claudeSessionFile,
+    toolUses: task.toolUses,
+    turns: task.turns,
+    exitSentinelPath: task.exitSentinelPath,
     startedAt: task.startedAt,
     completedAt: task.completedAt,
     status: task.status ?? "running",
@@ -86,16 +122,20 @@ export function fromBackgroundTask(id: string, task: BackgroundTask): TaskContro
 }
 
 export function fromRegistryEntry(entry: RegistryEntry): TaskControlRecord {
+  const backend = inferBackend(entry.backend, entry.handle, entry.paneId);
   return {
     id: entry.id,
     agentType: entry.agentType,
     description: entry.description,
     sessionName: entry.sessionName,
     conversationId: entry.conversationId,
-    backend: inferBackend(entry.backend, entry.handle, entry.paneId),
+    backend,
     cwd: entry.cwd,
     dir: entry.dir,
     sessionRef: entry.sessionRef,
+    runtime: entry.runtime ?? "pi",
+    claudeSessionFile: claudeTranscriptPath(entry),
+    exitSentinelPath: exitSentinelPath(entry, backend),
     startedAt: entry.startedAt,
     source: "registry",
     status: entry.cleanupPending ? entry.cleanupPhase ?? "failed" : "running",
@@ -104,16 +144,22 @@ export function fromRegistryEntry(entry: RegistryEntry): TaskControlRecord {
 }
 
 export function fromHistoryEntry(entry: TaskSessionHistoryEntry): TaskControlRecord {
+  const backend = inferBackend(entry.backend, entry.handle, entry.paneId);
   return {
     id: entry.id,
     agentType: entry.agentType,
     description: entry.description,
     sessionName: entry.sessionName,
     conversationId: entry.conversationId,
-    backend: inferBackend(entry.backend, entry.handle, entry.paneId),
+    backend,
     cwd: entry.cwd,
     dir: entry.dir,
     sessionRef: entry.sessionRef,
+    runtime: entry.runtime ?? "pi",
+    claudeSessionFile: claudeTranscriptPath(entry),
+    exitSentinelPath: exitSentinelPath(entry, backend),
+    rawStatus: entry.rawStatus,
+    resultValid: entry.resultValid,
     startedAt: entry.startedAt,
     completedAt: entry.completedAt,
     source: "history",

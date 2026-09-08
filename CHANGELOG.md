@@ -4,6 +4,16 @@ All notable changes to `@heyhuynhgiabuu/pi-task` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `status` control results now expose structured lifecycle timing, runtime/session metadata, available transcript metrics, persisted result diagnostics, and verified terminal exit codes.
+
+### Fixed
+
+- Backend capability preflight now runs before new durable conversation mappings or task session artifacts are materialized.
+
 ## [0.7.1] - 2026-09-08
 
 ### Added

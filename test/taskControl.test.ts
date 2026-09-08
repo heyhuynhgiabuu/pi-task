@@ -417,6 +417,34 @@ test("legacy registry records infer tmux from a pane id", () => {
 
 test("status control reads durable history without touching backend resources", () => {
   const piDir = mkdtempSync(join(tmpdir(), "pi-task-control-status-"));
+  const artifactsDir = join(piDir, "artifacts");
+  const sessionDir = join(artifactsDir, "sessions", "task-history");
+  mkdirSync(sessionDir, { recursive: true });
+  writeFileSync(
+    join(sessionDir, "history-task.jsonl"),
+    [
+      JSON.stringify({ type: "session_info", name: "history-task" }),
+      JSON.stringify({
+        type: "message",
+        message: { role: "assistant", content: [{ type: "toolCall", id: "call-1" }] },
+      }),
+      JSON.stringify({
+        type: "message",
+        message: { role: "assistant", content: [{ type: "text", text: "done" }] },
+      }),
+    ].join("\n"),
+  );
+  mkdirSync(join(piDir, "task-exits"), { recursive: true });
+  writeFileSync(
+    join(piDir, "task-exits", "task-history.exit.json"),
+    JSON.stringify({
+      schemaVersion: 1,
+      taskId: "task-history",
+      exitCode: 0,
+      completedAt: new Date(350).toISOString(),
+    }),
+  );
+  const sessionRef = join(sessionDir, "history-task.jsonl");
   upsertTaskSessionHistory(piDir, {
     id: "task-history",
     agentType: "scout",
@@ -424,9 +452,14 @@ test("status control reads durable history without touching backend resources", 
     sessionName: "history-task",
     conversationId: "architecture",
     piDir,
-    dir: join(piDir, "artifacts"),
+    dir: artifactsDir,
+    sessionRef,
+    backend: "tmux",
     startedAt: 100,
+    completedAt: 350,
     status: "done",
+    rawStatus: "success",
+    resultValid: true,
     background: true,
   });
 
@@ -446,6 +479,16 @@ test("status control reads durable history without touching backend resources", 
   assert.equal(result.isError, undefined);
   assert.equal(result.details.task_id, "task-history");
   assert.equal(result.details.status, "done");
+  assert.equal(result.details.runtime, "pi");
+  assert.equal(result.details.started_at, 100);
+  assert.equal(result.details.completed_at, 350);
+  assert.equal(result.details.elapsed_ms, 250);
+  assert.equal(result.details.session_ref, sessionRef);
+  assert.equal(result.details.turn_count, 2);
+  assert.equal(result.details.tool_uses, 1);
+  assert.equal(result.details.raw_status, "success");
+  assert.equal(result.details.result_valid, true);
+  assert.equal(result.details.exit_code, 0);
 });
 
 test("status reports unreadable durable state instead of treating it as empty", () => {

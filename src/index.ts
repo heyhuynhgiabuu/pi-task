@@ -56,10 +56,6 @@ import {
   resolveTaskFastMode,
   envTurnLimit,
   assessTaskResult,
-  buildTaskEnvelope,
-  structuredResultPayload,
-  taskResultContentText,
-  completionDeliveryOptions,
   formatBackgroundReceipt,
   formatComparisonReport,
   isTaskCompareAllowed,
@@ -91,18 +87,15 @@ import {
   durableParentOf,
   transferTaskOwnership,
   createRegistryEntryStatus,
+  executeSdkTask,
   createComparisonSettledHandler,
 } from "./lifecycle/index.js";
 import { DeliveryGuard, sessionViewOf } from "./panel/delivery.js";
 import {
-  formatSdkBackgroundReceipt,
   reconcileStaleSdkBackgroundTasks,
   startSdkBackgroundTask,
 } from "./subagent/sdkBackground.js";
-import {
-  runSdkSubagent,
-  SdkSubagentInterruptedError,
-} from "./subagent/runSdk.js";
+import { runSdkSubagent } from "./subagent/runSdk.js";
 import { resolveAgentSkillPaths } from "./subagent/skills.js";
 import {
   createDefaultHerdrTerminalBackend,
@@ -1588,30 +1581,6 @@ Both subagents are running in background. Results will be compared and delivered
             parentToolNames,
             taskToolName,
           });
-          const runSdkFallback = async (
-            foregroundTask?: BackgroundTask,
-            onSession?: (session: any) => () => void,
-          ) =>
-            runSdkSubagent({
-              onSession: foregroundTask
-                ? (session) => subscribeToolEvents(session, foregroundTask, 10, taskWidget.requestRender)
-                : onSession,
-              sessionName: foregroundTask?.sessionName ?? sessionName,
-              prompt: promptContent,
-              agent,
-              cwd: taskCwd,
-              ctx,
-              model: agent.model,
-              thinkingLevel: agent.thinking,
-              tools: toolSelection.tools,
-              excludeTools: toolSelection.excludeTools,
-              systemPrompt: agent.body,
-              skillPaths,
-              fast: effectiveFast,
-              signal: foregroundTask ? signal : undefined,
-              timeoutMs: TASK_TIMEOUT_MS,
-            });
-
       const foregroundTask: BackgroundTask | undefined = isBackground
         ? undefined
         : {
@@ -1639,192 +1608,34 @@ Both subagents are running in background. Results will be compared and delivered
           // the subagent's interactive Pi TUI. Fall back to the SDK only when tmux is
           // unavailable, or when explicitly forced with PI_TASK_BACKEND=sdk.
           if (useSdkBackend) {
-            if (isBackground) {
-
-              const backgroundTask: BackgroundTask = {
-                dir: artifactsDir,
-                cwd: taskCwd,
-                agentType: agent.name,
-                sessionName,
-                backend: "sdk",
-                originalPane: null,
-                description: descText,
-                startedAt: Date.now(),
-                toolUses: 0,
-                turns: 0,
-                conversationId,
-                ...durableParentOf(sessionViewOf(ctx)),
-                recentCalls: [],
-              };
-              backgroundTasks.set(id, backgroundTask);
-              deliveryGuard.track(id, sessionViewOf(ctx));
-              ignoreStaleExtensionCtx(() => ensureTaskWidget(ctx));
-              const bgOnSession = (session: any) =>
-                subscribeToolEvents(session, backgroundTask, 10, taskWidget.requestRender);
-
-              startSdkBackgroundTask({
-                id,
-                agentType: agent.name,
-                description: descText,
-                sessionName,
-                startedAt: backgroundTask.startedAt,
-                piDir,
-                artifactsDir,
-                cwd: taskCwd,
-                conversationId,
-                ...durableParentOf(sessionViewOf(ctx)),
-                run: async () => runSdkFallback(undefined, bgOnSession),
-                deliver: (delivery) => completionDeliveryQueue.enqueue(delivery),
-                onComplete: (result) => {
-                  if (!deliveryGuard.allows(sessionViewOf(ctx), id)) return;
-                  backgroundTask.status = "done";
-                  const parsed = parseResultXml(result.output);
-                  const assessment = assessTaskResult(parsed);
-                  const summary =
-                    taskResultContentText(parsed, assessment) ||
-                    "SDK subagent completed without assistant text.";
-                  ignoreStaleExtensionCtx(() =>
-                    pi.sendMessage(
-                      {
-                        customType: "task-complete",
-                        content: `Background task ${id} (${agent.name}) done.\n\n${summary}`,
-                        display: true,
-                        details: {
-                          task_id: id,
-                          agent_type: agent.name,
-                          description: descText,
-                          phase: "done",
-                          execution_phase: "done",
-                          status: assessment.reportedStatus,
-                          reported_status: assessment.reportedStatus,
-                          raw_status: assessment.rawStatus,
-                          result_valid: assessment.valid,
-                          result: result.output,
-                          summary: parsed.summary,
-                          findings: parsed.findings,
-                          evidence: parsed.evidence,
-                          files: parsed.files,
-                          caveats: parsed.caveats,
-                          next_steps: parsed.next_steps,
-                          confidence: parsed.confidence,
-                          duration_ms: Date.now() - backgroundTask.startedAt,
-                          tool_uses: backgroundTask.toolUses,
-                          turn_count: backgroundTask.turns,
-                          background: true,
-                          structured_result: structuredResultPayload(assessment),
-                          full_output: parsed.raw.trim() || result.output.trim(),
-                        },
-                      },
-                      completionDeliveryOptions(process.env.PI_TASK_COMPLETION_DELIVERY),
-                    ),
-                  );
-                },
-                onFailed: (error) => {
-                  if (!deliveryGuard.allows(sessionViewOf(ctx), id)) return;
-                  const interrupted = error instanceof SdkSubagentInterruptedError;
-                  const phase = interrupted && error.kind === "timeout" ? "timeout" : "failed";
-                  backgroundTask.status = phase;
-                  const message = error instanceof Error ? error.message : String(error);
-                  ignoreStaleExtensionCtx(() =>
-                    pi.sendMessage(
-                      {
-                        customType: "task-complete",
-                        content: `Background task ${id} (${agent.name}) ${phase}.\n\n${message}`,
-                        display: true,
-                        details: {
-                          task_id: id,
-                          agent_type: agent.name,
-                          description: descText,
-                          phase,
-                          execution_phase: phase,
-                          status: "unknown",
-                          reported_status: "unknown",
-                          result_valid: false,
-                          summary: message,
-                          duration_ms: Date.now() - backgroundTask.startedAt,
-                          tool_uses: backgroundTask.toolUses,
-                          turn_count: backgroundTask.turns,
-                          background: true,
-                        },
-                      },
-                      completionDeliveryOptions(process.env.PI_TASK_COMPLETION_DELIVERY),
-                    ),
-                  );
-                },
-                onSettled: () => {
-                  taskWidget.noteTaskFinished(id, backgroundTasks.get(id) ?? backgroundTask);
-                  backgroundTasks.delete(id);
-                  ignoreStaleExtensionCtx(() => clearTaskWidgetIfIdle());
-                },
-              });
-
-          return {
-            content: [{ type: "text" as const, text: formatSdkBackgroundReceipt(id) }],
-            details: {
-              phase: "running" as const,
-              backend: "sdk" as const,
-              background: true,
-              task_id: id,
-              agent_type: agent.name,
+            return executeSdkTask({
+              id,
+              agent,
               description: descText,
-              conversation_id: conversationId,
-            },
-          };
-        }
-
-            try {
-              const { output, sessionPath } = await runSdkFallback(foregroundTask);
-
-          const finalOutput = output || "SDK subagent completed without assistant text.";
-              const parsed = parseResultXml(finalOutput);
-              const assessment = assessTaskResult(parsed);
-              const envelope = buildTaskEnvelope(parsed, {
-                agent_type: agent.name,
-                description: descText,
-                tool_uses: foregroundTask!.toolUses,
-                duration_ms: Date.now() - foregroundTask!.startedAt,
-                background: false,
-              });
-              return {
-                content: envelope.content,
-                details: {
-                  ...envelope.details,
-                  phase: "done" as const,
-                  execution_phase: "done" as const,
-                  reported_status: assessment.reportedStatus,
-                  raw_status: assessment.rawStatus,
-                  result_valid: assessment.valid,
-                  backend: "sdk" as const,
-                  session_path: sessionPath,
-                  conversation_id: conversationId,
-                  full_output: parsed.raw.trim() || finalOutput,
-                },
-              };
-        } catch (error) {
-          const interrupted = error instanceof SdkSubagentInterruptedError;
-          const phase = interrupted && error.kind === "cancelled" ? "cancelled" :
-            interrupted && error.kind === "timeout" ? "timeout" : "failed";
-          const message = error instanceof Error ? error.message : String(error);
-          return {
-            content: [
-              { type: "text" as const, text: `SDK task ${phase}: ${message}` },
-            ],
-            details: {
-              phase,
-              execution_phase: phase,
-              status: "unknown",
-              reported_status: "unknown",
-              result_valid: false,
-              backend: "sdk" as const,
-              error: message,
-            },
-            isError: phase === "failed",
-          };
-        } finally {
-          foregroundTasks.delete(id);
-          clearTaskWidgetIfIdle();
-        }
-      }
+              sessionName,
+              prompt: promptContent,
+              cwd: taskCwd,
+              ctx,
+              pi,
+              piDir,
+              artifactsDir,
+              conversationId,
+              toolSelection,
+              skillPaths,
+              fast: effectiveFast,
+              signal,
+              isBackground,
+              foregroundTask,
+              backgroundTasks,
+              foregroundTasks,
+              deliveryGuard,
+              taskWidget,
+              ensureTaskWidget: () =>
+                ignoreStaleExtensionCtx(() => ensureTaskWidget(ctx)),
+              clearTaskWidgetIfIdle,
+              enqueueDelivery: (delivery) => completionDeliveryQueue.enqueue(delivery),
+            });
+          }
 
       let paneId: string;
       let originalPane: string | null;

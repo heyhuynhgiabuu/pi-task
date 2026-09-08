@@ -23,3 +23,5 @@ export type {
 } from "./comparison-terminal-foreground.js";
 export { registerBackgroundTask } from "./background-registration.js";
 export type { BackgroundTaskRegistrationOptions } from "./background-registration.js";
+export { executeSdkTask } from "./sdk-execution.js";
+export type { SdkTaskExecutionOptions } from "./sdk-execution.js";

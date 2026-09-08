@@ -82,6 +82,7 @@ import {
   executeSdkComparison,
   executeComparisonTerminalBackground,
   launchComparisonTerminalTasks,
+  resolveConversationResume,
   createComparisonSettledHandler,
 } from "./lifecycle/index.js";
 import { DeliveryGuard, sessionViewOf } from "./panel/delivery.js";
@@ -562,137 +563,25 @@ export default function (pi: ExtensionAPI) {
           const artifactsDir = join(piDir, "artifacts", "tasks");
     
           if (registeredTaskId) {
-            id = registeredTaskId;
-            sessionName = conversationId ?? `task-${id}`;
-            const previous = findTaskSessionHistory(piDir, id);
-            const repairedPrevious = previous
-              ? repairTaskSessionRef(piDir, previous)
-              : undefined;
-            persistedTaskCwd = repairedPrevious?.cwd ?? previous?.cwd;
-            resumeSessionRef = repairedPrevious?.sessionRef;
-            const metadataAgent = previous?.agentType;
-            if (metadataAgent && metadataAgent !== agent.name) {
-              return {
-                content: [
-                  {
-                    type: "text" as const,
-                    text: `conversation_id "${conversationId}" belongs to agent "${metadataAgent}", not "${agent.name}". Use the original agent_type or start a different conversation_id.`,
-                  },
-                ],
-                details: {
-                  phase: "failed" as const,
-                  error: "conversation_id agent_type mismatch",
-                  conversation_id: conversationId,
-                },
-                isError: true,
-              };
-            }
-            resume = true;
-
-        const entry = readRegistry(piDir).find(
-          (candidate) => candidate.id === id,
-        );
-        if (entry?.comparisonGroupId || repairedPrevious?.comparisonGroupId) {
-          return {
-            content: [{ type: "text" as const, text: "Comparison tasks cannot be resumed individually." }],
-            details: { phase: "failed" as const, error: "resume_unsupported_for_compare", task_id: id },
-            isError: true,
-          };
-        }
-        persistedTaskCwd = entry?.cwd ?? persistedTaskCwd;
-        if (entry?.cleanupPending) {
-          return {
-            content: [{ type: "text" as const, text: `Conversation "${conversationId}" is cancelled but backend cleanup is still pending; retry after the resource is cleaned up.` }],
-            details: { phase: "failed" as const, error: "cleanup_pending", task_id: id },
-            isError: true,
-          };
-        }
-        const entryStatus = entry ? registryEntryStatus(entry) : "missing";
-        if (entryStatus === "unavailable") {
-          return {
-            content: [{ type: "text" as const, text: "The HerdR session for this conversation is temporarily unavailable. The durable task record was preserved; retry when HerdR reconnects." }],
-            details: { phase: "failed" as const, error: "HerdR temporarily unavailable" },
-            isError: true,
-          };
-        }
-        if (entry && entryStatus === "alive") {
-          if (taskParams.background === false) {
-            return {
-              content: [{ type: "text" as const, text: `Conversation "${conversationId}" is already running in the background and cannot be relaunched as foreground.` }],
-              details: { phase: "failed" as const, error: "active task cannot run foreground", task_id: id },
-              isError: true,
-            };
-          }
-          const bgtask: BackgroundTask = {
-            dir: artifactsDir,
-            cwd: entry.cwd,
-            agentType: entry.agentType,
-            sessionName,
-            paneId: entry.handle?.resourceId ?? entry.paneId,
-            handle: entry.handle,
-            backend: entry.handle?.backend ?? "tmux",
-            originalPane: null,
-            description: taskParams.description || entry.description,
-            startedAt: entry.startedAt,
-            toolUses: 0,
-            turns: 0,
-            maxTurns: entry.maxTurns,
-            conversationId,
-            ...durableParentOf(sessionViewOf(ctx)),
-            recentCalls: [],
-          };
-                    backgroundTasks.set(id, bgtask);
-                    deliveryGuard.track(id, sessionViewOf(ctx));
-                    transferTaskOwnership(extensionPiDir, entry, sessionViewOf(ctx));
-          const steerResult = steerRunningBackgroundTask(
-            bgtask.paneId,
-            buildTaskFollowUpPrompt({
-              prompt: taskParams.prompt,
-              parentContext: taskParams.parent_context,
-              proposedChanges: taskParams.proposed_changes,
-            }),
-            bgtask.handle,
-          );
-          if (!steerResult.ok) {
-            return {
-              content: [{ type: "text" as const, text: `Conversation "${conversationId}" was restored, but the follow-up prompt could not be delivered (${steerResult.reason}).` }],
-              details: { phase: "failed" as const, error: `resume steering failed: ${steerResult.reason}` },
-              isError: true,
-            };
-          }
-
-          return {
-            content: [
-              {
-                type: "text" as const,
-                text: `Resumed conversation "${conversationId}" via ${sessionName} and delivered the follow-up prompt. The subagent is running in background and will notify on completion.`,
-              },
-            ],
-            details: {
-              task_id: id,
-              agent_type: agent.name,
-              description: taskParams.description,
-              conversation_id: conversationId,
-              tmux_session: sessionName,
-              background: true,
-            },
-          };
-        }
-
-        if (!resumeSessionRef) {
-          return {
-            content: [{
-              type: "text" as const,
-              text: `Conversation "${conversationId}" was found, but its session JSONL file could not be resolved. Cannot resume without a --session file path.`,
-            }],
-            details: {
-              phase: "failed" as const,
-              error: "Conversation session file missing",
-              conversation_id: conversationId,
-            },
-            isError: true,
-          };
-        }
+        const resumeResolution = resolveConversationResume({
+          conversationId: conversationId!,
+          registeredTaskId,
+          taskParams,
+          agentName: agent.name,
+          piDir,
+          artifactsDir,
+          extensionPiDir,
+          ctx,
+          backgroundTasks,
+          deliveryGuard,
+          registryEntryStatus,
+        });
+        if (resumeResolution.kind === "handled") return resumeResolution.result;
+        id = resumeResolution.id;
+        sessionName = resumeResolution.sessionName;
+        resume = true;
+        resumeSessionRef = resumeResolution.resumeSessionRef;
+        persistedTaskCwd = resumeResolution.persistedTaskCwd;
       } else if (taskParams.task_id) {
         // Look up active tasks first, then durable completed-session history.
         const entries = readRegistry(piDir);

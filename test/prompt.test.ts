@@ -836,6 +836,10 @@ if (process.platform !== "win32") {
     fileURLToPath(new URL("../src/subagent/terminal-launch.ts", import.meta.url)),
     "utf8",
   );
+  const conversationResumeSrc = readFileSync(
+    fileURLToPath(new URL("../src/lifecycle/conversation-resume.ts", import.meta.url)),
+    "utf8",
+  );
   // Guidance must not be duplicated in a second model-visible block:
   // promptGuidelines were removed and folded into the tool description.
   assert.ok(!indexSrc.includes("promptGuidelines"), t + " no duplicated guidelines block");
@@ -851,7 +855,7 @@ if (process.platform !== "win32") {
   assert.ok(indexSrc.includes("cwd: taskCwd"), t + " prompt and backend cwd");
   assert.ok(terminalLaunchSrc.includes("shellQuote(cwd)"), t + " tmux shell cwd");
   assert.ok(terminalLaunchSrc.includes("splitWindowPane(cwd"), t + " tmux pane cwd");
-  assert.ok(indexSrc.includes("previous?.cwd"), t + " conversation resume cwd");
+  assert.ok(conversationResumeSrc.includes("previous?.cwd"), t + " conversation resume cwd");
   assert.ok(indexSrc.includes("persistedTaskCwd = entry.cwd"), t + " task resume cwd");
   assert.ok(indexSrc.includes("resolveTaskCwd(ctx.cwd, taskParams.cwd, persistedTaskCwd)"), t + " resume precedence");
 }

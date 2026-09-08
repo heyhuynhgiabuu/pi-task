@@ -31,3 +31,9 @@ export { executeComparisonTerminalBackground } from "./comparison-terminal-backg
 export type { ComparisonTerminalBackgroundOptions } from "./comparison-terminal-background.js";
 export { launchComparisonTerminalTasks } from "./comparison-terminal-launch.js";
 export type { ComparisonTerminalLaunchOptions, ComparisonTerminalLaunchSibling } from "./comparison-terminal-launch.js";
+export { resolveConversationResume } from "./conversation-resume.js";
+export type {
+  ConversationResumeOptions,
+  ConversationResumeResolution,
+  ConversationResumeResult,
+} from "./conversation-resume.js";

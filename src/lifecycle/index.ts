@@ -41,3 +41,5 @@ export { resolveTaskResume } from "./task-resume.js";
 export type { TaskResumeOptions, TaskResumeResolution, TaskResumeResult } from "./task-resume.js";
 export { executeTerminalTask } from "./terminal-execution.js";
 export type { TerminalExecutionOptions } from "./terminal-execution.js";
+export { executeComparisonTask } from "./comparison-execution.js";
+export type { ComparisonExecutionOptions } from "./comparison-execution.js";

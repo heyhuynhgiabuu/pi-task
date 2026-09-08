@@ -46,7 +46,6 @@ import {
       discoverAgents,
   resolveTaskAgentPreflight,
   resolveTaskFastMode,
-  formatComparisonReport,
   isTaskCompareAllowed,
   resolveCompareModels,
 } from "./helpers.js";
@@ -62,7 +61,6 @@ import {
   completeTask,
   createCompletionDeliveryQueue,
   createTaskWidgetController,
-  executeComparisonTerminalForeground,
   executeTerminalTask,
   restoreActiveBackgroundTasks,
   startBackgroundPolling,
@@ -70,9 +68,7 @@ import {
   durableParentOf,
   createRegistryEntryStatus,
   executeSdkTask,
-  executeSdkComparison,
-  executeComparisonTerminalBackground,
-  launchComparisonTerminalTasks,
+  executeComparisonTask,
   resolveConversationResume,
   resolveTaskResume,
   createComparisonSettledHandler,
@@ -690,208 +686,36 @@ export default function (pi: ExtensionAPI) {
       const effectiveFast = resolveTaskFastMode(taskParams.fast, agent.fast);
 
       if (taskParams.compare) {
-        const compareModels = resolveCompareModels(agent);
-        if (!compareModels.ok) {
-          return {
-            content: [{ type: "text" as const, text: compareModels.reason }],
-            details: { phase: "failed" as const, error: "insufficient_models_for_compare" },
-            isError: true,
-          };
-        }
-        const [modelA, modelB] = compareModels.models;
-        const baseId = `${Date.now().toString(36)}-${randomUUID().slice(0, 4)}`;
-        const groupId = `compare-${baseId}`;
-        const id0 = `${baseId}-m0`;
-        const id1 = `${baseId}-m1`;
-        const sessionName0 = `task-${id0}`;
-        const sessionName1 = `task-${id1}`;
-        const sessionDir0 = join(artifactsDir, "sessions", id0);
-        const sessionDir1 = join(artifactsDir, "sessions", id1);
-        await mkdir(sessionDir0, { recursive: true });
-        await mkdir(sessionDir1, { recursive: true });
-
-        const specA = agent.modelSpecs?.find((s) => s.model === modelA);
-        const specB = agent.modelSpecs?.find((s) => s.model === modelB);
-
-        const siblings = [
-          {
-            id: id0,
-            index: 0 as const,
-            model: modelA,
-            agent: { ...agent, model: modelA, thinking: specA?.thinking ?? agent.thinking },
-            desc: descText ? `${descText} [${modelA}]` : `[${modelA}]`,
-            sessionName: sessionName0,
-            sessionDir: sessionDir0,
-          },
-          {
-            id: id1,
-            index: 1 as const,
-            model: modelB,
-            agent: { ...agent, model: modelB, thinking: specB?.thinking ?? agent.thinking },
-            desc: descText ? `${descText} [${modelB}]` : `[${modelB}]`,
-            sessionName: sessionName1,
-            sessionDir: sessionDir1,
-          },
-        ] as const;
-
-        const toolSelection = buildAgentToolSelection({
-          tools: agent.tools,
-          disallowedTools: agent.disallowedTools,
+        return executeComparisonTask({
+          agent,
+          description: descText,
+          prompt: promptContent,
+          cwd: taskCwd,
+          artifactsDir,
+          piDir,
+          ctx,
+          pi,
           parentToolNames,
           taskToolName,
-        });
-
-        if (selectedBackend === "sdk") {
-          return executeSdkComparison({
-            siblings,
-            baseId,
-            groupId,
-            agent,
-            description: descText,
-            prompt: promptContent,
-            cwd: taskCwd,
-            ctx,
-            pi,
-            piDir,
-            artifactsDir,
-            skillPaths,
-            fast: effectiveFast,
-            signal,
-            isBackground,
-            toolSelection,
-            foregroundTasks,
-            backgroundTasks,
-            deliveryGuard,
-            comparisonCoordinator,
-            taskWidget,
-            ensureTaskWidget: () =>
-              ignoreStaleExtensionCtx(() => ensureTaskWidget(ctx)),
-            clearTaskWidgetIfIdle,
-            markComparisonGroupPartiallyDelivered: (taskIds) =>
-              markComparisonGroupPartiallyDelivered(piDir, taskIds),
-          });
-        }
-
-        // Terminal backend (tmux / HerdR)
-        const herdrRequiredExtension =
-          selectedBackend === "herdr"
-            ? resolveHerdrPiIntegrationExtension()
-            : undefined;
-        let terminalTasks: Awaited<ReturnType<typeof launchComparisonTerminalTasks>>;
-        try {
-          terminalTasks = await launchComparisonTerminalTasks({
-            siblings,
-            agentName: agent.name,
-            selectedBackend,
-            terminalBackend: herdrBackend,
-            prompt: promptContent,
-            cwd: taskCwd,
-            parentToolNames,
-            taskToolName,
-            skillPaths,
-            fast: effectiveFast,
-            taskExtensionPath: TASK_EXTENSION_PATH,
-            herdrRequiredExtension,
-            workspaceGroup: taskParams.workspace_group,
-            isBackground,
-          });
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          return {
-            content: [{ type: "text" as const, text: `Failed to create ${selectedBackend} execution panes for comparison: ${message}` }],
-            details: { phase: "failed" as const, error: `${selectedBackend} launch failed`, reason: message },
-            isError: true,
-          };
-        }
-
-        // Ownership (issue #20) is stamped identically on every record this
-        // compare run persists (history spawn records and registry entries).
-        const owner = durableParentOf(sessionViewOf(ctx));
-        const ownerSessionId = owner.ownerSessionId;
-        const ownerLeafId = owner.ownerLeafId;
-        if (!isBackground) {
-          for (const t of terminalTasks) {
-            foregroundTasks.set(t.id, {
-              dir: artifactsDir,
-              cwd: taskCwd,
-              agentType: agent.name,
-              sessionName: t.sessionName,
-              backend: selectedBackend,
-              paneId: t.paneId,
-              handle: t.handle,
-              originalPane: t.originalPane,
-              description: t.desc,
-              startedAt: t.startedAt,
-              toolUses: 0,
-              turns: 0,
-              recentCalls: [],
-              comparisonGroupId: groupId,
-              comparisonModel: t.model,
-              comparisonDescription: descText,
-              comparisonIndex: t.index,
-              ownerSessionId,
-              ownerLeafId,
-            });
-          }
-          ignoreStaleExtensionCtx(() => ensureTaskWidget(ctx));
-          const runs = await executeComparisonTerminalForeground({
-            tasks: terminalTasks,
-            groupId,
-            agentType: agent.name,
-            description: descText,
-            artifactsDir,
-            taskCwd,
-            piDir,
-            selectedBackend,
-            terminalBackend: herdrBackend,
-            signal,
-            onUpdate,
-            ownerSessionId,
-            ownerLeafId,
-            foregroundTasks,
-            requestRender: taskWidget.requestRender,
-            clearTaskWidgetIfIdle,
-          });
-
-          const report = formatComparisonReport({
-            agentType: agent.name,
-            description: descText,
-            runs,
-          });
-
-          return {
-            content: [{ type: "text" as const, text: report }],
-            details: {
-              phase: "done" as const,
-              compare: true,
-              agent_type: agent.name,
-              description: descText,
-              models: [modelA, modelB],
-              runs,
-            },
-          };
-        }
-
-        // Terminal Background
-        return executeComparisonTerminalBackground({
-          tasks: terminalTasks,
-          groupId,
-          baseId,
-          agentType: agent.name,
-          description: descText,
-          agentMaxTurns: agent.maxTurns,
+          skillPaths,
+          fast: effectiveFast,
           selectedBackend,
-          piDir,
-          artifactsDir,
-          cwd: taskCwd,
-          ctx,
-          ownerSessionId,
-          ownerLeafId,
+          terminalBackend: herdrBackend,
+          taskExtensionPath: TASK_EXTENSION_PATH,
+          workspaceGroup: taskParams.workspace_group,
+          signal,
+          onUpdate,
+          isBackground,
+          foregroundTasks,
           backgroundTasks,
           deliveryGuard,
           comparisonCoordinator,
+          taskWidget,
+          clearTaskWidgetIfIdle,
           ensureTaskWidget: () =>
             ignoreStaleExtensionCtx(() => ensureTaskWidget(ctx)),
+          markComparisonGroupPartiallyDelivered: (taskIds) =>
+            markComparisonGroupPartiallyDelivered(piDir, taskIds),
         });
       }
       let promptLaunch:

@@ -4,20 +4,17 @@ All notable changes to `@heyhuynhgiabuu/pi-task` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.7.1] - 2026-09-08
 
 ### Added
 
+- Claude Code is available as a terminal child runtime through `runtime: claude` or `model: claude-code/<model>`, with translated tool, permission, and thinking settings plus durable session identity and restart-aware completion tracking.
 - Terminal subagents support neutral, opt-in environment forwarding through `PI_SUBAGENT_FORWARD_<NAME>`, with configurable prefixes, deterministic conflict diagnostics, and matching tmux/HerdR behavior.
 
 ### Fixed
 
 - Tmux terminal launches now shell-quote child environment values instead of interpolating them as executable shell text.
-
-## [0.7.1] - 2026-09-08
-
-### Fixed
-
+- Claude and Pi terminal handles now verify runtime identity before control or cleanup; unsupported Pi skills on Claude tasks fail explicitly instead of being silently dropped.
 - Durable conversation resume now repairs and validates the child JSONL path before relaunching; provider error/aborted results no longer reuse stale assistant text; tmux outages remain retryable instead of being treated as dead panes; and SDK background records are reconciled after a host restart.
 - HerdR 0.9.0 stalled-prompt responses that omit the server lifecycle baseline now fall back to the captured pre-submit sequence while retaining identity-safe retry checks.
 

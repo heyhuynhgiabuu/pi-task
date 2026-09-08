@@ -16,7 +16,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -37,10 +37,8 @@ import {
   markComparisonGroupPartiallyDelivered,
   readTaskSessionHistory,
   readTaskSessionsRegistry,
-  writeTaskSessionsRegistry,
 } from "./conversation.js";
 import {
-  TASK_BACKGROUND_DEFAULT,
   buildPiArgs,
   buildTaskToolDescription,
       discoverAgents,
@@ -69,13 +67,13 @@ import {
   createRegistryEntryStatus,
   executeSdkTask,
   executeComparisonTask,
+  prepareTaskExecution,
   resolveConversationResume,
   resolveTaskResume,
   createComparisonSettledHandler,
 } from "./lifecycle/index.js";
 import { DeliveryGuard, sessionViewOf } from "./panel/delivery.js";
 import { reconcileStaleSdkBackgroundTasks } from "./subagent/sdkBackground.js";
-import { resolveAgentSkillPaths } from "./subagent/skills.js";
 import {
   createDefaultHerdrTerminalBackend,
   createSyncHerdrControl,
@@ -90,12 +88,10 @@ import {
   checkTaskCompletion,
 } from "./subagent/waitCompletion.js";
 import {
-  hasTmux,
   killAgentPaneStrictAsync,
   probePaneAsync,
 } from "./subagent/tmux.js";
 import {
-  buildTaskPrompt,
   createTaskCompleteRenderer,
   renderCall,
   renderResult,
@@ -591,79 +587,25 @@ export default function (pi: ExtensionAPI) {
          sessionName = conversationId ?? `task-${id}`;
        }
 
-      const taskCwdResolution = resolveTaskCwd(ctx.cwd, taskParams.cwd, persistedTaskCwd);
-      if (taskCwdResolution.kind === "invalid") {
-        return {
-          content: [{ type: "text" as const, text: taskCwdResolution.message }],
-          details: { phase: "failed" as const, error: "invalid cwd" },
-          isError: true,
-        };
-      }
-      const taskCwd = taskCwdResolution.cwd;
-      let skillPaths: string[];
-      try {
-        skillPaths = await resolveAgentSkillPaths(
-          agent.skills,
-          taskCwd,
-          ctx.isProjectTrusted(),
-        );
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        return {
-          content: [{ type: "text" as const, text: message }],
-          details: { phase: "failed" as const, error: "agent skills unavailable" },
-          isError: true,
-        };
-      }
-
-      const durableBackendPreference = (process.env.PI_TASK_BACKEND ?? "auto").trim().toLowerCase();
-      const herdrContextAvailable = process.env.HERDR_ENV === "1"
-        && Boolean(process.env.HERDR_PANE_ID)
-        && Boolean(process.env.HERDR_SOCKET_PATH);
-      if (conversationId && (durableBackendPreference === "sdk" || (!hasTmux() && !herdrContextAvailable))) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: "Durable conversations require an active HerdR or tmux terminal backend so Pi can save and reopen the subagent session. Start Pi inside HerdR, start tmux, or omit conversation_id for a one-shot SDK task.",
-            },
-          ],
-          details: {
-            phase: "failed" as const,
-            error: "tmux required for durable conversation",
-            conversation_id: conversationId,
-          },
-          isError: true,
-        };
-      }
-
-      if (conversationId) {
-        await mkdir(artifactsDir, { recursive: true });
-        const taskSessionsRegistry = readTaskSessionsRegistry(piDir);
-        taskSessionsRegistry[conversationId] = {
-              task_id: id,
-              updated_at: new Date().toISOString(),
-            };
-        writeTaskSessionsRegistry(piDir, taskSessionsRegistry);
-      }
-
-      const descText = taskParams.description || "";
-      const isBackground = taskParams.background ?? TASK_BACKGROUND_DEFAULT;
-      // default true
-
-          // ── Build the prompt (instructions are inlined; no CONTEXT.md file) ─
-          const promptContent = buildTaskPrompt({
-            description: descText,
-            agentName: agent.name,
-            agentSource: agent.source,
-            prompt: taskParams.prompt,
-            parentContext: taskParams.parent_context,
-            proposedChanges: taskParams.proposed_changes,
-            cwd: taskCwd,
-          });
-
-          const sessionDir = join(artifactsDir, "sessions", id);
-          await mkdir(sessionDir, { recursive: true });
+      const taskPreparation = await prepareTaskExecution({
+        taskParams,
+        agent,
+        ctx,
+        piDir,
+        artifactsDir,
+        id,
+        conversationId,
+        persistedTaskCwd,
+      });
+      if (taskPreparation.kind === "handled") return taskPreparation.result;
+      const {
+        taskCwd,
+        skillPaths,
+        descText,
+        isBackground,
+        promptContent,
+        sessionDir,
+      } = taskPreparation;
 
       // ─── Build and run the sub-agent pi process ──────────────────────────
       const backendResolution = await resolveTaskBackend();

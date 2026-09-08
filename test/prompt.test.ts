@@ -844,6 +844,10 @@ if (process.platform !== "win32") {
     fileURLToPath(new URL("../src/lifecycle/task-resume.ts", import.meta.url)),
     "utf8",
   );
+  const taskPreparationSrc = readFileSync(
+    fileURLToPath(new URL("../src/lifecycle/task-preparation.ts", import.meta.url)),
+    "utf8",
+  );
   // Guidance must not be duplicated in a second model-visible block:
   // promptGuidelines were removed and folded into the tool description.
   assert.ok(!indexSrc.includes("promptGuidelines"), t + " no duplicated guidelines block");
@@ -861,7 +865,7 @@ if (process.platform !== "win32") {
   assert.ok(terminalLaunchSrc.includes("splitWindowPane(cwd"), t + " tmux pane cwd");
   assert.ok(conversationResumeSrc.includes("previous?.cwd"), t + " conversation resume cwd");
   assert.ok(taskResumeSrc.includes("const persistedTaskCwd = entry.cwd"), t + " task resume cwd");
-  assert.ok(indexSrc.includes("resolveTaskCwd(ctx.cwd, taskParams.cwd, persistedTaskCwd)"), t + " resume precedence");
+  assert.ok(taskPreparationSrc.includes("resolveTaskCwd(ctx.cwd, taskParams.cwd, persistedTaskCwd)"), t + " resume precedence");
 }
 
 console.log("prompt.test.ts: all passed");

@@ -11,6 +11,14 @@ export interface BackgroundTask {
   cwd?: string;
   agentType: string;
   sessionName: string;
+  /** Child runtime; undefined/"pi" = pi CLI, "claude" = Claude Code CLI. */
+  runtime?: "pi" | "claude";
+  /** Claude Code transcript path (runtime "claude"); transient/cached —
+   * rebuilt from `cwd + claudeSessionId` after restart. */
+  claudeSessionFile?: string;
+  /** Durable Claude Code session UUID (runtime "claude"); the transcript is
+   * `<id>.jsonl` under the cwd's Claude projects dir. */
+  claudeSessionId?: string;
   /** Legacy tmux field retained while old in-memory callers are migrated. */
   paneId?: string;
   handle?: TerminalHandle;
@@ -51,6 +59,11 @@ export interface RegistryEntry {
   agentType: string;
   description: string;
   sessionName: string;
+  /** Child runtime; undefined/"pi" = pi CLI, "claude" = Claude Code CLI. */
+  runtime?: "pi" | "claude";
+  /** Durable Claude Code session UUID (runtime "claude"); the transcript is
+   * `<id>.jsonl` under the cwd's Claude projects dir. */
+  claudeSessionId?: string;
   startedAt: number;
   handle?: TerminalHandle;
   /** Legacy persisted field accepted by migration only. */
@@ -92,4 +105,11 @@ export interface TaskSessionHistoryEntry extends RegistryEntry {
   resultValid?: boolean;
   completedAt?: number;
   background: boolean;
+}
+
+/** Resolve the child runtime of a persisted record (default: pi). */
+export function taskRuntime(
+  record: Pick<BackgroundTask, "runtime">,
+): "pi" | "claude" {
+  return record.runtime ?? "pi";
 }

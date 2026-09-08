@@ -223,16 +223,25 @@ exit "$exit_code"`;
  * script file has no such limit; the command handed to tmux stays short.
  * The script stays in the per-task session dir: the pane shell reads it
  * at start, so deleting it immediately would be racy.
+ *
+ * `watchSessionFile` arms the transcript-stability watcher that exits the
+ * child when the session file stops growing. Pi children need it (their
+ * session JSONL grows continuously while working); runtimes with sparser
+ * transcripts (claude) must pass false or long tool executions would read
+ * as idle and kill the pane mid-task.
  */
 export function writePaneLaunchScript(
   sessionDir: string,
   sessionFilePath: string,
   command: string,
+  watchSessionFile = true,
 ): string {
   const scriptPath = join(sessionDir, "pane-launch.sh");
   writeFileSync(
     scriptPath,
-    buildPaneExitWatcherScript(sessionFilePath, command),
+    watchSessionFile
+      ? buildPaneExitWatcherScript(sessionFilePath, command)
+      : `${command}\nexit "$?"\n`,
     { mode: 0o700 },
   );
   return `sh ${shellQuote(scriptPath)}`;

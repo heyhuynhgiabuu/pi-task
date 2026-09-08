@@ -6,8 +6,45 @@ import {
   writeRegistry,
 } from "../conversation.js";
 import { hasAgentFinished, getLastMessageTimestampFromSessionDir } from "../session-text.js";
+import {
+  claudeSessionFilePath,
+  getLastClaudeMessageTimestamp,
+  hasClaudeFinished,
+} from "../subagent/claudeSession.js";
 import { killAgentPane, paneExists } from "../subagent/tmux.js";
-import type { BackgroundTask, RegistryEntry } from "../types.js";
+import { taskRuntime, type BackgroundTask, type RegistryEntry } from "../types.js";
+
+/** A syntactically valid Claude Code session UUID. */
+function isClaudeSessionId(value: string | undefined): value is string {
+  return (
+    typeof value === "string" &&
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+  );
+}
+
+/**
+ * Transcript path for a persisted claude entry: prefer the durable session
+ * UUID; legacy entries without one may fall back to sessionName only when it
+ * is itself a UUID (early builds pinned it as such). Anything else must not
+ * invent a path — restore polls the pi layout or fails closed instead.
+ */
+function restoredClaudeSessionFile(entry: RegistryEntry): string | undefined {
+  if (taskRuntime(entry) !== "claude" || !entry.cwd) return undefined;
+  const sessionId = isClaudeSessionId(entry.claudeSessionId)
+    ? entry.claudeSessionId
+    : isClaudeSessionId(entry.sessionName)
+      ? entry.sessionName
+      : undefined;
+  return sessionId ? claudeSessionFilePath(entry.cwd, sessionId) : undefined;
+}
+
+function restoredClaudeCompletionAt(
+  entry: RegistryEntry,
+  sinceMs: number,
+): number | undefined {
+  const file = restoredClaudeSessionFile(entry);
+  return file ? getLastClaudeMessageTimestamp(file, sinceMs) : undefined;
+}
 
 export function restoreActiveBackgroundTasks(
   piDir: string,
@@ -31,6 +68,10 @@ export function restoreActiveBackgroundTasks(
       agentType: entry.agentType,
       description: entry.description,
       sessionName: entry.sessionName,
+      runtime: entry.runtime,
+      ...(entry.claudeSessionId !== undefined
+        ? { claudeSessionId: entry.claudeSessionId }
+        : {}),
       startedAt: entry.startedAt,
       handle: entry.handle,
       paneId: entry.paneId,
@@ -77,6 +118,11 @@ export function restoreActiveBackgroundTasks(
       cwd: entry.cwd,
       agentType: entry.agentType,
       sessionName: entry.sessionName,
+      runtime: entry.runtime,
+      ...(entry.claudeSessionId !== undefined ? { claudeSessionId: entry.claudeSessionId } : {}),
+      ...(restoredClaudeSessionFile(entry)
+        ? { claudeSessionFile: restoredClaudeSessionFile(entry) }
+        : {}),
       paneId,
       handle: entry.handle,
       backend: entry.handle?.backend ?? entry.backend ?? "tmux",
@@ -145,11 +191,13 @@ export function restoreActiveBackgroundTasks(
         // both siblings' history records, and a receipt-only task would
         // otherwise vanish from history when its registry entry is removed.
         const receiptSessionDirs = [join(entry.dir, "sessions", entry.id), entry.dir];
-        const receiptCompletedAt = receiptSessionDirs
-          .map((dir) =>
-            getLastMessageTimestampFromSessionDir(dir, entry.sessionName, entry.startedAt),
-          )
-          .find((ts) => ts !== undefined) ?? Date.now();
+        const receiptCompletedAt =
+          restoredClaudeCompletionAt(entry, entry.startedAt) ??
+          receiptSessionDirs
+            .map((dir) =>
+              getLastMessageTimestampFromSessionDir(dir, entry.sessionName, entry.startedAt),
+            )
+            .find((ts) => ts !== undefined) ?? Date.now();
         upsertTaskSessionHistory(piDir, {
           id: entry.id,
           status: entry.cleanupPhase ?? "failed",
@@ -157,6 +205,10 @@ export function restoreActiveBackgroundTasks(
           agentType: entry.agentType,
           description: entry.description,
           sessionName: entry.sessionName,
+          runtime: entry.runtime,
+          ...(entry.claudeSessionId !== undefined
+            ? { claudeSessionId: entry.claudeSessionId }
+            : {}),
           startedAt: entry.startedAt,
           handle: entry.handle,
           paneId: entry.paneId,
@@ -192,9 +244,12 @@ export function restoreActiveBackgroundTasks(
     // (see startBackgroundPolling); legacy records and tests may point dir
     // directly at the session folder, so accept both.
     const sessionDirs = [join(entry.dir, "sessions", entry.id), entry.dir];
-    const sessionFinished = sessionDirs.some((dir) =>
-      hasAgentFinished(dir, entry.sessionName, entry.startedAt),
-    );
+    const claudeFile = restoredClaudeSessionFile(entry);
+    const sessionFinished = claudeFile
+      ? hasClaudeFinished(claudeFile, entry.startedAt)
+      : sessionDirs.some((dir) =>
+          hasAgentFinished(dir, entry.sessionName, entry.startedAt),
+        );
     const paneId = entry.handle?.resourceId ?? entry.paneId;
     let paneAlive: boolean;
     try {
@@ -212,11 +267,13 @@ export function restoreActiveBackgroundTasks(
       // Faithful completion time from the session itself: restore can happen
       // long after the child finished, and recovered comparison reports would
       // otherwise inflate durations by the outage length.
-      const completedAt = sessionDirs
-        .map((dir) =>
-          getLastMessageTimestampFromSessionDir(dir, entry.sessionName, entry.startedAt),
-        )
-        .find((ts) => ts !== undefined) ?? Date.now();
+      const completedAt =
+        restoredClaudeCompletionAt(entry, entry.startedAt) ??
+        sessionDirs
+          .map((dir) =>
+            getLastMessageTimestampFromSessionDir(dir, entry.sessionName, entry.startedAt),
+          )
+          .find((ts) => ts !== undefined) ?? Date.now();
       terminalReceipt(entry, "done", completedAt);
       if (closeEntryResource(entry, paneId, paneAlive)) staleIds.push(entry.id);
       return;

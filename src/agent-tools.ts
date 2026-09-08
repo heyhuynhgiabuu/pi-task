@@ -116,3 +116,139 @@ export function buildAgentToolSelection(input: ResolveAgentToolsInput): {
     excludeTools: [taskToolName],
   };
 }
+
+// ── Claude Code tool policy translation ─────────────────────────────────────
+
+/** Pi tool name → Claude Code built-in tool name. */
+const CLAUDE_TOOL_MAP: Record<string, string> = {
+  read: "Read",
+  grep: "Grep",
+  find: "Glob",
+  ls: "Glob",
+  bash: "Bash",
+  write: "Write",
+  edit: "Edit",
+  apply_patch: "Edit",
+  websearch: "WebSearch",
+  web_fetch: "WebFetch",
+};
+
+/** Claude built-ins that can mutate the workspace or run shell commands. */
+const CLAUDE_MUTATING_TOOLS = new Set(["Bash", "Write", "Edit", "NotebookEdit"]);
+
+/** Read-only Claude built-ins allowed to a `readonly: true` Claude agent. */
+const CLAUDE_READONLY_BASE_TOOLS: string[] = ["Read", "Grep", "Glob"];
+
+function formatList(names: Iterable<string>): string {
+  return [...names].map((n) => `"${n}"`).join(", ");
+}
+
+export interface ClaudeToolPolicy {
+  /** Value for claude `--tools` ("default" keeps the built-in surface). */
+  tools: string;
+  /** Value for claude `--disallowedTools`; undefined = no deny list. */
+  disallowedTools?: string;
+}
+
+/**
+ * Translate pi agent tool policy into Claude Code CLI flags (one translator,
+ * runtime-specific; pi runtime policy semantics are untouched).
+ *
+ * - Explicit `tools:` maps supported pi names to Claude names and REJECTS any
+ *   unmappable name rather than silently dropping it.
+ * - Explicit `disallowed_tools:` maps likewise; unmappable names are rejected.
+ *   When both `tools:` and `disallowed_tools:` are declared, both mapped flags
+ *   are emitted (the deny list stays authoritative on overlap).
+ * - `readonly: true` enforces an actual read-only surface (`--tools`
+ *   Read,Grep,Glob + read-only web tools) regardless of permission mode, so
+ *   bypassPermissions grants no shell/write escape.
+ * - No explicit restriction keeps Claude's default tool surface.
+ */
+export function resolveClaudeToolPolicy(
+  input: ResolveAgentToolsInput & { readonly?: boolean },
+): ClaudeToolPolicy {
+  const translate = (names: string[], source: "tools" | "disallowedTools") => {
+    const out: string[] = [];
+    const unmappable: string[] = [];
+    for (const name of names) {
+      const mapped = CLAUDE_TOOL_MAP[name.toLowerCase()];
+      if (mapped) {
+        if (!out.includes(mapped)) out.push(mapped);
+      } else {
+        unmappable.push(name);
+      }
+    }
+    if (unmappable.length > 0) {
+      throw new Error(
+        `Agent ${source} contains tools that cannot be mapped to Claude Code built-in tools: ${formatList(unmappable)}. ` +
+          `Supported pi names: ${formatList(Object.keys(CLAUDE_TOOL_MAP))}. ` +
+          "Remove them from the agent frontmatter or switch the agent to the pi runtime.",
+      );
+    }
+    return out;
+  };
+
+  const explicitTools = input.tools !== undefined && input.tools !== null && input.tools !== ""
+    ? parseToolList(input.tools)
+    : undefined;
+  const explicitDisallowed = parseToolList(input.disallowedTools);
+
+  // readonly: true — explicit allowlist wins, else the read-only base surface.
+  // The allowlist itself is the containment: Bash/Write/Edit/NotebookEdit are
+  // never named, so bypassPermissions cannot elevate the child.
+  if (input.readonly) {
+    const denyReadonly = translate(explicitDisallowed, "disallowedTools");
+    const readonlySurface = [...CLAUDE_READONLY_BASE_TOOLS];
+    if (explicitTools !== undefined) {
+      for (const mapped of translate(explicitTools, "tools")) {
+        if (CLAUDE_MUTATING_TOOLS.has(mapped)) {
+          throw new Error(
+            `Agent has readonly: true but tools: requests the mutating Claude Code tool "${mapped}". ` +
+              "Remove readonly: or drop the mutating tool from tools:.",
+          );
+        }
+        if (!readonlySurface.includes(mapped)) readonlySurface.push(mapped);
+      }
+    } else {
+      // Web tools are read-only in Claude Code and safe to expose here.
+      for (const name of ["websearch", "web_fetch"]) {
+        const mapped = CLAUDE_TOOL_MAP[name]!;
+        if (
+          !explicitDisallowed.some((d) => CLAUDE_TOOL_MAP[d.toLowerCase()] === mapped)
+        ) {
+          readonlySurface.push(mapped);
+        }
+      }
+    }
+    return {
+      tools: readonlySurface.join(","),
+      ...(denyReadonly.length > 0
+        ? { disallowedTools: denyReadonly.join(",") }
+        : {}),
+    };
+  }
+
+  if (explicitTools !== undefined) {
+    // Both flags must reach the CLI when the user declared both lists:
+    // Claude's deny list is authoritative when allow and deny overlap, so
+    // explicit disallowed_tools survive alongside an explicit allowlist.
+    const mappedTools = translate(explicitTools, "tools");
+    const mappedDisallowed = translate(explicitDisallowed, "disallowedTools");
+    return {
+      tools: mappedTools.join(","),
+      ...(mappedDisallowed.length > 0
+        ? { disallowedTools: mappedDisallowed.join(",") }
+        : {}),
+    };
+  }
+
+  if (explicitDisallowed.length > 0) {
+    return {
+      tools: "default",
+      disallowedTools: translate(explicitDisallowed, "disallowedTools").join(","),
+    };
+  }
+
+  // No explicit restrictions: keep Claude's normal tool surface.
+  return { tools: "default" };
+}

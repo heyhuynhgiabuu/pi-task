@@ -135,6 +135,10 @@ export function persistComparisonTaskHistory(
     agentType: task.agentType,
     description: task.description,
     sessionName: task.sessionName,
+    runtime: task.runtime,
+    ...(task.claudeSessionId !== undefined
+      ? { claudeSessionId: task.claudeSessionId }
+      : {}),
     startedAt: task.startedAt,
     paneId: task.paneId,
     handle: task.handle,

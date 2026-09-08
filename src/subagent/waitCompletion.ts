@@ -3,6 +3,10 @@ import {
   hasAgentFinished,
 } from "../session-text.js";
 import {
+  getLastClaudeAssistantText,
+  hasClaudeFinished,
+} from "./claudeSession.js";
+import {
   enrichSubagentFailureMessage,
   sessionJsonlExists,
 } from "./failure-diagnostics.js";
@@ -36,24 +40,42 @@ export interface WaitForTaskCompletionOptions {
   sinceMs?: number;
   resourceExists?: () => boolean | Promise<boolean>;
   exitSentinelPath?: string;
+  /** Child runtime; "pi" (default) reads pi JSONL, "claude" reads the
+   * Claude Code transcript. */
+  runtime?: "pi" | "claude";
+  /** Absolute Claude Code transcript path (required for runtime "claude"). */
+  claudeSessionFile?: string;
+}
+
+interface SessionTextSource {
+  sessionDir: string;
+  sessionName: string;
+  sinceMs?: number;
+  runtime?: "pi" | "claude";
+  claudeSessionFile?: string;
 }
 
 /**
- * v0.1.6: The subagent's final assistant message from the auto-saved
- * persistent JSONL session IS the result. No RESULT.md, no agent instructions
- * to write a file. Completion is gated by the assistant's terminal
- * `stopReason` (not `toolUse`, not streaming text).
+ * Final assistant text for a session, or null while the child is still
+ * running. One branch per runtime: pi reads the pi session JSONL in
+ * sessionDir; claude reads its own transcript file. All read paths inside
+ * completion polling (session read, post-pane-exit flush, exit-sentinel
+ * final read) funnel through here.
  */
 function readSessionText(
-  sessionDir: string,
-  sessionName: string,
-  sinceMs?: number,
+  options: SessionTextSource,
 ): string | null {
-  if (!hasAgentFinished(sessionDir, sessionName, sinceMs)) return null;
+  if (options.runtime === "claude") {
+    const file = options.claudeSessionFile;
+    if (!file || !hasClaudeFinished(file, options.sinceMs)) return null;
+    const text = getLastClaudeAssistantText(file, options.sinceMs).trim();
+    return text.length > 0 ? text : null;
+  }
+  if (!hasAgentFinished(options.sessionDir, options.sessionName, options.sinceMs)) return null;
   const text = getLastAssistantTextFromSessionDir(
-    sessionDir,
-    sessionName,
-    sinceMs,
+    options.sessionDir,
+    options.sessionName,
+    options.sinceMs,
   ).trim();
   return text.length > 0 ? text : null;
 }
@@ -90,22 +112,14 @@ export async function checkTaskCompletion(
 
   if (options.paneId && !paneAlive) {
     await sleep(POST_PANE_EXIT_FLUSH_MS);
-    const firstPass = readSessionText(
-      options.sessionDir,
-      options.sessionName,
-      options.sinceMs,
-    );
+    const firstPass = readSessionText(options);
     if (firstPass) {
       return { status: "completed", content: firstPass, source: "session-jsonl" };
     }
     await sleep(POST_PANE_EXIT_RETRY_MS);
   }
 
-  const sessionResult = readSessionText(
-    options.sessionDir,
-    options.sessionName,
-    options.sinceMs,
-  );
+  const sessionResult = readSessionText(options);
   if (sessionResult) {
     return { status: "completed", content: sessionResult, source: "session-jsonl" };
   }
@@ -114,11 +128,7 @@ export async function checkTaskCompletion(
     const sentinel = readExitSentinel(options.exitSentinelPath, options.taskId);
     if (sentinel) {
       await sleep(250);
-      const finalSessionResult = readSessionText(
-        options.sessionDir,
-        options.sessionName,
-        options.sinceMs,
-      );
+      const finalSessionResult = readSessionText(options);
       if (finalSessionResult) {
         return { status: "completed", content: finalSessionResult, source: "session-jsonl" };
       }
@@ -154,11 +164,16 @@ export async function waitForTaskCompletion(
 
   while (Date.now() - started < timeoutMs) {
     if (options.signal?.aborted) {
-      const partial = getLastAssistantTextFromSessionDir(
-        options.sessionDir,
-        options.sessionName,
-        options.sinceMs,
-      );
+      const partial = options.runtime === "claude"
+        ? getLastClaudeAssistantText(
+            options.claudeSessionFile ?? "",
+            options.sinceMs,
+          )
+        : getLastAssistantTextFromSessionDir(
+            options.sessionDir,
+            options.sessionName,
+            options.sinceMs,
+          );
       return {
         status: "cancelled",
         content: partial?.trim() || "Task was cancelled.",

@@ -170,6 +170,7 @@ test("grouped HerdR launch starts Pi in the new workspace root pane", async () =
     resourceId: "w2:p1",
     socketPath: "/tmp/herdr.sock",
     terminalId: "term-1",
+    agentKind: "pi",
     agentName: "task-agent",
     foregroundProcessGroupId: 42,
     workspaceId: "w2",
@@ -319,6 +320,7 @@ test("ungrouped HerdR launch splits the caller pane before starting Pi", async (
     resourceId: "w1:p2",
     socketPath: "/tmp/herdr.sock",
     terminalId: "term-2",
+    agentKind: "pi",
     agentName: "task-agent",
     foregroundProcessGroupId: 42,
   });
@@ -1641,5 +1643,202 @@ test("HerdR transport failures are not reported as dead panes", async () => {
     }),
     (error: unknown) =>
       error instanceof Error && error.name === "HerdrUnavailableError",
+  );
+});
+
+test("HerdR claude launch starts --kind claude and accepts a claude identity", async () => {
+  const calls: string[][] = [];
+  const backend = createHerdrTerminalBackend({
+    env: {
+      HERDR_ENV: "1",
+      HERDR_PANE_ID: "w1:p1",
+      HERDR_SOCKET_PATH: "/tmp/herdr.sock",
+    },
+    run: async (_command, args) => {
+      calls.push([...args]);
+      if (args[1] === "split") {
+        return {
+          stdout: JSON.stringify({
+            pane: { pane_id: "w1:p3", terminal_id: "term-3" },
+          }),
+          stderr: "",
+        };
+      }
+      if (args[0] === "pane" && args[1] === "process-info") {
+        return {
+          stdout: JSON.stringify({ process_info: { pane_id: "w1:p3", foreground_process_group_id: 7 } }),
+          stderr: "",
+        };
+      }
+      if (args[0] === "agent" && args[1] === "get") {
+        return {
+          stdout: JSON.stringify({ agent: { pane_id: "w1:p3", terminal_id: "term-3", name: "cc", agent: "claude", agent_status: "working", state_change_seq: 1 } }),
+          stderr: "",
+        };
+      }
+      if (args[0] === "agent") {
+        return {
+          stdout: JSON.stringify({
+            agent: { pane_id: "w1:p3", terminal_id: "term-3", agent: "claude" },
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "", stderr: "" };
+    },
+  });
+
+  const handle = await backend.launch({
+    cwd: "/repo",
+    agentArgs: ["--permission-mode", "bypassPermissions", "--session-id", "abc"],
+    agentKind: "claude",
+  });
+
+  assert.equal(handle.agentKind, "claude");
+  const startCall = calls.find((args) => args[0] === "agent" && args[1] === "start");
+  assert.ok(startCall, "agent start call recorded");
+  assert.deepEqual(startCall!.slice(0, 6), [
+    "agent",
+    "start",
+    "pi-task",
+    "--kind",
+    "claude",
+    "--pane",
+  ]);
+  assert.deepEqual(startCall!.slice(-5), [
+    "--",
+    "--permission-mode",
+    "bypassPermissions",
+    "--session-id",
+    "abc",
+  ]);
+});
+
+test("HerdR claude launch rejects a pane whose identity stayed pi", async () => {
+  const backend = createHerdrTerminalBackend({
+    env: {
+      HERDR_ENV: "1",
+      HERDR_PANE_ID: "w1:p1",
+      HERDR_SOCKET_PATH: "/tmp/herdr.sock",
+    },
+    run: async (_command, args) => {
+      if (args[1] === "split") {
+        return {
+          stdout: JSON.stringify({
+            pane: { pane_id: "w1:p4", terminal_id: "term-4" },
+          }),
+          stderr: "",
+        };
+      }
+      if (args[0] === "pane" && args[1] === "process-info") {
+        return {
+          stdout: JSON.stringify({ process_info: { pane_id: "w1:p4", foreground_process_group_id: 9 } }),
+          stderr: "",
+        };
+      }
+      if (args[0] === "agent" && args[1] === "get") {
+        // The pane still reports a pi agent despite --kind claude.
+        return {
+          stdout: JSON.stringify({ agent: { pane_id: "w1:p4", terminal_id: "term-4", name: "stale", agent: "pi", agent_status: "working", state_change_seq: 1 } }),
+          stderr: "",
+        };
+      }
+      return {
+        stdout: JSON.stringify({
+          agent: { pane_id: "w1:p4", terminal_id: "term-4", agent: "pi" },
+        }),
+        stderr: "",
+      };
+    },
+  });
+
+  await assert.rejects(
+    backend.launch({
+      cwd: "/repo",
+      agentArgs: ["--session-id", "abc"],
+      agentKind: "claude",
+    }),
+    (error: unknown) =>
+      error instanceof Error &&
+      /agent identity did not match started pane/i.test(error.message),
+  );
+});
+
+test("HerdR Claude handles reject a pane hosting Pi during control and restore", async () => {
+  const env = {
+    HERDR_ENV: "1",
+    HERDR_PANE_ID: "w1:p1",
+    HERDR_SOCKET_PATH: "/tmp/herdr.sock",
+  };
+  const run = async (_command: string, args: readonly string[]) => {
+    if (args[0] === "pane" && args[1] === "get") {
+      return {
+        stdout: JSON.stringify({
+          pane: { pane_id: "w1:p2", terminal_id: "term-2", agent: "pi" },
+        }),
+        stderr: "",
+      };
+    }
+    if (args[0] === "pane" && args[1] === "process-info") {
+      return {
+        stdout: JSON.stringify({
+          process_info: { pane_id: "w1:p2", foreground_process_group_id: 7 },
+        }),
+        stderr: "",
+      };
+    }
+    if (args[0] === "agent" && args[1] === "get") {
+      return {
+        stdout: JSON.stringify({
+          agent: {
+            pane_id: "w1:p2",
+            terminal_id: "term-2",
+            name: "claude-worker",
+            agent: "pi",
+            agent_status: "working",
+            state_change_seq: 1,
+          },
+        }),
+        stderr: "",
+      };
+    }
+    return { stdout: "", stderr: "" };
+  };
+  const handle = {
+    backend: "herdr" as const,
+    resourceId: "w1:p2",
+    socketPath: env.HERDR_SOCKET_PATH,
+    terminalId: "term-2",
+    agentKind: "claude" as const,
+    agentName: "claude-worker",
+    foregroundProcessGroupId: 7,
+  };
+
+  const backend = createHerdrTerminalBackend({ env, run });
+  await assert.rejects(backend.send(handle, "follow up"), /agent identity changed/);
+  assert.equal(
+    createSyncHerdrControl(env, (args) => {
+      if (args[0] === "pane" && args[1] === "get") {
+        return JSON.stringify({
+          pane: { pane_id: "w1:p2", terminal_id: "term-2", agent: "pi" },
+        });
+      }
+      if (args[0] === "pane" && args[1] === "process-info") {
+        return JSON.stringify({
+          process_info: { pane_id: "w1:p2", foreground_process_group_id: 7 },
+        });
+      }
+      return JSON.stringify({
+        agent: {
+          pane_id: "w1:p2",
+          terminal_id: "term-2",
+          name: "claude-worker",
+          agent: "pi",
+          agent_status: "working",
+          state_change_seq: 1,
+        },
+      });
+    }).exists(handle),
+    false,
   );
 });

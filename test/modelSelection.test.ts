@@ -14,7 +14,7 @@ const bundledAgentDir = fileURLToPath(new URL("../agents/", import.meta.url));
 
 test("bundled agents have catalog-safe prompts and tools", () => {
   const agents = loadAgentsFromDir(bundledAgentDir, "bundled");
-  assert.equal(agents.length, 4);
+  assert.equal(agents.length, 5);
   for (const agent of agents) {
     assert.notEqual(agent.description, ">", `${agent.name} has a folded description`);
     assert.doesNotMatch(

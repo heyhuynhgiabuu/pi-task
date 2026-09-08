@@ -1,9 +1,14 @@
 /**
- * Build `pi` CLI argv for subagent spawns.
+ * Build child CLI argv for subagent spawns (pi / Claude Code runtimes).
  */
 
 import type { AgentConfig } from "../helpers.js";
-import { resolveAgentToolAllowlist } from "../agent-tools.js";
+import {
+  resolveAgentToolAllowlist,
+  resolveClaudeToolPolicy,
+} from "../agent-tools.js";
+
+export type ChildRuntime = "pi" | "claude";
 
 export interface PiPromptLaunchOptions {
   systemPromptPath: string;
@@ -72,4 +77,77 @@ export function buildPiArgv(opts: BuildPiArgvOptions): string[] {
   );
   if (!opts.promptLaunch?.deferTaskPrompt) args.push(promptContent);
   return args;
+}
+
+export interface BuildClaudeArgsOptions {
+  agent: AgentConfig;
+  /** Pinned Claude Code session id (UUID); the transcript is <id>.jsonl. */
+  sessionId: string;
+  promptContent: string;
+  deferTaskPrompt?: boolean;
+}
+
+/**
+ * Build `claude` CLI arguments. Flags first, optional positional prompt last
+ * (Claude Code treats the first positional argument as the initial prompt).
+ */
+export function buildClaudeArgs(opts: BuildClaudeArgsOptions): string[] {
+  if (opts.agent.skills?.length) {
+    throw new Error(
+      "Claude Code runtime does not support Pi skills; remove the agent's skills or switch the agent to the pi runtime.",
+    );
+  }
+  const args: string[] = [];
+  // Tool policy is translated per runtime: explicit tools/disallowed_tools map
+  // onto --tools/--disallowedTools (unmappable names throw); readonly: true
+  // enforces a read-only surface so bypassPermissions grants no escape.
+  const policy = resolveClaudeToolPolicy({
+    tools: opts.agent.tools,
+    disallowedTools: opts.agent.disallowedTools,
+    readonly: opts.agent.readonly,
+  });
+  if (policy.tools !== "default") args.push("--tools", policy.tools);
+  if (policy.disallowedTools) {
+    args.push("--disallowedTools", policy.disallowedTools);
+  }
+  const permissionMode = opts.agent.permissionMode?.trim();
+  if (permissionMode) args.push("--permission-mode", permissionMode);
+  if (opts.agent.model) args.push("--model", opts.agent.model);
+  // pi thinking levels map onto claude effort: off/medium -> low, high -> high,
+  // max/xhigh -> max. Only claude-recognized values are forwarded.
+  const effort = effortFromThinking(opts.agent.thinking);
+  if (effort) args.push("--effort", effort);
+  args.push("--session-id", opts.sessionId);
+  if (!opts.deferTaskPrompt) args.push(opts.promptContent);
+  return args;
+}
+
+function effortFromThinking(
+  thinking: string | undefined,
+): "low" | "medium" | "high" | "xhigh" | "max" | undefined {
+  const value = thinking?.trim().toLowerCase();
+  if (!value) return undefined;
+  if (value === "off" || value === "minimal") return "low";
+  if (value === "low" || value === "medium" || value === "high" || value === "xhigh" || value === "max") {
+    return value as "low" | "medium" | "high" | "xhigh" | "max";
+  }
+  return undefined;
+}
+
+/** Route child argv construction by agent runtime (default: pi). */
+export function buildChildArgs(
+  agent: AgentConfig,
+  opts: BuildPiArgvOptions & BuildClaudeArgsOptions,
+): string[] {
+  if (agent.runtime === "claude") {
+    const { sessionId, deferTaskPrompt } = opts;
+    return buildClaudeArgs({ agent, sessionId, promptContent: opts.promptContent, deferTaskPrompt });
+  }
+  const {
+    agent: _agent,
+    sessionId: _sessionId,
+    deferTaskPrompt: _deferTaskPrompt,
+    ...piOpts
+  } = opts;
+  return buildPiArgv({ ...piOpts, agent });
 }

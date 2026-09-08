@@ -261,6 +261,54 @@ test("foreground comparison history keeps execution status separate from reporte
   assert.equal(entry?.comparisonIndex, 0);
 });
 
+test("comparison history forwards each sibling's own claudeSessionId", () => {
+  // issue #22: the durable UUID is the transcript identity. Each sibling's
+  // history record must carry its OWN claudeSessionId — reusing one UUID or
+  // omitting it would point restore (and any transcript reader) at the wrong
+  // or a missing transcript.
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-comparison-claude-"));
+  const write = persistComparisonTaskHistory;
+  const sibling = (id: string, claudeSessionId: string): ComparisonHistoryUpdate => ({
+    id,
+    task: {
+      dir: join(piDir, "artifacts"),
+      cwd: "/tmp/project",
+      agentType: "reviewer",
+      sessionName: `task-${id}`,
+      runtime: "claude",
+      claudeSessionId,
+      originalPane: null,
+      description: "Review",
+      startedAt: 100,
+      toolUses: 0,
+      turns: 0,
+      recentCalls: [],
+      comparisonGroupId: "claude-group",
+      comparisonModel: id === "task-m0" ? "model-a" : "model-b",
+      comparisonDescription: "Review",
+      comparisonIndex: id === "task-m0" ? 0 : 1,
+    },
+    status: "done",
+    background: true,
+    completedAt: 200,
+  });
+
+  write(piDir, sibling("task-m0", "d1111111-2222-4333-8444-555555555555"));
+  write(piDir, sibling("task-m1", "e1111111-2222-4333-8444-555555555555"));
+
+  const history = readTaskSessionHistory(piDir);
+  assert.equal(
+    history.find((entry) => entry.id === "task-m0")?.claudeSessionId,
+    "d1111111-2222-4333-8444-555555555555",
+    "sibling m0 keeps its own UUID",
+  );
+  assert.equal(
+    history.find((entry) => entry.id === "task-m1")?.claudeSessionId,
+    "e1111111-2222-4333-8444-555555555555",
+    "sibling m1 keeps its own distinct UUID",
+  );
+});
+
 test("ComparisonCoordinator handles failures gracefully", () => {
   const coordinator = new ComparisonCoordinator();
   coordinator.registerGroup(

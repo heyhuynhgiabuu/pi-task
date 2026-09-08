@@ -14,6 +14,7 @@ import {
   killAgentPane,
   probePaneAsync,
 } from "../subagent/tmux.js";
+import { claudeToolUseCount, claudeTurnCount } from "../subagent/claudeSession.js";
 import type { TerminalBackend, TerminalBackendKind } from "../subagent/terminalBackend.js";
 import {
   waitForTaskCompletion,
@@ -34,6 +35,12 @@ export interface TerminalForegroundExecutionOptions {
   taskCwd: string;
   conversationId?: string;
   piDir: string;
+  /** Child runtime; "pi" (default) or "claude" (Claude Code CLI). */
+  runtime?: "pi" | "claude";
+  /** Durable Claude Code session UUID (runtime "claude"). */
+  claudeSessionId?: string;
+  /** Absolute Claude Code transcript path (runtime "claude"). */
+  claudeSessionFile?: string;
   handle: TerminalHandle;
   paneId: string;
   originalPane: string | null;
@@ -58,6 +65,9 @@ export async function executeTerminalForegroundTask({
   taskCwd,
   conversationId,
   piDir,
+  runtime,
+  claudeSessionId,
+  claudeSessionFile,
   handle,
   paneId,
   originalPane,
@@ -71,11 +81,19 @@ export async function executeTerminalForegroundTask({
   foregroundTasks,
   clearTaskWidgetIfIdle,
 }: TerminalForegroundExecutionOptions) {
+  const claudeRuntime = runtime === "claude";
+  const runtimeHistoryFields = {
+    runtime,
+    ...(claudeRuntime && claudeSessionId !== undefined
+      ? { claudeSessionId }
+      : {}),
+  };
   upsertTaskSessionHistory(piDir, {
     id,
     agentType,
     description,
     sessionName,
+    ...runtimeHistoryFields,
     startedAt,
     paneId,
     handle,
@@ -114,6 +132,9 @@ export async function executeTerminalForegroundTask({
     resourceExists: selectedBackend === "herdr"
       ? () => terminalBackend.isAlive(handle as Extract<TerminalHandle, { backend: "herdr" }>)
       : () => probePaneAsync(paneId).then((probe) => probe.state),
+    ...(claudeRuntime
+      ? { runtime: "claude" as const, claudeSessionFile }
+      : {}),
   });
   stopProgress();
   signal?.removeEventListener("abort", onAbort);
@@ -136,6 +157,7 @@ export async function executeTerminalForegroundTask({
     agentType,
     description,
     sessionName,
+    ...runtimeHistoryFields,
     startedAt,
     paneId,
     handle,
@@ -169,7 +191,12 @@ export async function executeTerminalForegroundTask({
   foregroundTasks.delete(id);
   clearTaskWidgetIfIdle();
   const durationMs = Date.now() - startedAt;
-  const { toolUses, turns } = countToolUses(sessionDir, sessionName);
+  const { toolUses, turns } = claudeRuntime
+    ? {
+        toolUses: claudeToolUseCount(claudeSessionFile ?? "", startedAt),
+        turns: claudeTurnCount(claudeSessionFile ?? "", startedAt),
+      }
+    : countToolUses(sessionDir, sessionName);
   const envelope = buildTaskEnvelope(parsed, {
     agent_type: agentType,
     description,

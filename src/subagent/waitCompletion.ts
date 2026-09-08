@@ -2,6 +2,7 @@ import {
   getLastAssistantResultFromSessionDir,
   getLastAssistantTextFromSessionDir,
 } from "../session-text.js";
+import { getLastClaudeAssistantText, hasClaudeFinished } from "./claudeSession.js";
 import {
   enrichSubagentFailureMessageAsync,
   sessionJsonlExists,
@@ -39,23 +40,44 @@ export interface WaitForTaskCompletionOptions {
   sinceMs?: number;
   resourceExists?: () => ResourceProbe | Promise<ResourceProbe>;
   exitSentinelPath?: string;
+  /** Child runtime; "pi" (default) reads pi JSONL, "claude" reads the
+   * Claude Code transcript. */
+  runtime?: "pi" | "claude";
+  /** Absolute Claude Code transcript path (required for runtime "claude"). */
+  claudeSessionFile?: string;
+}
+
+interface SessionTextSource {
+  sessionDir: string;
+  sessionName: string;
+  sinceMs?: number;
+  runtime?: "pi" | "claude";
+  claudeSessionFile?: string;
 }
 
 /**
- * v0.1.6: The subagent's final assistant message from the auto-saved
- * persistent JSONL session IS the result. No RESULT.md, no agent instructions
- * to write a file. Completion is gated by the assistant's terminal
- * `stopReason` (not `toolUse`, not streaming text).
+ * Final assistant result for a session, or null while the child is still
+ * running. One branch per runtime: pi reads the pi session JSONL in
+ * sessionDir (structured completed/failed result); claude reads its own
+ * transcript file (finished transcript = completed). All read paths inside
+ * completion polling (session read, post-pane-exit flush, exit-sentinel
+ * final read, timeout final read) funnel through here.
  */
 function readSessionResult(
-  sessionDir: string,
-  sessionName: string,
-  sinceMs?: number,
+  options: SessionTextSource,
 ): TaskCompletionSnapshot | null {
+  if (options.runtime === "claude") {
+    const file = options.claudeSessionFile;
+    if (!file || !hasClaudeFinished(file, options.sinceMs)) return null;
+    const text = getLastClaudeAssistantText(file, options.sinceMs).trim();
+    return text.length > 0
+      ? { status: "completed", content: text, source: "session-jsonl" }
+      : null;
+  }
   const result = getLastAssistantResultFromSessionDir(
-    sessionDir,
-    sessionName,
-    sinceMs,
+    options.sessionDir,
+    options.sessionName,
+    options.sinceMs,
   );
   if (!result) return null;
   return {
@@ -124,20 +146,12 @@ export async function checkTaskCompletion(
 
   if (options.paneId && initialResourceState === "missing") {
     await sleep(POST_PANE_EXIT_FLUSH_MS);
-    const firstPass = readSessionResult(
-      options.sessionDir,
-      options.sessionName,
-      options.sinceMs,
-    );
+    const firstPass = readSessionResult(options);
     if (firstPass) return await enrichEmptySessionFailure(firstPass, options);
     await sleep(POST_PANE_EXIT_RETRY_MS);
   }
 
-  const sessionResult = readSessionResult(
-    options.sessionDir,
-    options.sessionName,
-    options.sinceMs,
-  );
+  const sessionResult = readSessionResult(options);
   // A provider error/abort can be an intermediate row while Pi retries. Do
   // not settle it while the child resource is still alive; a later poll may
   // observe the successful terminal row. Successful terminal output remains
@@ -151,11 +165,7 @@ export async function checkTaskCompletion(
     const sentinel = readExitSentinel(options.exitSentinelPath, options.taskId);
     if (sentinel) {
       await sleep(250);
-      const finalSessionResult = readSessionResult(
-        options.sessionDir,
-        options.sessionName,
-        options.sinceMs,
-      );
+      const finalSessionResult = readSessionResult(options);
       if (finalSessionResult) return finalSessionResult;
       const message = sentinel.exitCode === 0
         ? "Agent process exited without writing a final session result."
@@ -193,11 +203,16 @@ export async function waitForTaskCompletion(
 
   while (Date.now() - started < timeoutMs) {
     if (options.signal?.aborted) {
-      const partial = getLastAssistantTextFromSessionDir(
-        options.sessionDir,
-        options.sessionName,
-        options.sinceMs,
-      );
+      const partial = options.runtime === "claude"
+        ? getLastClaudeAssistantText(
+            options.claudeSessionFile ?? "",
+            options.sinceMs,
+          )
+        : getLastAssistantTextFromSessionDir(
+            options.sessionDir,
+            options.sessionName,
+            options.sinceMs,
+          );
       return {
         status: "cancelled",
         content: partial?.trim() || "Task was cancelled.",
@@ -214,11 +229,7 @@ export async function waitForTaskCompletion(
   // A provider failure may have been deferred while the child resource stayed
   // alive. Preserve that classified terminal content instead of replacing it
   // with a generic timeout if no later retry arrived.
-  const finalSessionResult = readSessionResult(
-    options.sessionDir,
-    options.sessionName,
-    options.sinceMs,
-  );
+  const finalSessionResult = readSessionResult(options);
   if (finalSessionResult) return await enrichEmptySessionFailure(finalSessionResult, options);
 
   const base = `Task timed out after ${Math.round(timeoutMs / 1000)}s without producing a result.`;

@@ -22,6 +22,11 @@ export interface TerminalTaskLaunchOptions {
   sessionDir: string;
   sessionName: string;
   environment: Record<string, string>;
+  /** Child runtime; "pi" (default) launches the pi CLI, "claude" launches
+   * the Claude Code CLI with its own transcript path. */
+  runtime?: "pi" | "claude";
+  /** Absolute Claude Code transcript path (required for runtime "claude"). */
+  claudeSessionFile?: string;
   label: string;
   workspaceGroup?: string;
   remainOnExit: boolean;
@@ -51,11 +56,14 @@ export async function launchTerminalTask({
   sessionDir,
   sessionName,
   environment,
+  runtime,
+  claudeSessionFile,
   label,
   workspaceGroup,
   remainOnExit,
   selfDestruct,
 }: TerminalTaskLaunchOptions): Promise<TerminalTaskLaunchResult> {
+  const claudeRuntime = runtime === "claude";
   const environmentResult = resolveSubagentEnvironment(process.env, environment);
   if (!environmentResult.ok) throw new Error(environmentResult.error);
   for (const diagnostic of environmentResult.diagnostics) {
@@ -69,6 +77,7 @@ export async function launchTerminalTask({
       initialPrompt,
       cwd,
       env: childEnvironment,
+      agentKind: claudeRuntime ? "claude" : "pi",
       label,
       workspaceGroup,
     });
@@ -80,10 +89,25 @@ export async function launchTerminalTask({
   }
 
   const envPrefix = buildTmuxEnvironmentPrefix(childEnvironment);
-  const shellCommand = `${envPrefix} pi ${agentArgs.map((arg) => shellQuote(arg)).join(" ")}`;
-  const sessionFile = join(sessionDir, sessionName + ".jsonl");
+  // Claude gets its prompt as the final positional argv element (submitted by
+  // the terminal command line); pi embeds it in agentArgs.
+  const shellCommand = claudeRuntime
+    ? `${envPrefix} claude ${agentArgs.map((arg) => shellQuote(arg)).join(" ")} ${shellQuote(initialPrompt)}`.trimStart()
+    : `${envPrefix} pi ${agentArgs.map((arg) => shellQuote(arg)).join(" ")}`;
+  // Claude writes its transcript to its own pinned session file, not the pi
+  // task session layout.
+  const sessionFile = claudeRuntime && claudeSessionFile
+    ? claudeSessionFile
+    : join(sessionDir, sessionName + ".jsonl");
   const childCommand = `cd ${shellQuote(cwd)} && ${shellCommand}`;
-  const terminalCommand = writePaneLaunchScript(sessionDir, sessionFile, childCommand);
+  // No transcript-stability watcher for claude: its JSONL does not grow
+  // during long tool executions, so stability != exit.
+  const terminalCommand = writePaneLaunchScript(
+    sessionDir,
+    sessionFile,
+    childCommand,
+    !claudeRuntime,
+  );
   const splitResult = splitWindowPane(cwd, terminalCommand);
   const paneId = splitResult.paneId;
   setPaneRemainOnExit(paneId, remainOnExit);

@@ -17,9 +17,10 @@ import { strict as assert } from "node:assert";
 import { setTimeout as sleep } from "node:timers/promises";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { BACKGROUND_POLL_CONCURRENCY } from "../src/constants.js";
 import { startBackgroundPolling } from "../src/lifecycle/polling.js";
+import { startToolStatsPolling } from "../src/lifecycle/toolStats.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -782,4 +783,119 @@ function makeTurnTask(overrides: Record<string, unknown> = {}): Record<string, u
   }
   assert.equal(settledPhase, "done", `${t}: normal completion wins during wrap-up`);
   assert.ok(settledContent.includes("wrapped up cleanly"), `${t}: real result delivered`);
+}
+
+// ─── Claude turn counting feeds the max_turns wrap-up (issue #22) ──────────
+
+function writeClaudeTranscript(lines: unknown[]): string {
+  const dir = mkdtempSync(join(tmpdir(), "pi-task-poll-claude-"));
+  const file = join(dir, "transcript.jsonl");
+  writeFileSync(file, lines.map((line) => JSON.stringify(line)).join("\n") + "\n");
+  return file;
+}
+
+function claudeAssistant(stopReason: string | null): Record<string, unknown> {
+  return {
+    type: "assistant",
+    timestamp: new Date().toISOString(),
+    message: {
+      role: "assistant",
+      stop_reason: stopReason,
+      content: [{ type: "text", text: "working" }],
+    },
+  };
+}
+
+{
+  const t = "claude task turns come from the transcript and steer wrap-up at maxTurns";
+  // Two completed assistant turns on record; checkTaskCompletion still says
+  // running (Claude children announce completion only via the transcript),
+  // so the ONLY way the limit can trip is the transcript-derived turn count.
+  const transcript = writeClaudeTranscript([
+    claudeAssistant("tool_use"),
+    claudeAssistant("end_turn"),
+  ]);
+  try {
+    const task = makeTurnTask({
+      runtime: "claude",
+      claudeSessionFile: transcript,
+      maxTurns: 2,
+      turns: 0,
+    });
+    const backgroundTasks = new Map<string, any>([["t1", task]]);
+    const steeredPrompts: string[] = [];
+    let completions = 0;
+    const statsStop: ReturnType<typeof setInterval> = startToolStatsPolling(
+      new Map(),
+      backgroundTasks as Map<string, any>,
+      5,
+    );
+    const pollStop = startBackgroundPolling(
+      makeDeps({
+        backgroundTasks,
+        steerTask: (_task: any, prompt: string) => {
+          steeredPrompts.push(prompt);
+          return true;
+        },
+        checkTaskCompletion: async () => ({ status: "running", content: "" }),
+        completeTask: () => {
+          completions += 1;
+        },
+      }),
+      10,
+    );
+    try {
+      await sleep(60);
+    } finally {
+      clearInterval(statsStop);
+      pollStop();
+    }
+    assert.equal(
+      (backgroundTasks.get("t1") as any).turns,
+      2,
+      `${t}: startToolStatsPolling set turns via claudeTurnCount`,
+    );
+    assert.ok(steeredPrompts.length === 1, `${t}: wrap-up steered exactly once (got ${steeredPrompts.length})`);
+    assert.ok(steeredPrompts[0]!.includes("2"), `${t}: wrap-up mentions the limit`);
+    assert.equal(completions, 0, `${t}: task is not settled at the limit`);
+  } finally {
+    rmSync(dirname(transcript), { recursive: true, force: true });
+  }
+}
+
+{
+  const t = "claude in-flight turns (null stop_reason) do not count toward the limit";
+  const transcript = writeClaudeTranscript([
+    claudeAssistant("tool_use"),
+    claudeAssistant(null),
+  ]);
+  try {
+    const backgroundTasks = new Map<string, any>([
+      ["t1", makeTurnTask({ runtime: "claude", claudeSessionFile: transcript, maxTurns: 2, turns: 0 })],
+    ]);
+    const steeredPrompts: string[] = [];
+    const statsStop: ReturnType<typeof setInterval> = startToolStatsPolling(new Map(), backgroundTasks as Map<string, any>, 5);
+    const pollStop = startBackgroundPolling(
+      makeDeps({
+        backgroundTasks,
+        steerTask: (_task: any, prompt: string) => {
+          steeredPrompts.push(prompt);
+          return true;
+        },
+        checkTaskCompletion: async () => ({ status: "running", content: "" }),
+        completeTask: () => {},
+      }),
+      10,
+    );
+    try {
+      await sleep(60);
+    } finally {
+      clearInterval(statsStop);
+      pollStop();
+    }
+    assert.equal((backgroundTasks.get("t1") as any).turns, 1, `${t}: only explicit stop_reasons counted`);
+    assert.equal(steeredPrompts.length, 0, `${t}: limit not reached, no wrap-up`);
+  } finally {
+    rmSync(dirname(transcript), { recursive: true, force: true });
+  }
 }

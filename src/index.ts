@@ -80,6 +80,8 @@ import {
   resolveHerdrPiIntegrationExtension,
 } from "./subagent/herdr.js";
 import { resolveTaskBackend } from "./subagent/selectBackend.js";
+import { buildClaudeArgs } from "./subagent/buildArgv.js";
+import { claudeSessionFilePath } from "./subagent/claudeSession.js";
 import {
   steerRunningBackgroundTask,
   steerRunningBackgroundTaskAsync,
@@ -481,6 +483,56 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
+      const claudeRuntime = agent.runtime === "claude";
+      if (claudeRuntime) {
+        if (conversationId || taskId) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Agent "${agent.name}" uses the Claude Code runtime, which does not support conversation_id or task_id resume. Omit both for a one-shot claude task.`,
+              },
+            ],
+            details: {
+              phase: "failed" as const,
+              error: "resume_unsupported_for_claude_runtime",
+            },
+            isError: true,
+          };
+        }
+        if (taskParams.compare) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Comparison mode is not supported for the Claude Code runtime (agent "${agent.name}"). Pi-runtime agents are required for compare.`,
+              },
+            ],
+            details: {
+              phase: "failed" as const,
+              error: "compare_unsupported_for_claude_runtime",
+            },
+            isError: true,
+          };
+        }
+        const requestedBackendRaw = (process.env.PI_TASK_BACKEND ?? "auto").trim().toLowerCase();
+        if (requestedBackendRaw === "sdk") {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Agent "${agent.name}" uses the Claude Code runtime, which requires the herdr or tmux backend. PI_TASK_BACKEND=sdk is not supported for claude tasks.`,
+              },
+            ],
+            details: {
+              phase: "failed" as const,
+              error: "sdk_unsupported_for_claude_runtime",
+            },
+            isError: true,
+          };
+        }
+      }
+
       const admissionKey = conversationId
         ? `${piDir}\u0000conversation:${conversationId}`
         : taskId
@@ -588,6 +640,24 @@ export default function (pi: ExtensionAPI) {
         sessionDir,
       } = taskPreparation;
 
+      // ── Claude Code runtime setup: pinned session id + transcript path ──
+      // The UUID is the durable identity: it is persisted on every task/
+      // registry/history record so post-restart polling can rebuild the
+      // transcript path from cwd + claudeSessionId (sessionName stays the
+      // ordinary task-<id> name).
+      const claudeSessionId = claudeRuntime ? randomUUID() : undefined;
+      const claudeSessionFile = claudeRuntime && claudeSessionId
+        ? claudeSessionFilePath(taskCwd, claudeSessionId)
+        : undefined;
+      const claudeTaskRuntime = claudeRuntime ? ("claude" as const) : undefined;
+      // Claude Code has no --append-system-prompt: the agent body is
+      // prepended to the task prompt itself.
+      const claudePrompt = claudeRuntime
+        ? agent.body
+          ? `${agent.body}\n\n---\n\n${promptContent}`
+          : promptContent
+        : undefined;
+
       // ─── Build and run the sub-agent pi process ──────────────────────────
       const backendResolution = await resolveTaskBackend();
       if (!backendResolution.ok) {
@@ -606,6 +676,21 @@ export default function (pi: ExtensionAPI) {
         selectedBackend,
         herdrBackend,
       } = backendResolution;
+      if (claudeRuntime && selectedBackend === "sdk") {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Agent "${agent.name}" uses the Claude Code runtime, which requires an active HerdR or tmux terminal backend. Start Pi inside HerdR or tmux, or set PI_TASK_BACKEND=herdr|tmux.`,
+            },
+          ],
+          details: {
+            phase: "failed" as const,
+            error: "sdk_unsupported_for_claude_runtime",
+          },
+          isError: true,
+        };
+      }
       const effectiveFast = resolveTaskFastMode(taskParams.fast, agent.fast);
 
       if (taskParams.compare) {
@@ -644,7 +729,7 @@ export default function (pi: ExtensionAPI) {
       let promptLaunch:
         | { systemPromptPath: string; deferTaskPrompt: boolean }
         | undefined;
-      if (selectedBackend === "herdr") {
+      if (selectedBackend === "herdr" && !claudeRuntime) {
         promptLaunch = {
           systemPromptPath: join(sessionDir, "agent-system-prompt.md"),
           deferTaskPrompt: true,
@@ -652,10 +737,19 @@ export default function (pi: ExtensionAPI) {
         await writeFile(promptLaunch.systemPromptPath, agent.body, "utf8");
       }
       const herdrRequiredExtension =
-        selectedBackend === "herdr"
+        selectedBackend === "herdr" && !claudeRuntime
           ? resolveHerdrPiIntegrationExtension()
           : undefined;
-      const piArgs = buildPiArgs(
+      const piArgs = claudeRuntime && claudeSessionId
+        ? buildClaudeArgs({
+            agent,
+            sessionId: claudeSessionId,
+            promptContent: claudePrompt ?? promptContent,
+            // The initial prompt is submitted via `herdr agent prompt` / the
+            // tmux command line, never as a positional argv element.
+            deferTaskPrompt: true,
+          })
+        : buildPiArgs(
         agent,
         sessionName,
         sessionDir,
@@ -685,7 +779,9 @@ export default function (pi: ExtensionAPI) {
             cwd: taskCwd,
             agentType: agent.name,
             sessionName,
-                    backend: selectedBackend,
+            backend: selectedBackend,
+            runtime: claudeTaskRuntime,
+            ...(claudeRuntime ? { claudeSessionId, claudeSessionFile } : {}),
             originalPane: null,
             description: descText,
             startedAt: Date.now(),
@@ -744,7 +840,9 @@ export default function (pi: ExtensionAPI) {
         cwd: taskCwd,
         conversationId,
         piDir,
-        prompt: promptContent,
+        prompt: claudePrompt ?? promptContent,
+        runtime: claudeTaskRuntime,
+        ...(claudeRuntime ? { claudeSessionId, claudeSessionFile } : {}),
         piArgs,
         selectedBackend,
         requestedBackend,

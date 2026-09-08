@@ -51,6 +51,53 @@ test("completion preserves the child-reported outcome separately from execution"
   assert.equal(details?.result_valid, true);
 });
 
+test("settlement forwards the durable claudeSessionId into history", () => {
+  // issue #22: completion/history records must carry the durable Claude
+  // session UUID so a restart can rebuild the transcript path from
+  // cwd + claudeSessionId instead of the throwaway task session name.
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-completion-claude-"));
+  const task: BackgroundTask = {
+    dir: join(piDir, "artifacts", "tasks", "task-claude-id"),
+    agentType: "general",
+    sessionName: "task-task-claude-id",
+    runtime: "claude",
+    claudeSessionId: "f1111111-2222-4333-8444-555555555555",
+    originalPane: null,
+    description: "claude id forwarding",
+    startedAt: Date.now() - 1000,
+    toolUses: 0,
+    turns: 0,
+  };
+  writeRegistry(piDir, [{
+    id: "task-claude-id",
+    agentType: task.agentType,
+    description: task.description,
+    sessionName: task.sessionName,
+    runtime: "claude",
+    claudeSessionId: task.claudeSessionId,
+    startedAt: task.startedAt,
+    piDir,
+    dir: task.dir,
+  }]);
+
+  completeTask({
+    pi: { sendMessage: () => {} } as never,
+    id: "task-claude-id",
+    task,
+    content: "<task_result><summary>done</summary></task_result>",
+    phase: "done",
+    piDir,
+  });
+
+  const history = readTaskSessionHistory(piDir)[0];
+  assert.equal(history?.status, "done");
+  assert.equal(
+    history?.claudeSessionId,
+    "f1111111-2222-4333-8444-555555555555",
+    "terminal history record carries the durable UUID",
+  );
+});
+
 test("cancellation is persisted before its resource cleanup", () => {
   const piDir = mkdtempSync(join(tmpdir(), "pi-task-cancel-completion-"));
   const task: BackgroundTask = {

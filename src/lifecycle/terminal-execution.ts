@@ -32,6 +32,12 @@ export interface TerminalExecutionOptions {
   piDir: string;
   prompt: string;
   piArgs: string[];
+  /** Child runtime; "pi" (default) or "claude" (Claude Code CLI). */
+  runtime?: "pi" | "claude";
+  /** Durable Claude Code session UUID (runtime "claude"). */
+  claudeSessionId?: string;
+  /** Absolute Claude Code transcript path (runtime "claude"). */
+  claudeSessionFile?: string;
   selectedBackend: TerminalBackendKind;
   requestedBackend: string;
   terminalBackend: TerminalBackend;
@@ -61,6 +67,9 @@ export async function executeTerminalTask({
   piDir,
   prompt,
   piArgs,
+  runtime,
+  claudeSessionId,
+  claudeSessionFile,
   selectedBackend,
   requestedBackend,
   terminalBackend,
@@ -77,6 +86,7 @@ export async function executeTerminalTask({
   clearTaskWidgetIfIdle,
   ensureTaskWidget,
 }: TerminalExecutionOptions) {
+  const claudeRuntime = runtime === "claude";
   let paneId: string;
   let originalPane: string | null;
   let handle: TerminalHandle;
@@ -89,7 +99,12 @@ export async function executeTerminalTask({
       cwd,
       sessionDir,
       sessionName,
-      environment: { PI_TASK_TOOL_DISABLED: "1" },
+      // PI_TASK_TOOL_DISABLED only matters for pi children (it disables the
+      // pi-task tool inside the subagent's Pi process); opt-in issue #24
+      // environment forwarding still applies to every runtime.
+      environment: claudeRuntime ? {} : { PI_TASK_TOOL_DISABLED: "1" },
+      runtime,
+      claudeSessionFile,
       label: `${agentName}-${id.slice(0, 8)}`,
       workspaceGroup,
       remainOnExit: Boolean(foregroundTask),
@@ -133,6 +148,9 @@ export async function executeTerminalTask({
       taskCwd: cwd,
       conversationId,
       piDir,
+      runtime,
+      claudeSessionId,
+      claudeSessionFile,
       handle,
       paneId,
       originalPane,
@@ -155,6 +173,8 @@ export async function executeTerminalTask({
     cwd,
     agentType: agentName,
     sessionName,
+    runtime,
+    ...(claudeRuntime ? { claudeSessionId, claudeSessionFile } : {}),
     paneId,
     handle,
     originalPane,
@@ -191,7 +211,9 @@ export async function executeTerminalTask({
         text: formatBackgroundReceipt({
           taskId: id,
           agentType: agentName,
-          sessionPath: join(sessionDir, `${sessionName}.jsonl`),
+          sessionPath: claudeRuntime && claudeSessionFile
+            ? claudeSessionFile
+            : join(sessionDir, `${sessionName}.jsonl`),
           backend: selectedBackend,
           backendReason: requestedBackend === "auto" && selectedBackend !== "herdr"
             ? "HerdR unavailable"

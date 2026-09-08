@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { restoreActiveBackgroundTasks } from "../src/lifecycle/restore.ts";
+import { claudeSessionFilePath } from "../src/subagent/claudeSession.ts";
 
 function makePiDir() {
   return mkdtempSync(join(tmpdir(), "pi-task-restore-"));
@@ -830,6 +831,196 @@ describe("session ownership (issue #20)", () => {
       backgroundTasks.has("task-unknown-host"),
       true,
       "unknown session id disables ownership scoping",
+    );
+  });
+});
+
+describe("claude restart recovery (issue #22)", () => {
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  function claudeEntry(
+    piDir: string,
+    over: { id: string; cwd: string; sessionName: string; claudeSessionId?: string },
+  ) {
+    mkdirSync(join(piDir, "artifacts"), { recursive: true });
+    mkdirSync(over.cwd, { recursive: true });
+    return {
+      id: over.id,
+      dir: join(piDir, "artifacts"),
+      cwd: over.cwd,
+      sessionName: over.sessionName,
+      runtime: "claude",
+      ...(over.claudeSessionId !== undefined ? { claudeSessionId: over.claudeSessionId } : {}),
+      startedAt: Date.now() - 1000,
+      handle: { backend: "herdr", resourceId: "w1:p9", socketPath: "/tmp/h.sock", terminalId: "t9" },
+      agentType: "general",
+      description: "claude runtime recovery",
+      background: true,
+    };
+  }
+
+  function writeClaudeTranscript(
+    cwd: string,
+    sessionId: string,
+    stopReason: string | null,
+    timestamp = new Date().toISOString(),
+  ) {
+    const transcript = claudeSessionFilePath(cwd, sessionId);
+    mkdirSync(dirname(transcript), { recursive: true });
+    writeFileSync(
+      transcript,
+      JSON.stringify({
+        type: "assistant",
+        timestamp,
+        message: {
+          role: "assistant",
+          stop_reason: stopReason,
+          content: [{ type: "text", text: "claude done" }],
+        },
+      }) + "\n",
+    );
+    return transcript;
+  }
+
+  it("recovers a finished claude task via its persisted claudeSessionId, not sessionName", async () => {
+    // issue #22: the transcript is <claudeSessionId>.jsonl under the child
+    // cwd's Claude projects dir while sessionName stays the ordinary
+    // task-<id> name, so restore must inspect the UUID transcript — not
+    // sessionName — to classify the task as done.
+    const piDir = makePiDir();
+    const cwd = join(piDir, "repo");
+    const claudeSessionId = "a1111111-2222-4333-8444-555555555555";
+    assert.ok(UUID_RE.test(claudeSessionId));
+    const completionTimestamp = "2026-09-08T10:00:05.000Z";
+    writeClaudeTranscript(cwd, claudeSessionId, "end_turn", completionTimestamp);
+    writeJson(join(piDir, "task-registry.json"), [
+      claudeEntry(piDir, {
+        id: "task-claude-done",
+        cwd,
+        sessionName: "task-task-claude-done",
+        claudeSessionId,
+      }),
+    ]);
+
+    const closes: string[] = [];
+    const backgroundTasks = new Map();
+    await restoreActiveBackgroundTasks(piDir, backgroundTasks, () => false, (entry) => {
+      closes.push(String((entry as { claudeSessionId?: string }).claudeSessionId));
+    });
+
+    assert.equal(backgroundTasks.size, 0, "finished claude task must not be restored as running");
+    assert.deepEqual(
+      readJson<unknown[]>(join(piDir, "task-registry.json")),
+      [],
+      "settled claude entry removed from the registry",
+    );
+    const history = readJson<Array<{
+      id: string;
+      status: string;
+      runtime?: string;
+      claudeSessionId?: string;
+      completedAt?: number;
+    }>>(
+      join(piDir, "task-session-history.json"),
+    );
+    assert.equal(history[0]?.status, "done", "claude transcript proves completion");
+    assert.equal(history[0]?.runtime, "claude", "history preserves the runtime");
+    assert.equal(
+      history[0]?.completedAt,
+      Date.parse(completionTimestamp),
+      "history uses the Claude completion timestamp",
+    );
+    assert.equal(
+      history[0]?.claudeSessionId,
+      claudeSessionId,
+      "history keeps the durable claudeSessionId",
+    );
+    assert.deepEqual(closes, [claudeSessionId], "cleanup receives the persisted UUID");
+  });
+
+  it("restores a running claude task with the UUID-rebuilt transcript path", async () => {
+    const piDir = makePiDir();
+    const cwd = join(piDir, "repo");
+    const claudeSessionId = "b1111111-2222-4333-8444-555555555555";
+    writeJson(join(piDir, "task-registry.json"), [
+      claudeEntry(piDir, {
+        id: "task-claude-live",
+        cwd,
+        sessionName: "task-task-claude-live",
+        claudeSessionId,
+      }),
+    ]);
+
+    const backgroundTasks = new Map();
+    await restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true);
+
+    const restored = backgroundTasks.get("task-claude-live") as {
+      claudeSessionId?: string;
+      claudeSessionFile?: string;
+    } | undefined;
+    assert.ok(restored, "running claude task is restored for polling");
+    assert.equal(restored.claudeSessionId, claudeSessionId, "durable UUID survives restore");
+    assert.equal(
+      restored.claudeSessionFile,
+      claudeSessionFilePath(cwd, claudeSessionId),
+      "transcript path rebuilt from cwd + claudeSessionId",
+    );
+  });
+
+  it("never invents a claude transcript path from a non-UUID sessionName", async () => {
+    // Legacy claude entries recorded only task-task-<id> names. Those must
+    // not be treated as session UUIDs: restore leaves claudeSessionFile
+    // unset so completion polling fails closed instead of probing a
+    // fabricated "<sessionName>.jsonl" transcript.
+    const piDir = makePiDir();
+    const cwd = join(piDir, "repo");
+    writeJson(join(piDir, "task-registry.json"), [
+      claudeEntry(piDir, {
+        id: "task-claude-legacy",
+        cwd,
+        sessionName: "task-task-claude-legacy",
+      }),
+    ]);
+
+    const backgroundTasks = new Map();
+    await restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true);
+
+    const restored = backgroundTasks.get("task-claude-legacy") as {
+      claudeSessionFile?: string;
+    } | undefined;
+    assert.ok(restored, "legacy claude task still restores as running");
+    assert.equal(
+      restored.claudeSessionFile,
+      undefined,
+      "no transcript path fabricated from the task session name",
+    );
+  });
+
+  it("falls back to a legacy UUID sessionName when claudeSessionId is absent", async () => {
+    // Early builds pinned sessionName to the claude UUID. Restore must keep
+    // accepting those, but only when the name is syntactically a UUID.
+    const piDir = makePiDir();
+    const cwd = join(piDir, "repo");
+    const legacyId = "c1111111-2222-4333-8444-555555555555";
+    writeJson(join(piDir, "task-registry.json"), [
+      claudeEntry(piDir, {
+        id: "task-claude-uuid-name",
+        cwd,
+        sessionName: legacyId,
+      }),
+    ]);
+
+    const backgroundTasks = new Map();
+    await restoreActiveBackgroundTasks(piDir, backgroundTasks, () => true);
+
+    const restored = backgroundTasks.get("task-claude-uuid-name") as {
+      claudeSessionFile?: string;
+    } | undefined;
+    assert.ok(restored, "legacy UUID-named claude task restores as running");
+    assert.equal(
+      restored.claudeSessionFile,
+      claudeSessionFilePath(cwd, legacyId),
+      "legacy UUID sessionName resolves the transcript path",
     );
   });
 });

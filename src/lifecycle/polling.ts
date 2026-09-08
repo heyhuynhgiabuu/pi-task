@@ -9,11 +9,12 @@ import {
   getLastAssistantResultFromSessionDir,
   getLastAssistantTextFromSessionDir,
 } from "../session-text.js";
+import { getLastClaudeAssistantText } from "../subagent/claudeSession.js";
 import type {
   ResourceProbe,
   TaskCompletionSnapshot,
 } from "../subagent/waitCompletion.js";
-import type { BackgroundTask } from "../types.js";
+import { taskRuntime, type BackgroundTask } from "../types.js";
 import { completeTask, type ComparisonSettledHook } from "./completion.js";
 
 export interface BackgroundPollingDeps {
@@ -24,12 +25,14 @@ export interface BackgroundPollingDeps {
     paneId?: string;
     artifactsDir?: string;
     taskId?: string;
-        sinceMs?: number;
-        resourceExists?: () => ResourceProbe | Promise<ResourceProbe>;
-        exitSentinelPath?: string;
-      }) => Promise<TaskCompletionSnapshot>;
-      resourceExists?: (task: BackgroundTask) => ResourceProbe | Promise<ResourceProbe>;
-      closeTask?: (task: BackgroundTask) => void | Promise<void>;
+    sinceMs?: number;
+    resourceExists?: () => ResourceProbe | Promise<ResourceProbe>;
+    exitSentinelPath?: string;
+    runtime?: "pi" | "claude";
+    claudeSessionFile?: string;
+  }) => Promise<TaskCompletionSnapshot>;
+  resourceExists?: (task: BackgroundTask) => ResourceProbe | Promise<ResourceProbe>;
+  closeTask?: (task: BackgroundTask) => void | Promise<void>;
   clearTaskWidgetIfIdle: () => void;
   completeTask: typeof completeTask;
   onComparisonSettled?: ComparisonSettledHook;
@@ -123,11 +126,16 @@ export function startBackgroundPolling(
       // skipped above (no terminal session to steer).
       if (task.maxTurns !== undefined) {
         const readPartial = () =>
-          getLastAssistantTextFromSessionDir(
-            sessionDir,
-            task.sessionName,
-            task.startedAt,
-          );
+          taskRuntime(task) === "claude"
+            ? getLastClaudeAssistantText(
+                task.claudeSessionFile ?? "",
+                task.startedAt,
+              )
+            : getLastAssistantTextFromSessionDir(
+                sessionDir,
+                task.sessionName,
+                task.startedAt,
+              );
         const settleAtLimit = (reason: string) =>
           settle(
             id,
@@ -162,6 +170,9 @@ export function startBackgroundPolling(
         sinceMs: task.startedAt,
         resourceExists: deps.resourceExists ? () => deps.resourceExists!(task) : undefined,
         exitSentinelPath: task.exitSentinelPath,
+        ...(taskRuntime(task) === "claude"
+          ? { runtime: "claude" as const, claudeSessionFile: task.claudeSessionFile }
+          : {}),
       });
 
       if (stopped) return;

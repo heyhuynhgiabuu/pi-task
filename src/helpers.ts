@@ -15,6 +15,7 @@ import { parseMergedDisallowedTools } from "./policy.js";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
   buildPiArgv,
+  type ChildRuntime,
   type PiPromptLaunchOptions,
 } from "./subagent/buildArgv.js";
 
@@ -91,6 +92,10 @@ export interface AgentConfig {
   hidden?: boolean;
   proactive?: boolean;
   readonly?: boolean;
+  /** Child runtime from frontmatter `runtime:`; undefined = pi CLI. */
+  runtime?: ChildRuntime;
+  /** Claude Code permission mode from frontmatter `permission_mode:`. */
+  permissionMode?: string;
   body: string;
   source: "project" | "user" | "bundled";
   path: string;
@@ -633,15 +638,42 @@ export function loadAgentsFromDir(
     const proactive = parseBool(frontmatter.proactive);
     const readonly = parseBool(frontmatter.readonly);
     const fast = parseBool(frontmatter.fast);
+    const runtimeRaw = frontmatter.runtime?.trim().toLowerCase();
+    // `model: claude-code/<model>` implies the claude runtime — one line
+    // instead of separate runtime/model frontmatter fields.
+    const rawModel = frontmatter.model?.trim();
+    const runtime: ChildRuntime | undefined =
+      runtimeRaw === "claude"
+        ? "claude"
+        : runtimeRaw
+          ? undefined
+          : rawModel?.toLowerCase().startsWith("claude-code/")
+            ? "claude"
+            : undefined;
+    // bypassPermissions is the unattended-completion default for claude
+    // children; permission_mode: overrides it for stricter setups.
+    const permissionMode =
+      frontmatter.permission_mode?.trim() ||
+      (runtime === "claude" ? "bypassPermissions" : undefined);
     // Always-on xAI disallow list — these tools are never useful for
-    // task subagents and risk leaking provider-specific behavior.
-    const withDefaults = [
-      ...parseToolList(disallowedRaw),
-      ...DEFAULT_DISALLOWED_TOOLS,
-      ...(readonly ? READONLY_TOOL_DENY : []),
-    ];
+    // task subagents and risk leaking provider-specific behavior. Claude
+    // runtime agents skip the provider-specific defaults: those names cannot
+    // map to Claude Code built-ins and would make resolveClaudeToolPolicy
+    // reject agents the user never restricted. User-declared disallowed_tools
+    // and readonly denies still apply on both runtimes.
+    const userDisallowed = parseToolList(disallowedRaw);
+    const readonlyDeny = readonly ? READONLY_TOOL_DENY : [];
     const maxTurns = parsePositiveInt(frontmatter.max_turns);
-    const merged = parseMergedDisallowedTools(withDefaults.join(","));
+    const merged =
+      runtime === "claude"
+        ? [...new Set([...userDisallowed, ...readonlyDeny])]
+        : parseMergedDisallowedTools(
+            [
+              ...userDisallowed,
+              ...DEFAULT_DISALLOWED_TOOLS,
+              ...readonlyDeny,
+            ].join(","),
+          );
     const disallowedTools = merged.length > 0 ? merged : undefined;
     const tools = parseToolList(
       frontmatter.tools as string | string[] | undefined,
@@ -649,7 +681,7 @@ export function loadAgentsFromDir(
     const skills = parseToolList(frontmatter.skills);
     const modelSpecs = parseModelSpecs(
       frontmatter.models as string | string[] | undefined,
-      frontmatter.model?.trim(),
+      rawModel,
       frontmatter.thinking,
     );
     const models = modelSpecs.length > 0 ? modelSpecs.map((s) => s.model) : undefined;
@@ -670,6 +702,8 @@ export function loadAgentsFromDir(
       hidden,
       proactive,
       readonly,
+      runtime,
+      permissionMode,
       maxTurns,
       body,
       source,
@@ -775,7 +809,12 @@ export function parseModelSpecs(
   fallbackModel?: string,
   thinkingRaw?: string | string[] | undefined,
 ): AgentModelSpec[] {
-  const modelEntries = parseModelList(modelsRaw ?? fallbackModel);
+  const resolved =
+    modelsRaw ??
+    (fallbackModel?.toLowerCase().startsWith("claude-code/")
+      ? fallbackModel.slice("claude-code/".length)
+      : fallbackModel);
+  const modelEntries = parseModelList(resolved);
   const thinkings = parseToolList(thinkingRaw);
 
   return modelEntries.map((entry, i) => {
@@ -955,6 +994,8 @@ function stripProactivePrefix(description: string): string {
         requiredExtensions,
       });
     }
+
+    export { buildChildArgs } from "./subagent/buildArgv.js";
 
     // ─── JSONL Session Helpers ───────────────────────────────────────────────────
 

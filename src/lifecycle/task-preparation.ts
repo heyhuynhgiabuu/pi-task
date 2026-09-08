@@ -34,18 +34,24 @@ export interface TaskPreparationOptions {
   taskParams: TaskStartRequest;
   agent: AgentConfig;
   ctx: ExtensionContext;
-  piDir: string;
   artifactsDir: string;
   id: string;
   conversationId?: string;
   persistedTaskCwd?: string;
 }
 
+export interface TaskMaterializationOptions {
+  piDir: string;
+  artifactsDir: string;
+  id: string;
+  sessionDir: string;
+  conversationId?: string;
+}
+
 export async function prepareTaskExecution({
   taskParams,
   agent,
   ctx,
-  piDir,
   artifactsDir,
   id,
   conversationId,
@@ -82,6 +88,8 @@ export async function prepareTaskExecution({
     };
   }
 
+  // Keep the legacy durable-conversation error precedence while leaving the
+  // actual backend capability check to the side-effect-free caller preflight.
   const durableBackendPreference = (process.env.PI_TASK_BACKEND ?? "auto").trim().toLowerCase();
   const herdrContextAvailable = process.env.HERDR_ENV === "1"
     && Boolean(process.env.HERDR_PANE_ID)
@@ -106,17 +114,6 @@ export async function prepareTaskExecution({
     };
   }
 
-  if (conversationId) {
-    await mkdir(artifactsDir, { recursive: true });
-    updateTaskSessionsRegistry(piDir, (registry) => ({
-      ...registry,
-      [conversationId]: {
-        task_id: id,
-        updated_at: new Date().toISOString(),
-      },
-    }));
-  }
-
   const descText = taskParams.description || "";
   const isBackground = taskParams.background ?? TASK_BACKGROUND_DEFAULT;
   const promptContent = buildTaskPrompt({
@@ -130,7 +127,6 @@ export async function prepareTaskExecution({
   });
 
   const sessionDir = join(artifactsDir, "sessions", id);
-  await mkdir(sessionDir, { recursive: true });
 
   return {
     kind: "continue",
@@ -141,4 +137,25 @@ export async function prepareTaskExecution({
     promptContent,
     sessionDir,
   };
+}
+
+/** Materialize durable task artifacts only after side-effect-free preflight passes. */
+export async function materializeTaskExecution({
+  piDir,
+  artifactsDir,
+  id,
+  sessionDir,
+  conversationId,
+}: TaskMaterializationOptions): Promise<void> {
+  if (conversationId) {
+    await mkdir(artifactsDir, { recursive: true });
+    updateTaskSessionsRegistry(piDir, (registry) => ({
+      ...registry,
+      [conversationId]: {
+        task_id: id,
+        updated_at: new Date().toISOString(),
+      },
+    }));
+  }
+  await mkdir(sessionDir, { recursive: true });
 }

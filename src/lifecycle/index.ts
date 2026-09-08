@@ -49,8 +49,12 @@ export { executeTerminalTask } from "./terminal-execution.js";
 export type { TerminalExecutionOptions } from "./terminal-execution.js";
 export { executeComparisonTask } from "./comparison-execution.js";
 export type { ComparisonExecutionOptions } from "./comparison-execution.js";
-export { prepareTaskExecution } from "./task-preparation.js";
+export {
+  materializeTaskExecution,
+  prepareTaskExecution,
+} from "./task-preparation.js";
 export type {
+  TaskMaterializationOptions,
   TaskPreparationOptions,
   TaskPreparationResolution,
   TaskPreparationResult,

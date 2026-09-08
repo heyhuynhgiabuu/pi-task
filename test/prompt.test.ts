@@ -142,6 +142,85 @@ process.on("exit", () => {
 }
 
 if (process.platform !== "win32") {
+  const t = "backend preflight does not persist a conversation on unavailable HerdR";
+  const root = mkdtempSync(join(tmpdir(), "pi-task-preflight-backend-"));
+  const originalPath = process.env.PATH;
+  const originalHerdrEnv = process.env.HERDR_ENV;
+  const originalHerdrPane = process.env.HERDR_PANE_ID;
+  const originalHerdrSocket = process.env.HERDR_SOCKET_PATH;
+  const originalBackend = process.env.PI_TASK_BACKEND;
+  const originalCwd = process.cwd();
+  let shutdown: (() => void) | undefined;
+  try {
+    process.chdir(root);
+    process.env.PATH = join(root, "empty-bin");
+    process.env.HERDR_ENV = "1";
+    process.env.HERDR_PANE_ID = "w1:p1";
+    process.env.HERDR_SOCKET_PATH = join(root, "herdr.sock");
+    process.env.PI_TASK_BACKEND = "herdr";
+
+    let tool: { execute: (...args: unknown[]) => Promise<{
+      isError?: boolean;
+      details?: { error?: string };
+    }> } | undefined;
+    taskExtension({
+      on(event: string, handler: () => void) {
+        if (event === "session_shutdown") shutdown = handler;
+      },
+      registerMessageRenderer() {},
+      registerFlag() {},
+      registerTool(value: typeof tool) {
+        tool = value;
+      },
+      registerCommand() {},
+      getAllTools() {
+        return [];
+      },
+    } as never);
+    assert.ok(tool, t + " registration");
+
+    const result = await tool.execute(
+      "backend-preflight",
+      {
+        agent_type: "explore",
+        prompt: "Inspect only",
+        description: "Backend preflight",
+        conversation_id: "unavailable-herdr",
+        background: true,
+      },
+      undefined,
+      undefined,
+      { cwd: root, isProjectTrusted: () => true },
+    );
+    assert.match(result.details?.error ?? "", /HerdR backend requires/i, `${t} error contract: ${JSON.stringify(result)}`);
+    assert.equal(
+      existsSync(join(root, ".pi", "artifacts", "task-sessions.json")),
+      false,
+      t + " does not write the conversation map",
+    );
+    assert.equal(
+      existsSync(join(root, ".pi", "artifacts", "tasks")),
+      false,
+      t + " does not create task artifacts",
+    );
+  } finally {
+    shutdown?.();
+    process.chdir(originalCwd);
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+    if (originalHerdrEnv === undefined) delete process.env.HERDR_ENV;
+    else process.env.HERDR_ENV = originalHerdrEnv;
+    if (originalHerdrPane === undefined) delete process.env.HERDR_PANE_ID;
+    else process.env.HERDR_PANE_ID = originalHerdrPane;
+    if (originalHerdrSocket === undefined) delete process.env.HERDR_SOCKET_PATH;
+    else process.env.HERDR_SOCKET_PATH = originalHerdrSocket;
+    if (originalBackend === undefined) delete process.env.PI_TASK_BACKEND;
+    else process.env.PI_TASK_BACKEND = originalBackend;
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+if (process.platform !== "win32") {
   const t = "active durable conversations reject foreground relaunch";
   const root = mkdtempSync(join(tmpdir(), "pi-task-active-cwd-"));
   const piDir = join(root, ".pi");

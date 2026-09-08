@@ -70,6 +70,7 @@ import {
   createRegistryEntryStatus,
   executeSdkTask,
   executeComparisonTask,
+  materializeTaskExecution,
   prepareTaskExecution,
   resolveConversationResume,
   resolveTaskResume,
@@ -656,7 +657,6 @@ export default function (pi: ExtensionAPI) {
         taskParams,
         agent,
         ctx,
-        piDir,
         artifactsDir,
         id,
         conversationId,
@@ -723,6 +723,29 @@ export default function (pi: ExtensionAPI) {
           isError: true,
         };
       }
+      if (conversationId && selectedBackend === "sdk") {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: "Durable conversations require an active HerdR or tmux terminal backend so Pi can save and reopen the subagent session. Start Pi inside HerdR, start tmux, or omit conversation_id for a one-shot SDK task.",
+            },
+          ],
+          details: {
+            phase: "failed" as const,
+            error: "tmux required for durable conversation",
+            conversation_id: conversationId,
+          },
+          isError: true,
+        };
+      }
+      await materializeTaskExecution({
+        piDir,
+        artifactsDir,
+        id,
+        sessionDir,
+        conversationId,
+      });
       const effectiveFast = resolveTaskFastMode(taskParams.fast, agent.fast);
 
       if (taskParams.compare) {

@@ -28,18 +28,18 @@ test("completion preserves the child-reported outcome separately from execution"
   };
   let details: Record<string, unknown> | undefined;
 
-  completeTask(
-    {
+  completeTask({
+    pi: {
       sendMessage: (message: { details: Record<string, unknown> }) => {
         details = message.details;
       },
     } as never,
-    "task-2",
-    task,
-    "<status>failure</status>\n<summary>Tests failed</summary>",
-    "done",
-    piDir,
-  );
+    id: "task-2",
+    task: task,
+    content: "<status>failure</status>\n<summary>Tests failed</summary>",
+    phase: "done",
+    piDir: piDir,
+  });
 
   const history = readTaskSessionHistory(piDir);
   assert.equal(history[0]?.status, "done");
@@ -76,19 +76,19 @@ test("cancellation is persisted before its resource cleanup", () => {
   }]);
 
   let cleanupObservedCancellation = false;
-  completeTask(
-    { sendMessage: () => {} } as never,
-    "task-cancel",
-    task,
-    "Task was cancelled by request.",
-    "cancelled",
-    piDir,
-    () => {
+  completeTask({
+    pi: { sendMessage: () => {} } as never,
+    id: "task-cancel",
+    task: task,
+    content: "Task was cancelled by request.",
+    phase: "cancelled",
+    piDir: piDir,
+    resourceCloser: () => {
       cleanupObservedCancellation = readRegistry(piDir).some((entry) =>
         entry.id === "task-cancel" && entry.cleanupPending === true
       ) && readTaskSessionHistory(piDir).some((entry) => entry.id === "task-cancel" && entry.status === "cancelled");
     },
-  );
+  });
 
   assert.equal(cleanupObservedCancellation, true);
   assert.equal(readTaskSessionHistory(piDir)[0]?.status, "cancelled");
@@ -126,20 +126,20 @@ test("completion is persisted and leaves cleanup pending when pane cleanup fails
     },
   };
 
-  completeTask(
-    pi as never,
-    "task-1",
-    task,
-    "<task_result><summary>done</summary></task_result>",
-    "done",
-    piDir,
-    () => {
+  completeTask({
+    pi: pi as never,
+    id: "task-1",
+    task: task,
+    content: "<task_result><summary>done</summary></task_result>",
+    phase: "done",
+    piDir: piDir,
+    resourceCloser: () => {
       cleanupObservedDurableState = readRegistry(piDir).some((entry) =>
         entry.id === "task-1" && entry.cleanupPending === true
       ) && readTaskSessionHistory(piDir).some((entry) => entry.id === "task-1" && entry.status === "done");
       throw new Error("simulated cleanup failure");
     },
-  );
+  });
 
   assert.equal(cleanupObservedDurableState, true);
   assert.equal(notificationSent, true);
@@ -162,18 +162,18 @@ test("completion notification defaults to follow-up delivery", () => {
   const previous = process.env.PI_TASK_COMPLETION_DELIVERY;
   delete process.env.PI_TASK_COMPLETION_DELIVERY;
   try {
-    completeTask(
-      {
+    completeTask({
+      pi: {
         sendMessage: (_message: unknown, opts: unknown) => {
           options = opts;
         },
       } as never,
-      "task-default",
-      task,
-      "<summary>done</summary>",
-      "done",
-      piDir,
-    );
+      id: "task-default",
+      task: task,
+      content: "<summary>done</summary>",
+      phase: "done",
+      piDir: piDir,
+    });
   } finally {
     if (previous === undefined) delete process.env.PI_TASK_COMPLETION_DELIVERY;
     else process.env.PI_TASK_COMPLETION_DELIVERY = previous;
@@ -196,19 +196,16 @@ test("completion delivery queue batches notifications within its debounce window
     description: "queued completion",
     recentCalls: [],
   };
-  completeTask(
-    { sendMessage: () => { deliveries += 1; } } as never,
-    "queue-task",
-    task,
-    "queued result",
-    "done",
-    piDir,
-    () => {},
-    undefined,
-    undefined,
-    undefined,
-    queue,
-  );
+  completeTask({
+    pi: { sendMessage: () => { deliveries += 1; } } as never,
+    id: "queue-task",
+    task: task,
+    content: "queued result",
+    phase: "done",
+    piDir: piDir,
+    resourceCloser: () => {},
+    deliveryQueue: queue,
+  });
   assert.equal(deliveries, 0);
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(deliveries, 1);
@@ -231,18 +228,18 @@ test("completion notification defers to the next user turn when configured", () 
   const previous = process.env.PI_TASK_COMPLETION_DELIVERY;
   process.env.PI_TASK_COMPLETION_DELIVERY = "nextTurn";
   try {
-    completeTask(
-      {
+    completeTask({
+      pi: {
         sendMessage: (_message: unknown, opts: unknown) => {
           options = opts;
         },
       } as never,
-      "task-nextturn",
-      task,
-      "<summary>done</summary>",
-      "done",
-      piDir,
-    );
+      id: "task-nextturn",
+      task: task,
+      content: "<summary>done</summary>",
+      phase: "done",
+      piDir: piDir,
+    });
   } finally {
     if (previous === undefined) delete process.env.PI_TASK_COMPLETION_DELIVERY;
     else process.env.PI_TASK_COMPLETION_DELIVERY = previous;
@@ -262,14 +259,14 @@ test("completeTask records the terminal phase on the live task object", () => {
     toolUses: 0,
     turns: 0,
   };
-  completeTask(
-    { sendMessage: () => {} } as never,
-    "task-3",
-    task,
-    "<status>failure</status>",
-    "failed",
-    piDir,
-  );
+  completeTask({
+    pi: { sendMessage: () => {} } as never,
+    id: "task-3",
+    task: task,
+    content: "<status>failure</status>",
+    phase: "failed",
+    piDir: piDir,
+  });
   assert.equal(task.status, "failed", "panel rows must see the terminal phase");
 });
 
@@ -289,8 +286,24 @@ test("completeTask is idempotent for one execution: a second call never re-deliv
   let resourceCloses = 0;
   const pi: any = { sendMessage: () => { deliveries++; } };
   const closer = () => { resourceCloses++; };
-  completeTask(pi, "task-4", task, "first", "done", piDir, closer);
-  completeTask(pi, "task-4", task, "second", "cancelled", piDir, closer);
+  completeTask({
+    pi: pi,
+    id: "task-4",
+    task: task,
+    content: "first",
+    phase: "done",
+    piDir: piDir,
+    resourceCloser: closer,
+  });
+  completeTask({
+    pi: pi,
+    id: "task-4",
+    task: task,
+    content: "second",
+    phase: "cancelled",
+    piDir: piDir,
+    resourceCloser: closer,
+  });
   assert.equal(deliveries, 1, "a second completeTask for one execution must not re-deliver");
   assert.equal(resourceCloses, 1, "a second completeTask for one execution must not re-close the resource");
 });
@@ -309,8 +322,22 @@ test("completeTask allows a resumed task id to complete as a new run", () => {
   });
   let deliveries = 0;
   const pi: any = { sendMessage: () => { deliveries++; } };
-  completeTask(pi, "reused-id", mkTask(1), "first", "done", piDir);
-  completeTask(pi, "reused-id", mkTask(2), "second", "done", piDir);
+  completeTask({
+    pi: pi,
+    id: "reused-id",
+    task: mkTask(1),
+    content: "first",
+    phase: "done",
+    piDir: piDir,
+  });
+  completeTask({
+    pi: pi,
+    id: "reused-id",
+    task: mkTask(2),
+    content: "second",
+    phase: "done",
+    piDir: piDir,
+  });
   assert.equal(deliveries, 2, "a resumed run with the same id must complete independently");
   assert.equal(readTaskSessionHistory(piDir).at(-1)?.description, "run-2");
 });
@@ -329,8 +356,22 @@ test("completeTask still allows distinct task ids to complete independently", ()
   });
   let deliveries = 0;
   const pi: any = { sendMessage: () => { deliveries++; } };
-  completeTask(pi, "a", mk("a"), "r1", "done", piDir);
-  completeTask(pi, "b", mk("b"), "r2", "done", piDir);
+  completeTask({
+    pi: pi,
+    id: "a",
+    task: mk("a"),
+    content: "r1",
+    phase: "done",
+    piDir: piDir,
+  });
+  completeTask({
+    pi: pi,
+    id: "b",
+    task: mk("b"),
+    content: "r2",
+    phase: "done",
+    piDir: piDir,
+  });
   assert.equal(deliveries, 2, "distinct task ids must each deliver once");
 });
 
@@ -352,12 +393,26 @@ test("a completeTask that throws mid-writes does not poison the idempotency guar
   let deliveries = 0;
   const pi: any = { sendMessage: () => { deliveries++; } };
 
-  assert.throws(() => completeTask(pi, "t-p", mk(), "x", "done", badPiDir));
+  assert.throws(() => completeTask({
+    pi,
+    id: "t-p",
+    task: mk(),
+    content: "x",
+    phase: "done",
+    piDir: badPiDir,
+  }));
 
   // A retry with a valid piDir must still complete and deliver exactly once:
   // the earlier throw must not have poisoned the id.
   const goodPiDir = mkdtempSync(join(tmpdir(), "pi-task-completion-good-"));
-  completeTask(pi, "t-p", mk(), "x", "done", goodPiDir);
+  completeTask({
+    pi: pi,
+    id: "t-p",
+    task: mk(),
+    content: "x",
+    phase: "done",
+    piDir: goodPiDir,
+  });
   assert.equal(deliveries, 1, "retry after a mid-write throw must still deliver");
 });
 
@@ -375,18 +430,18 @@ test("completion surfaces an unrecognized child status word to the parent", () =
   };
   let captured: { content: string; details: Record<string, unknown> } | undefined;
 
-  completeTask(
-    {
+  completeTask({
+    pi: {
       sendMessage: (message: { content: string; details: Record<string, unknown> }) => {
         captured = message;
       },
     } as never,
-    "task-stalled",
-    task,
-    "<status>stalled</status>\n<summary>waiting on external quota</summary>",
-    "done",
-    piDir,
-  );
+    id: "task-stalled",
+    task: task,
+    content: "<status>stalled</status>\n<summary>waiting on external quota</summary>",
+    phase: "done",
+    piDir: piDir,
+  });
 
   assert.ok(captured, "notification delivered");
   assert.match(captured!.content, /"stalled"/, "raw status word reaches parent content");
@@ -420,24 +475,24 @@ test("onComparisonSettled hook is invoked even when deliveryGuard refuses in-con
   let comparisonSettledCalled = false;
   let messageDelivered = false;
 
-  completeTask(
-    {
+  completeTask({
+    pi: {
       sendMessage: () => {
         messageDelivered = true;
       },
     } as never,
-    "task-cmp-guard",
-    task,
-    "<status>done</status>\n<summary>All good</summary>",
-    "done",
-    piDir,
-    undefined,
-    () => false, // deliveryGuard refuses delivery
-    (id, t, parsed, phase) => {
+    id: "task-cmp-guard",
+    task: task,
+    content: "<status>done</status>\n<summary>All good</summary>",
+    phase: "done",
+    piDir: piDir,
+    deliveryGuard: () => false,
+    // deliveryGuard refuses delivery
+    onComparisonSettled: (id, t, parsed, phase) => {
       comparisonSettledCalled = true;
       return true; // handled
     },
-  );
+  });
 
   assert.equal(comparisonSettledCalled, true, "onComparisonSettled called despite deliveryGuard false");
   assert.equal(messageDelivered, false, "in-conversation delivery suppressed");
@@ -484,40 +539,36 @@ test("a failed registry-removal write never causes a resource re-close on retry"
   };
 
   const pi = { sendMessage: () => {} };
-  const first = completeTask(
-    pi as never,
-    "task-removal",
+  const first = completeTask({
+    pi: pi as never,
+    id: "task-removal",
     task,
-    "<task_result><summary>done</summary></task_result>",
-    "done",
+    content: "<task_result><summary>done</summary></task_result>",
+    phase: "done",
     piDir,
-    () => {
+    resourceCloser: () => {
       closeCount += 1;
     },
-    undefined,
-    undefined,
-    failRemovalWrite as never,
-  );
+    writeRegistryFn: failRemovalWrite as never,
+  });
   assert.equal(first.cleanupSucceeded, true, "close succeeded despite removal write failure");
   assert.equal(sawReceipt, true, "cleanup receipt was written before the removal attempt");
   assert.equal(sawRemoval, true, "removal write was attempted");
 
   // A retry after the failed removal must be a no-op: the id was marked
   // settled before the removal write, so the resource is never re-closed.
-  completeTask(
-    pi as never,
-    "task-removal",
-    task,
-    "<task_result><summary>done</summary></task_result>",
-    "done",
-    piDir,
-    () => {
+  completeTask({
+    pi: pi as never,
+    id: "task-removal",
+    task: task,
+    content: "<task_result><summary>done</summary></task_result>",
+    phase: "done",
+    piDir: piDir,
+    resourceCloser: () => {
       closeCount += 1;
     },
-    undefined,
-    undefined,
-    failRemovalWrite as never,
-  );
+    writeRegistryFn: failRemovalWrite as never,
+  });
   assert.equal(closeCount, 1, "resource closed exactly once");
 });
 
@@ -538,14 +589,14 @@ test("a broken registry blocks terminal history writes so phases cannot flap", (
   const pi = { sendMessage: () => {} };
 
   assert.throws(() =>
-    completeTask(
-      pi as never,
-      "task-flap",
-      task,
-      "<task_result><summary>done</summary></task_result>",
-      "done",
-      piDir,
-    ),
+    completeTask({
+      pi: pi as never,
+      id: "task-flap",
+      task: task,
+      content: "<task_result><summary>done</summary></task_result>",
+      phase: "done",
+      piDir: piDir,
+    }),
   );
 
   // No terminal record may exist when the registry is unreadable: otherwise a
@@ -599,14 +650,14 @@ test("settlement carries the registry entry's session ownership into history", (
     comparisonIndex: 0,
   };
 
-  completeTask(
-    { sendMessage: () => {} } as never,
-    "task-cmp-m0",
-    task,
-    "<status>success</status>\n<summary>done</summary>",
-    "done",
-    piDir,
-  );
+  completeTask({
+    pi: { sendMessage: () => {} } as never,
+    id: "task-cmp-m0",
+    task: task,
+    content: "<status>success</status>\n<summary>done</summary>",
+    phase: "done",
+    piDir: piDir,
+  });
 
   const history = readTaskSessionHistory(piDir);
   assert.equal(history[0]?.ownerSessionId, "sess-a", "history records the owning session");

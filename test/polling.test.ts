@@ -75,9 +75,9 @@ function makeDeps(
     makeDeps({
       backgroundTasks,
       checkTaskCompletion: async () => ({ status: "completed", content: "done" }),
-      completeTask: (_pi: any) => {
+      completeTask: (options: any) => {
         completeCallCount += 1;
-        lastPi = _pi;
+        lastPi = options.pi;
       },
     }),
     10, // very short interval so we get a tick
@@ -144,7 +144,7 @@ function makeDeps(
       makeDeps({
         backgroundTasks,
         TASK_TIMEOUT_MS: 0,
-        completeTask: (_pi: any, _id: string, _task: any, content: string, phase: string) => {
+        completeTask: ({ content, phase }: any) => {
           settled = { content, phase };
         },
       }),
@@ -650,7 +650,7 @@ function makeTurnTask(overrides: Record<string, unknown> = {}): Record<string, u
       makeDeps({
         backgroundTasks,
         checkTaskCompletion: async () => ({ status: "running", content: "" }),
-        completeTask: (_pi: any, _id: any, _task: any, content: string, phase: string) => {
+        completeTask: ({ content, phase }: any) => {
           settledContent = content;
           settledPhase = phase;
         },
@@ -692,7 +692,7 @@ function makeTurnTask(overrides: Record<string, unknown> = {}): Record<string, u
         backgroundTasks,
         steerTask: () => false,
         checkTaskCompletion: async () => ({ status: "running", content: "" }),
-        completeTask: (_pi: any, _id: any, _task: any, content: string, phase: string) => {
+        completeTask: ({ content, phase }: any) => {
           settleCount += 1;
           settledContent = content;
           settledPhase = phase;
@@ -768,7 +768,7 @@ function makeTurnTask(overrides: Record<string, unknown> = {}): Record<string, u
         status: "completed",
         content: "<task_result><summary>wrapped up cleanly</summary></task_result>",
       }),
-      completeTask: (_pi: any, _id: any, _task: any, content: string, phase: string) => {
+      completeTask: ({ content, phase }: any) => {
         settledPhase = phase;
         settledContent = content;
       },

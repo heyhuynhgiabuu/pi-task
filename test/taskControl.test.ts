@@ -536,7 +536,7 @@ test("cancel control delegates owned terminal cleanup and removes the active tas
       clearTaskWidgetIfIdle: () => {
         widgetCleared = true;
       },
-      completeTask: (_pi, _id, _task, _content, phase) => {
+      completeTask: ({ phase }) => {
         cleanupPhase = phase;
         return { cleanupSucceeded: true };
       },
@@ -586,9 +586,12 @@ test("cancel control reports cleanup pending and preserves the durable receipt",
       backgroundTasks,
       registryEntryStatus: () => "alive",
       clearTaskWidgetIfIdle: () => {},
-      completeTask: (pi, id, task, content, phase, dir) =>
-        persistCompletedTask(pi, id, task, content, phase, dir, () => {
-          throw new Error("tmux unavailable");
+      completeTask: (options) =>
+        persistCompletedTask({
+          ...options,
+          resourceCloser: () => {
+            throw new Error("tmux unavailable");
+          },
         }),
     },
   );

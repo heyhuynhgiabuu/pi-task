@@ -1,7 +1,9 @@
 export {
   completeTask,
   createCompletionDeliveryQueue,
+  type CompleteTaskOptions,
   type CompletionDeliveryQueue,
+  type CompletionPhase,
 } from "./completion.js";
 export { startBackgroundPolling } from "./polling.js";
 export { restoreActiveBackgroundTasks } from "./restore.js";

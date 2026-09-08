@@ -80,26 +80,42 @@ export function createCompletionDeliveryQueue(windowMs = 200): CompletionDeliver
   };
 }
 
+export type CompletionPhase = "done" | "cancelled" | "timeout" | "failed";
+
 export type ComparisonSettledHook = (
   id: string,
   task: BackgroundTask,
   parsed: ParsedResult,
-  phase: "done" | "cancelled" | "timeout" | "failed",
+  phase: CompletionPhase,
 ) => boolean;
 
-export function completeTask(
-  pi: ExtensionAPI,
-  id: string,
-  task: BackgroundTask,
-  content: string,
-  phase: "done" | "cancelled" | "timeout" | "failed",
-  piDir: string,
-  resourceCloser: (task: BackgroundTask) => void = closeTaskResource,
-  deliveryGuard?: () => boolean,
-  onComparisonSettled?: ComparisonSettledHook,
-  writeRegistryFn: (piDir: string, entries: RegistryEntry[]) => void = writeRegistry,
-  deliveryQueue?: CompletionDeliveryQueue,
-): { cleanupSucceeded: boolean } {
+export interface CompleteTaskOptions {
+  pi: ExtensionAPI;
+  id: string;
+  task: BackgroundTask;
+  content: string;
+  phase: CompletionPhase;
+  piDir: string;
+  resourceCloser?: (task: BackgroundTask) => void;
+  deliveryGuard?: () => boolean;
+  onComparisonSettled?: ComparisonSettledHook;
+  writeRegistryFn?: (piDir: string, entries: RegistryEntry[]) => void;
+  deliveryQueue?: CompletionDeliveryQueue;
+}
+
+export function completeTask({
+  pi,
+  id,
+  task,
+  content,
+  phase,
+  piDir,
+  resourceCloser = closeTaskResource,
+  deliveryGuard,
+  onComparisonSettled,
+  writeRegistryFn = writeRegistry,
+  deliveryQueue,
+}: CompleteTaskOptions): { cleanupSucceeded: boolean } {
   const key = completionKey(id, task);
   if (completedTaskKeys.has(key)) {
     // Already fully processed in this process: never re-deliver or re-close.

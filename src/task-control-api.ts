@@ -171,17 +171,15 @@ export function handleTaskControl(
   }
 
   const task = deps.backgroundTasks.get(record.id) ?? backgroundTaskFromRegistry(entry);
-  const completion = (deps.completeTask ?? persistCompletedTask)(
-    deps.pi,
-    record.id,
+  const completion = (deps.completeTask ?? persistCompletedTask)({
+    pi: deps.pi,
+    id: record.id,
     task,
-    "Task was cancelled by request.",
-    "cancelled",
-    deps.piDir,
-    undefined,
-    undefined,
-    deps.onComparisonSettled,
-  );
+    content: "Task was cancelled by request.",
+    phase: "cancelled",
+    piDir: deps.piDir,
+    onComparisonSettled: deps.onComparisonSettled,
+  });
   // Retirement must be unconditional once completion is durable: a throwing
   // panel callback must not strand the task in the map (a retried completeTask
   // is an idempotent no-op, so the zombie could never be recovered).

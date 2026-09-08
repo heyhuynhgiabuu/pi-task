@@ -65,17 +65,16 @@ export function startBackgroundPolling(
     content: string,
     phase: "done" | "timeout" | "failed",
   ): void => {
-    deps.completeTask(
-      deps.pi,
+    deps.completeTask({
+      pi: deps.pi,
       id,
       task,
       content,
       phase,
-      deps.piDir,
-      undefined,
-      deps.deliveryGuard ? () => deps.deliveryGuard!(id) : undefined,
-      deps.onComparisonSettled,
-    );
+      piDir: deps.piDir,
+      deliveryGuard: deps.deliveryGuard ? () => deps.deliveryGuard!(id) : undefined,
+      onComparisonSettled: deps.onComparisonSettled,
+    });
     // Settlement is durable from here: retirement must be unconditional. A
     // throwing notification callback must not leave the task in the map —
     // a retried completeTask is an idempotent no-op, so the zombie could

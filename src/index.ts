@@ -179,30 +179,11 @@ export default function (pi: ExtensionAPI) {
   // never delivered into a different conversation or branch.
   const deliveryGuard = new DeliveryGuard();
   const completionDeliveryQueue = createCompletionDeliveryQueue();
-  const completeTaskWithDelivery: typeof completeTask = (
-    piArg,
-    id,
-    task,
-    content,
-    phase,
-    taskPiDir,
-    resourceCloser,
-    deliveryGuardFn,
-    onComparisonSettled,
-  ) =>
-    completeTask(
-      piArg,
-      id,
-      task,
-      content,
-      phase,
-      taskPiDir,
-      resourceCloser,
-      deliveryGuardFn,
-      onComparisonSettled,
-      undefined,
-      completionDeliveryQueue,
-    );
+  const completeTaskWithDelivery: typeof completeTask = (options) =>
+    completeTask({
+      ...options,
+      deliveryQueue: completionDeliveryQueue,
+    });
 
   // ── Restore active tasks from registry on load ──────────────────────────
 

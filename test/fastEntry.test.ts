@@ -1,5 +1,5 @@
 /**
- * The parent-side fast entry point.
+ * The parent-side fast mode setup.
  *
  * It exists so one `--fast` covers the parent's own model calls as well as
  * everything it delegates to. The bridge itself is exercised elsewhere; what
@@ -10,7 +10,7 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
 
-import fastExtension from "../src/fast.js";
+import { registerParentFastMode } from "../src/fast.js";
 
 interface Harness {
 	handlers: Map<string, () => void>;
@@ -34,11 +34,11 @@ function harness(flagValue: boolean | string | undefined): Harness {
 			providers.push(name);
 		},
 	};
-	fastExtension(pi as never);
+	registerParentFastMode(pi as never);
 	return { handlers, providers };
 }
 
-test("the fast entry point reuses the shared flag and defers to session start", () => {
+test("parent fast mode reuses the shared flag and defers to session start", () => {
 	const { handlers, providers } = harness(undefined);
 
 	assert.ok(handlers.has("session_start"), "the bridge is decided at session start");

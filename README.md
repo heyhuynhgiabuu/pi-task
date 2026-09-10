@@ -54,7 +54,7 @@ Parent reasoning that lives outside the referenced files goes in `parent_context
 
 An optional `thinking` task parameter accepts `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. Agent frontmatter wins; the call-level value applies only when the selected agent omits `thinking`. The resolved value is forwarded through Pi, SDK, Claude Code, and comparison launches.
 
-Fast Mode is optional and driven by one flag: `pi --fast` applies the priority service tier to the session's own model calls and to every child it delegates to. An agent's `fast: true` or `fast: false` frontmatter overrides it for that agent; behavior defaults to `false`. The package ships two extension entry points, `dist/index.js` for delegation and `dist/fast.js` for the parent-side bridge, and the second installs nothing unless the flag is set. Load only one extension that owns `--fast`; Pi reports a conflict when pi-task and another fast-mode extension such as pi-codex-fast are enabled together.
+Fast Mode is optional and driven by one flag: `pi --fast` applies the priority service tier to the session's own model calls and to every child it delegates to. An agent's `fast: true` or `fast: false` frontmatter overrides it for that agent; behavior defaults to `false`. The main `dist/index.js` entry installs the parent-side bridge after startup and also handles isolated terminal children. Load only one extension that owns `--fast`; Pi reports a conflict when pi-task and another fast-mode extension such as pi-codex-fast are enabled together.
 
 ```json
 {

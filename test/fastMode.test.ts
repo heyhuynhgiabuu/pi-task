@@ -7,6 +7,7 @@ import { buildBaseOptions as buildNativeBaseOptions } from "@earendil-works/pi-a
 import taskExtension, * as taskModule from "../src/index.js";
 import {
   createAgentSessionFromServices,
+  createAgentSessionRuntime,
   createAgentSessionServices,
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
@@ -141,7 +142,7 @@ test("PI_TASK_TOOL_DISABLED child registers fast providers after real flag appli
       },
     });
 
-    // The old factory-time getFlag() read leaves the bridge absent here and after startup.
+    // Registration is deferred until the real session_start event.
     assert.deepEqual(services.modelRuntime.getRegisteredProviderIds(), []);
 
     const { session } = await createAgentSessionFromServices({
@@ -167,6 +168,57 @@ test("PI_TASK_TOOL_DISABLED child registers fast providers after real flag appli
       session.dispose();
     }
   } finally {
+    if (previousDisabled === undefined) delete process.env.PI_TASK_TOOL_DISABLED;
+    else process.env.PI_TASK_TOOL_DISABLED = previousDisabled;
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(agentDir, { recursive: true, force: true });
+  }
+});
+
+test("parent task extension installs fast providers after startup", async () => {
+  const previousDisabled = process.env.PI_TASK_TOOL_DISABLED;
+  delete process.env.PI_TASK_TOOL_DISABLED;
+  const cwd = mkdtempSync(join(tmpdir(), "pi-task-parent-fast-cwd-"));
+  const agentDir = mkdtempSync(join(tmpdir(), "pi-task-parent-fast-agent-"));
+  const originalCwd = process.cwd();
+
+  try {
+    process.chdir(cwd);
+    const sessionManager = SessionManager.inMemory(cwd);
+    const runtime = await createAgentSessionRuntime(
+      async ({ cwd: runtimeCwd, agentDir: runtimeAgentDir, sessionManager: runtimeSessionManager, sessionStartEvent }) => {
+        const services = await createAgentSessionServices({
+          cwd: runtimeCwd,
+          agentDir: runtimeAgentDir,
+          extensionFlagValues: new Map([["fast", true]]),
+          resourceLoaderOptions: {
+            noExtensions: true,
+            extensionFactories: [{ name: "pi-task-parent", factory: taskExtension }],
+          },
+        });
+        const result = await createAgentSessionFromServices({
+          services,
+          sessionManager: runtimeSessionManager,
+          sessionStartEvent,
+          noTools: "all",
+        });
+        return { ...result, services, diagnostics: services.diagnostics };
+      },
+      { cwd, agentDir, sessionManager },
+    );
+
+    assert.deepEqual(runtime.services.modelRuntime.getRegisteredProviderIds(), []);
+    try {
+      await runtime.session.bindExtensions({});
+      assert.deepEqual(
+        new Set(runtime.services.modelRuntime.getRegisteredProviderIds()),
+        new Set(["openai", "openai-codex"]),
+      );
+    } finally {
+      await runtime.dispose();
+    }
+  } finally {
+    process.chdir(originalCwd);
     if (previousDisabled === undefined) delete process.env.PI_TASK_TOOL_DISABLED;
     else process.env.PI_TASK_TOOL_DISABLED = previousDisabled;
     rmSync(cwd, { recursive: true, force: true });

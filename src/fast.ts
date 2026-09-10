@@ -8,8 +8,8 @@
  * same bridge for the session that passes the flag, so one flag covers the
  * parent and everything it delegates to.
  *
- * It registers no command, keeps no state, and writes no configuration: the
- * flag is the whole interface.
+ * `index.ts` owns the shared `--fast` flag; this entry only consumes it. It
+ * registers no flag or command, keeps no state, and writes no configuration.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -17,16 +17,10 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { registerTaskFastModeBridge } from "./fast-mode.js";
 
 export default function fastExtension(pi: ExtensionAPI): void {
-  pi.registerFlag("fast", {
-    description: "Use the priority service tier for this session and its delegated children",
-    type: "boolean",
-    default: false,
-  });
-
-  // Read at session_start rather than at load time: the flag value is only
-  // settled once the session is running, and installing after every extension
-  // has loaded is what lets this bridge take precedence over a globally
-  // installed pi-codex-fast without touching that extension's configuration.
+  // Read at session_start rather than at load time: the shared flag value is
+  // settled once the session is running. The main entry point is the sole
+  // owner of `--fast`, so loading both package entries cannot create a flag
+  // conflict.
   pi.on("session_start", () => {
     if (pi.getFlag("fast") !== true) return;
     registerTaskFastModeBridge(pi);

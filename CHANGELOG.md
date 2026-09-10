@@ -45,8 +45,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the same provider bridge for the parent, so one flag covers both. An agent's
   frontmatter still overrides it.
 - The package ships a second extension entry point, `dist/fast.js`, for the
-  parent-side bridge. It registers no command and writes no configuration, and
-  installs nothing unless `--fast` is set.
+  parent-side bridge. It registers no flag or command and writes no
+  configuration, and installs nothing unless `--fast` is set. Pi-task and
+  another extension that owns `--fast`, such as pi-codex-fast, cannot be loaded
+  together.
 
 ## [0.7.2] - 2026-09-08
 

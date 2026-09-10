@@ -7,6 +7,7 @@ import { buildBaseOptions as buildNativeBaseOptions } from "@earendil-works/pi-a
 import taskExtension, * as taskModule from "../src/index.js";
 import {
   createAgentSessionFromServices,
+  createAgentSessionRuntime,
   createAgentSessionServices,
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
@@ -36,11 +37,13 @@ const baseArgvOptions: BuildPiArgvOptions = {
   promptContent: "perform the task",
 };
 
-function createFastStreamHarness(models: string[]) {
+function createFastStreamHarness(models?: string[]) {
   const agentDir = mkdtempSync(join(tmpdir(), "pi-task-fast-options-"));
-  const configDir = join(agentDir, "extensions");
-  mkdirSync(configDir, { recursive: true });
-  writeFileSync(join(configDir, "pi-codex-fast.json"), JSON.stringify({ models }));
+  if (models !== undefined) {
+    const configDir = join(agentDir, "extensions");
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(join(configDir, "pi-codex-fast.json"), JSON.stringify({ models }));
+  }
 
   const calls: Array<{ model: unknown; context: unknown; options: Record<string, unknown> }> = [];
   const capture = (model: unknown, context: unknown, options: unknown) => {
@@ -141,7 +144,7 @@ test("PI_TASK_TOOL_DISABLED child registers fast providers after real flag appli
       },
     });
 
-    // The old factory-time getFlag() read leaves the bridge absent here and after startup.
+    // Registration is deferred until the real session_start event.
     assert.deepEqual(services.modelRuntime.getRegisteredProviderIds(), []);
 
     const { session } = await createAgentSessionFromServices({
@@ -174,6 +177,57 @@ test("PI_TASK_TOOL_DISABLED child registers fast providers after real flag appli
   }
 });
 
+test("parent task extension installs fast providers after startup", async () => {
+  const previousDisabled = process.env.PI_TASK_TOOL_DISABLED;
+  delete process.env.PI_TASK_TOOL_DISABLED;
+  const cwd = mkdtempSync(join(tmpdir(), "pi-task-parent-fast-cwd-"));
+  const agentDir = mkdtempSync(join(tmpdir(), "pi-task-parent-fast-agent-"));
+  const originalCwd = process.cwd();
+
+  try {
+    process.chdir(cwd);
+    const sessionManager = SessionManager.inMemory(cwd);
+    const runtime = await createAgentSessionRuntime(
+      async ({ cwd: runtimeCwd, agentDir: runtimeAgentDir, sessionManager: runtimeSessionManager, sessionStartEvent }) => {
+        const services = await createAgentSessionServices({
+          cwd: runtimeCwd,
+          agentDir: runtimeAgentDir,
+          extensionFlagValues: new Map([["fast", true]]),
+          resourceLoaderOptions: {
+            noExtensions: true,
+            extensionFactories: [{ name: "pi-task-parent", factory: taskExtension }],
+          },
+        });
+        const result = await createAgentSessionFromServices({
+          services,
+          sessionManager: runtimeSessionManager,
+          sessionStartEvent,
+          noTools: "all",
+        });
+        return { ...result, services, diagnostics: services.diagnostics };
+      },
+      { cwd, agentDir, sessionManager },
+    );
+
+    assert.deepEqual(runtime.services.modelRuntime.getRegisteredProviderIds(), []);
+    try {
+      await runtime.session.bindExtensions({});
+      assert.deepEqual(
+        new Set(runtime.services.modelRuntime.getRegisteredProviderIds()),
+        new Set(["openai", "openai-codex"]),
+      );
+    } finally {
+      await runtime.dispose();
+    }
+  } finally {
+    process.chdir(originalCwd);
+    if (previousDisabled === undefined) delete process.env.PI_TASK_TOOL_DISABLED;
+    else process.env.PI_TASK_TOOL_DISABLED = previousDisabled;
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(agentDir, { recursive: true, force: true });
+  }
+});
+
 test("SDK loader keeps extensions disabled and injects fast bridge only when requested", () => {
   const fast = buildSdkResourceLoaderOptions({
     cwd: "/repo",
@@ -195,6 +249,25 @@ test("SDK loader keeps extensions disabled and injects fast bridge only when req
   assert.equal(fast.extensionFactories?.[0]?.name, "pi-task-fast-mode");
   assert.equal(normal.noExtensions, true);
   assert.deepEqual(normal.extensionFactories ?? [], []);
+});
+
+test("the fallback fast model list includes openai-codex gpt-5.6-luna", () => {
+  const { agentDir, calls, stream } = createFastStreamHarness();
+  const model = {
+    provider: "openai-codex",
+    id: "gpt-5.6-luna",
+    api: "openai-codex-responses",
+    maxTokens: 20_000,
+    contextWindow: 400_000,
+    reasoning: true,
+  };
+
+  try {
+    stream(model as never, { messages: [] }, { reasoning: "high" });
+    assert.equal(calls[0]?.options.serviceTier, "priority");
+  } finally {
+    rmSync(agentDir, { recursive: true, force: true });
+  }
 });
 
 test("configured fast models preserve native options and add only priority", () => {

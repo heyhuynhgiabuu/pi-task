@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   field is rejected with the property named. Runtime validation remains the
   second layer for what the schema cannot express: a stale `operation`, blank
   strings, and the reviewer cross-field requirement.
+- Task calls accept an optional `thinking` level (`off`, `minimal`, `low`,
+  `medium`, `high`, `xhigh`, or `max`). Agent frontmatter remains authoritative;
+  the call-level value applies when the agent leaves it unset, across Pi, SDK,
+  Claude Code, and comparison launches.
 
 ### Added
 
@@ -39,10 +43,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the task request or agent frontmatter, and the parent's own calls were never
   fast. The flag now reaches children through `resolveTaskFastMode` and installs
   the same provider bridge for the parent, so one flag covers both. An agent's
-  frontmatter still overrides it.
-- The package ships a second extension entry point, `dist/fast.js`, for the
-  parent-side bridge. It registers no command and writes no configuration, and
-  installs nothing unless `--fast` is set.
+  frontmatter still overrides it. The built-in fallback also covers
+  `openai-codex/gpt-5.6-luna`.
+- The main extension entry installs the parent-side Fast Mode bridge after
+  startup and handles isolated terminal children from the same flag owner.
+  Pi-task and another extension that owns `--fast`, such as pi-codex-fast,
+  cannot be loaded together.
 
 ## [0.7.2] - 2026-09-08
 

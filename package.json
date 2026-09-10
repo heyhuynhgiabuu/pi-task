@@ -64,8 +64,7 @@
   },
   "pi": {
     "extensions": [
-      "./dist/index.js",
-      "./dist/fast.js"
+      "./dist/index.js"
     ],
     "video": "https://github.com/heyhuynhgiabuu/pi-task/releases/download/v0.2.0/demo-background-task.mp4",
     "image": "https://raw.githubusercontent.com/heyhuynhgiabuu/pi-task/main/media/demo.png"

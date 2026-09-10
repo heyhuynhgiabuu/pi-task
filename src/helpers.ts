@@ -12,6 +12,7 @@ import {
   resolveAgentToolAllowlist,
 } from "./agent-tools.js";
 import { parseMergedDisallowedTools } from "./policy.js";
+import type { PiThinkingLevel } from "./thinking.js";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
   buildPiArgv,
@@ -854,6 +855,15 @@ export function resolveTaskFastMode(
   sessionFast: boolean,
 ): boolean {
   return agentFast ?? sessionFast;
+}
+
+/** Apply a call-level thinking default without overriding agent frontmatter. */
+export function resolveTaskThinking(
+  agent: AgentConfig,
+  requestedThinking?: PiThinkingLevel,
+): AgentConfig {
+  if (agent.thinking?.trim() || requestedThinking === undefined) return agent;
+  return { ...agent, thinking: requestedThinking };
 }
 
 /** Turn limits (issue #19) must be positive integers; anything else is unlimited. */

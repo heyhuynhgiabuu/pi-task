@@ -28,7 +28,7 @@ import {
   MAX_POLL_ERRORS,
   TASK_TIMEOUT_MS,
 } from "./constants.js";
-import { registerTaskFastModeBridge } from "./fast-mode.js";
+import { registerParentFastMode } from "./fast.js";
 export { createTaskFastModeStream, registerTaskFastModeBridge } from "./fast-mode.js";
 export type { TaskToolParameters } from "./tool/schema.js";
 import {
@@ -46,6 +46,7 @@ import {
       discoverAgents,
   resolveTaskAgentPreflight,
   resolveTaskFastMode,
+  resolveTaskThinking,
   isTaskCompareAllowed,
   resolveCompareModels,
 } from "./helpers.js";
@@ -125,27 +126,20 @@ const BUNDLED_AGENT_DIR = join(
 // ─── Extension Entry Point ──────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
-  // Registered in both branches: the parent reads it to decide whether its
-  // children run fast, a child launched with `--fast` reads it to install its
-  // isolated provider bridge, and `fast.ts` reads it to install the same bridge
-  // for the parent's own calls. A manual `pi -e pi-task --fast` in a normal
-  // session is therefore accepted instead of dying as "Unknown option".
+  // The parent reads this to decide whether its children run fast, and a
+  // terminal child launched with `--fast` reads it to install its isolated
+  // provider bridge. Keep one owner for the flag: Pi's getFlag() is scoped to
+  // the extension that registered it.
   pi.registerFlag("fast", {
     description: "Use the priority service tier for this session and its delegated children",
     type: "boolean",
     default: false,
   });
+  registerParentFastMode(pi);
+
   // Recursive children never register task. An explicitly fast terminal child
   // loads this same extension path only to install its isolated provider bridge.
-  if (process.env.PI_TASK_TOOL_DISABLED === "1") {
-    let fastModeBridgeInstalled = false;
-    pi.on("session_start", () => {
-      if (fastModeBridgeInstalled || pi.getFlag("fast") !== true) return;
-      fastModeBridgeInstalled = true;
-      registerTaskFastModeBridge(pi);
-    });
-    return;
-  }
+  if (process.env.PI_TASK_TOOL_DISABLED === "1") return;
 
   const taskToolName = process.env.PI_TASK_TOOL_NAME?.trim() || "task";
   if (!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(taskToolName)) {
@@ -439,7 +433,7 @@ export default function (pi: ExtensionAPI) {
           isError: true,
         };
       }
-      const agent = preflight.agent;
+      const agent = resolveTaskThinking(preflight.agent, taskParams.thinking);
       if (taskParams.cwd !== undefined) {
         const requestedTaskCwd = resolveTaskCwd(ctx.cwd, taskParams.cwd);
         if (requestedTaskCwd.kind === "invalid") {

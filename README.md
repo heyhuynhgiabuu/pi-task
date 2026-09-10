@@ -51,7 +51,7 @@ The handoff contract lives in the `task` schema. Pi validates tool arguments aga
 
 Parent reasoning that lives outside the referenced files goes in `parent_context` and `proposed_changes` rather than in `prompt`.
 
-Task-local Fast Mode is optional. `pi --fast` applies the priority service tier to every child of that session; an agent's `fast: true` or `fast: false` frontmatter overrides it for that agent. Behavior defaults to `false`. This covers children only — `--fast` on the parent does not change the parent's own model calls.
+Fast Mode is optional and driven by one flag: `pi --fast` applies the priority service tier to the session's own model calls and to every child it delegates to. An agent's `fast: true` or `fast: false` frontmatter overrides it for that agent; behavior defaults to `false`. The package ships two extension entry points, `dist/index.js` for delegation and `dist/fast.js` for the parent-side bridge, and the second installs nothing unless the flag is set.
 
 ```json
 {

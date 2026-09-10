@@ -126,11 +126,12 @@ const BUNDLED_AGENT_DIR = join(
 
 export default function (pi: ExtensionAPI) {
   // Registered in both branches: the parent reads it to decide whether its
-  // children run fast, and a child launched with `--fast` reads it to install
-  // its isolated provider bridge. A manual `pi -e pi-task --fast` in a normal
+  // children run fast, a child launched with `--fast` reads it to install its
+  // isolated provider bridge, and `fast.ts` reads it to install the same bridge
+  // for the parent's own calls. A manual `pi -e pi-task --fast` in a normal
   // session is therefore accepted instead of dying as "Unknown option".
   pi.registerFlag("fast", {
-    description: "Use the priority service tier for this session's delegated children",
+    description: "Use the priority service tier for this session and its delegated children",
     type: "boolean",
     default: false,
   });

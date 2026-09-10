@@ -4,6 +4,46 @@ All notable changes to `@heyhuynhgiabuu/pi-task` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- The `task` tool's model-visible surface costs ~892 tokens per turn instead of
+  ~1,480. The description is now capability only, and the handoff contract moved
+  into the schema where `required` enforces it.
+- `agent_type`, `description`, and `prompt` are now required by the schema. Pi
+  validates tool arguments against `parameters` before `execute`, so a missing
+  field is rejected with the property named. Runtime validation remains the
+  second layer for what the schema cannot express: a stale `operation`, blank
+  strings, and the reviewer cross-field requirement.
+
+### Added
+
+- `/task` command for task control: `/task` or `/task list` lists durable
+  conversations, `/task status <id>` inspects a task, and `/task cancel <id>`
+  cancels a live one.
+- `npm run cost` prints the model-visible `task` surface budget.
+
+### Removed
+
+- `operation` and `fast` on the tool. Start and resume are told apart by
+  `task_id`, status and cancel live on the `/task` command, and `fast` is a
+  session flag plus agent frontmatter. A payload that still carries either field
+  is rejected rather than ignored, so a stale control call cannot launch work and
+  a dropped service-tier preference cannot silently downgrade a child.
+
+### Changed (continued)
+
+- `pi --fast` now covers the whole session. The parent registered the flag but
+  only the child branch read it, so a child's fast mode was reachable only from
+  the task request or agent frontmatter, and the parent's own calls were never
+  fast. The flag now reaches children through `resolveTaskFastMode` and installs
+  the same provider bridge for the parent, so one flag covers both. An agent's
+  frontmatter still overrides it.
+- The package ships a second extension entry point, `dist/fast.js`, for the
+  parent-side bridge. It registers no command and writes no configuration, and
+  installs nothing unless `--fast` is set.
+
 ## [0.7.2] - 2026-09-08
 
 ### Added

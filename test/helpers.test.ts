@@ -1409,35 +1409,23 @@ import {
         "task tool description matches background default, prompt contract, and verification policy";
       assert.equal(TASK_BACKGROUND_DEFAULT, true, t + " default is true");
       assert.ok(
-        TASK_TOOL_DESCRIPTION.includes("Background is the default"),
+        TASK_TOOL_DESCRIPTION.includes("Background by default"),
         t + " documents background default",
       );
       assert.ok(
         !TASK_TOOL_DESCRIPTION.includes("Foreground is the default"),
         t + " does not claim foreground default",
       );
-      assert.ok(
-        TASK_TOOL_DESCRIPTION.includes("Do not trust delegated output blindly"),
+      assert.match(
+        TASK_TOOL_DESCRIPTION,
+        /review what a writer changed/i,
         t + " requires verification",
       );
-      for (const required of [
-        "Goal: the exact outcome wanted",
-        "Parent context: facts, decisions, and constraints",
-        "Proposed changes: one item per change",
-        "Scope and references",
-        "Non-goals: what to avoid or leave untouched",
-        "Write/read policy",
-        "Acceptance criteria and stop condition",
-        "Verification recipe",
-        "reviewer request with missing parent_context or proposed_changes is rejected",
-      ]) {
-        assert.ok(TASK_TOOL_DESCRIPTION.includes(required), `${t}: includes ${required}`);
-      }
-      // Size budget: the description is model-visible on every task-tool
-      // registration (plus schema descriptions, prompt guidelines, and the
-      // agents list). Keep it tight to protect context.
+      // Size budget: the description is model-visible on every turn. Keep it
+      // tight to protect context. The schema's own contract is asserted in
+      // schemaValidation.test.ts.
       assert.ok(
-        TASK_TOOL_DESCRIPTION.length < 2500,
+        TASK_TOOL_DESCRIPTION.length < 800,
         `${t}: description stays under the size budget (${TASK_TOOL_DESCRIPTION.length} chars)`,
       );
     }

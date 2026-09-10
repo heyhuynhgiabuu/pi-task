@@ -56,17 +56,15 @@ function createFastStreamHarness(models: string[]) {
   return { agentDir, calls, stream };
 }
 
-test("task schema advertises an optional fast boolean", () => {
+test("fast is a session and agent setting, not a task parameter", () => {
   const schema = taskParametersSchema() as {
-    properties?: Record<string, { type?: string; description?: string; default?: boolean }>;
+    properties?: Record<string, unknown>;
     required?: string[];
   };
-  const fast = schema.properties?.fast;
 
-  assert.ok(fast);
-  assert.equal(fast.type, "boolean");
-  assert.match(fast.description ?? "", /priority service tier/i);
-  assert.equal(fast.default, undefined);
+  // `pi --fast` covers the session and agent frontmatter covers one agent, so
+  // the model has nothing to choose here and the field stays out of the prompt.
+  assert.equal(schema.properties?.fast, undefined);
   assert.equal(Boolean(schema.required?.includes("fast")), false);
 });
 

@@ -40,24 +40,23 @@ Restart Pi after installing or changing extension config.
 
 ## Usage
 
-Prompt contract for every non-trivial task:
+The handoff contract lives in the `task` schema. Pi validates tool arguments against `parameters` before the tool runs and reports the missing property by name, so `agent_type`, `description`, and `prompt` are enforced rather than merely stated. Runtime validation is the second layer for what the schema cannot express: a stale `operation`, blank strings, and the reviewer cross-field requirement. `prompt` carries:
+
 - goal: the exact outcome wanted
-- parent_context: facts, decisions, and constraints learned outside referenced files
-- proposed_changes: one item per change, including intended semantics and acceptance implications; required and non-empty for a new reviewer task
 - scope and references: what to inspect, why each reference matters, and the base/diff to review; paths are evidence, not context handoff
 - non-goals: what to avoid or leave untouched
 - write/read policy: whether the child may edit or must stay read-only
 - acceptance criteria and stop condition: observable conditions that must be true before stopping
 - verification recipe: checks to run or evidence to gather
 
-Task-local Fast Mode is optional. Set `fast: true` or `fast: false` on a start/resume request; when omitted, the selected agent's optional `fast:` frontmatter value applies, then behavior defaults to `false`.
+Parent reasoning that lives outside the referenced files goes in `parent_context` and `proposed_changes` rather than in `prompt`.
+
+Fast Mode is optional and driven by one flag: `pi --fast` applies the priority service tier to the session's own model calls and to every child it delegates to. An agent's `fast: true` or `fast: false` frontmatter overrides it for that agent; behavior defaults to `false`. The package ships two extension entry points, `dist/index.js` for delegation and `dist/fast.js` for the parent-side bridge, and the second installs nothing unless the flag is set.
 
 ```json
 {
-  "operation": "start",
   "agent_type": "general",
   "description": "Implement focused fix",
-  "fast": true,
   "background": false,
   "prompt": "Goal: implement the bounded fix. Non-goals: do not change the model or thinking level. Write/read policy: edit only the requested files. Acceptance criteria: tests pass. Stop condition: the fix is verified. Verification: run the focused tests."
 }
@@ -105,9 +104,7 @@ Durable specialist conversation:
 }
 ```
 
-        `conversation_id` maps to a durable subagent run. Reused across calls
-        to keep specialist memory, e.g. a reusable research assistant.
-        Use `/task-sessions` to list known durable conversations.
+`conversation_id` maps to a durable subagent run. Reused across calls to keep specialist memory, e.g. a reusable research assistant. Use `/task` to list known durable conversations.
 
         Stored files:
 
@@ -123,27 +120,21 @@ Durable specialist conversation:
 
     Note: true conversation resume requires the tmux/CLI backend so Pi can reopen the saved subagent session. SDK fallback can run foreground or background one-shot tasks, but it cannot resume a prior Pi session.
 
-If Pi restarts while background tasks are still running, pi-task restores them on startup. Treat restored tasks as still in flight: do not relaunch overlapping work unless you intentionally want a second competing run. An active background task cannot be converted into a foreground relaunch; steer it in background mode or wait for completion. Use `/task-sessions` to inspect what was restored before taking action.
+If Pi restarts while background tasks are still running, pi-task restores them on startup. Treat restored tasks as still in flight: do not relaunch overlapping work unless you intentionally want a second competing run. An active background task cannot be converted into a foreground relaunch; steer it in background mode or wait for completion. Use `/task` to inspect what was restored before taking action.
 
 ### Task control
 
-The existing `task` tool also exposes lifecycle control without starting another agent:
+Control is a user action, so it lives on the `/task` command rather than on the model-facing tool:
 
-```json
-{
-  "operation": "status",
-  "task_id": "task-id-or-conversation-id"
-}
+```
+/task              # list durable conversations (also /task list)
+/task status <task-id-or-conversation-id>
+/task cancel <task-id-or-conversation-id>
 ```
 
-```json
-{
-  "operation": "cancel",
-  "task_id": "task-id-or-conversation-id"
-}
-```
+`status` is read-only and resolves by task id, session name, or conversation id. Its structured details include lifecycle timestamps, elapsed milliseconds, runtime/session metadata, available transcript turn/tool counts, persisted result diagnostics, and a verified terminal exit code when an exit sentinel exists. `cancel` only closes a live task-owned tmux or strongly-identified HerdR resource and persists `cancelled` before cleanup. If cleanup fails, it reports `cleanup_pending` and keeps a durable retry receipt for the next restore. SDK background cancellation is reported as unsupported because the SDK backend currently does not retain a durable cancellation handle.
 
-`status` is read-only and resolves by task id, session name, or conversation id. Its structured details include lifecycle timestamps, elapsed milliseconds, runtime/session metadata, available transcript turn/tool counts, persisted result diagnostics, and a verified terminal exit code when an exit sentinel exists. `cancel` only closes a live task-owned tmux or strongly-identified HerdR resource and persists `cancelled` before cleanup. If cleanup fails, the tool reports `cleanup_pending` and keeps a durable retry receipt for the next restore. SDK background cancellation is reported as unsupported because the SDK backend currently does not retain a durable cancellation handle. Start/resume requests may omit `operation` for compatibility or use `"operation": "start"` (or the equivalent `"resume"`) when a provider requires an explicit mode; never combine `status`/`cancel` with start fields. A rejected start/resume request returns a targeted reason naming each invalid field (for example `agent_type must be a string; prompt must be a string`) instead of one generic message.
+A start/resume request that is missing a required field returns a targeted reason naming each one (for example `prompt must be a string; description must be a string`) instead of one generic message. A payload that still carries `operation` is rejected as an invalid start request, so a stale control call cannot launch work.
 
 ## Agent precedence
 
@@ -232,6 +223,7 @@ That means the tmux pane died before a session JSONL result was available — no
 npm install
 npm run typecheck
 npm test
+npm run cost    # model-visible task surface budget, in tokens
 npm run smoke   # requires `pi` on PATH; checks peer version
 npm run build
 npm pack --dry-run

@@ -3,12 +3,10 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { Value } from "typebox/value";
 import { readRegistry, upsertTaskSessionHistory, writeRegistry } from "../src/conversation.js";
 import registerTaskExtension from "../src/index.js";
 import { completeTask as persistCompletedTask } from "../src/lifecycle/completion.js";
 import { handleTaskControl } from "../src/task-control-api.js";
-import { taskParametersSchema } from "../src/tool/schema.js";
 import {
   decideCancellation,
   findTaskRecord,
@@ -28,40 +26,6 @@ process.on("exit", () => {
   else process.env.PI_TASK_TOOL_DISABLED = inheritedTaskToolDisabled;
 });
 
-test("task control requests accept status and cancel without start fields", () => {
-  const schema = taskParametersSchema();
-
-  assert.equal(schema.type, "object");
-  assert.ok("properties" in schema);
-  assert.equal("anyOf" in schema, false);
-  assert.equal(Value.Check(schema, { operation: "status", task_id: "task-1" }), true);
-  assert.equal(Value.Check(schema, { operation: "cancel", task_id: "task-1" }), true);
-  assert.equal(Value.Check(schema, { operation: "status" }), true);
-  assert.equal(parseTaskControlRequest({ operation: "status" }), undefined);
-});
-
-test("task start requests remain valid when operation is omitted", () => {
-  const schema = taskParametersSchema();
-
-  assert.equal(
-    Value.Check(schema, {
-      agent_type: "explore",
-      description: "Inspect the repository",
-      prompt: "Map the repository and return evidence.",
-    }),
-    true,
-  );
-  assert.equal(
-    Value.Check(schema, {
-      operation: "start",
-      agent_type: "explore",
-      description: "Inspect the repository",
-      prompt: "Map the repository and return evidence.",
-    }),
-    true,
-  );
-});
-
 test("task start parsing supplies runtime validation for the flat provider schema", () => {
   assert.equal(parseTaskStartRequest({
     agent_type: "explore",
@@ -73,7 +37,7 @@ test("task start parsing supplies runtime validation for the flat provider schem
     agent_type: "explore",
     description: "Inspect the repository",
     prompt: "Map the repository.",
-  })?.agent_type, "explore");
+  }), undefined);
   assert.equal(parseTaskStartRequest({ operation: "status" }), undefined);
   assert.equal(parseTaskStartRequest({
     agent_type: "explore",
@@ -82,19 +46,18 @@ test("task start parsing supplies runtime validation for the flat provider schem
   }), undefined);
 });
 
-test("fast is an optional start setting and survives task control parsing", () => {
-  const schema = taskParametersSchema();
+test("fast is rejected as a removed task parameter", () => {
   const base = {
     agent_type: "explore",
     description: "Inspect the repository",
     prompt: "Map the repository.",
   };
 
-  assert.equal(Value.Check(schema, { ...base, fast: true }), true);
-  assert.equal(Value.Check(schema, { ...base, fast: false }), true);
-  assert.equal(parseTaskStartRequest({ ...base, fast: true })?.fast, true);
-  assert.equal(parseTaskStartRequest({ ...base, fast: false })?.fast, false);
-  assert.equal(parseTaskStartRequest({ ...base, fast: "true" }), undefined);
+  assert.equal(parseTaskStartRequest({ ...base, fast: true }), undefined);
+  assert.match(
+    taskStartRequestError({ ...base, fast: true })!,
+    /^fast is no longer a task parameter/,
+  );
   assert.equal(parseTaskControlRequest({
     operation: "status",
     task_id: "task-1",
@@ -102,16 +65,13 @@ test("fast is an optional start setting and survives task control parsing", () =
   }), undefined);
 });
 
-test("compare is an optional start setting and survives task control parsing", () => {
-  const schema = taskParametersSchema();
+test("compare survives task control parsing as an optional boolean", () => {
   const base = {
     agent_type: "explore",
     description: "Inspect the repository",
     prompt: "Map the repository.",
   };
 
-  assert.equal(Value.Check(schema, { ...base, compare: true }), true);
-  assert.equal(Value.Check(schema, { ...base, compare: false }), true);
   assert.equal(parseTaskStartRequest({ ...base, compare: true })?.compare, true);
   assert.equal(parseTaskStartRequest({ ...base, compare: false })?.compare, false);
   assert.equal(parseTaskStartRequest({ ...base, compare: "true" }), undefined);
@@ -153,31 +113,31 @@ test("reviewer starts require structured parent context and proposed semantics",
   ]);
 });
 
-test("start parsing accepts the resume alias and reports targeted rejection reasons", () => {
-  const schema = taskParametersSchema();
+test("start parsing rejects the removed operation field", () => {
   const base = {
     agent_type: "explore",
     description: "Inspect the repository",
     prompt: "Map the repository.",
   };
 
-  // Schema accepts the resume alias for providers that require a mode discriminator.
-  assert.equal(Value.Check(schema, { ...base, operation: "resume" }), true);
-  // The alias parses exactly like an explicit start.
-  const resumed = parseTaskStartRequest({ ...base, operation: "resume" });
-  assert.equal(resumed?.agent_type, "explore");
-  assert.equal(resumed?.description, "Inspect the repository");
+  // Start and resume are told apart by task_id, and status and cancel live on
+  // the /task command. The field is rejected rather than aliased, so a stale
+  // control payload cannot be read as a start request and launched.
+  for (const operation of ["start", "resume", "status", "cancel", "deploy"]) {
+    assert.equal(
+      parseTaskStartRequest({ ...base, operation }),
+      undefined,
+      `operation ${operation} is rejected`,
+    );
+    assert.match(
+      taskStartRequestError({ ...base, operation })!,
+      /^operation is no longer a task parameter/,
+      `operation ${operation} gets an actionable reason`,
+    );
+  }
 
   // Valid starts produce no error text.
   assert.equal(taskStartRequestError(base), undefined);
-  assert.equal(taskStartRequestError({ ...base, operation: "start" }), undefined);
-  assert.equal(taskStartRequestError({ ...base, operation: "resume" }), undefined);
-
-  // Unknown operations get a targeted, actionable reason instead of a generic one.
-  assert.match(
-    taskStartRequestError({ ...base, operation: "deploy" })!,
-    /^operation must be "start" or "resume" \(or omitted\); received "deploy"$/,
-  );
 
   // Missing or mistyped required fields are each named.
   assert.equal(
@@ -185,13 +145,12 @@ test("start parsing accepts the resume alias and reports targeted rejection reas
     "description must be a string",
   );
   assert.equal(
-    taskStartRequestError({ operation: "start", agent_type: 7, prompt: 42, description: null }),
+    taskStartRequestError({ agent_type: 7, prompt: 42, description: null }),
     "agent_type must be a string; prompt must be a string; description must be a string",
   );
 
   // Optional fields with wrong types are named too.
   assert.equal(taskStartRequestError({ ...base, background: "true" }), "background must be a boolean");
-  assert.equal(taskStartRequestError({ ...base, fast: 1 }), "fast must be a boolean");
   assert.equal(taskStartRequestError({ ...base, task_id: 123 }), "task_id must be a string");
   assert.equal(
     taskStartRequestError({ ...base, cwd: "/tmp", workspace_group: [] }),
@@ -239,9 +198,9 @@ test("task control parsing rejects control requests mixed with start fields", ()
   }), undefined);
 });
 
-test("task tool explains malformed control payloads instead of reporting a generic start error", async () => {
+test("task tool refuses a control-shaped payload instead of launching work", async () => {
   type CapturedTaskTool = {
-    execute: (...args: unknown[]) => Promise<{ content: Array<{ text?: string }>; details?: { error?: string } }>;
+    execute: (...args: unknown[]) => Promise<{ content: Array<{ text?: string }>; details?: { error?: string; reason?: string } }>;
   };
   let tool: CapturedTaskTool | undefined;
   let shutdown: (() => void) | undefined;
@@ -251,6 +210,7 @@ test("task tool explains malformed control payloads instead of reporting a gener
     },
     registerMessageRenderer() {},
       registerFlag() {},
+      getFlag() { return undefined; },
     registerTool(definition: CapturedTaskTool) {
       tool = definition;
     },
@@ -267,6 +227,8 @@ test("task tool explains malformed control payloads instead of reporting a gener
     registerTaskExtension(pi as never);
     assert.ok(tool);
 
+    // Control moved to the `/task` command. A payload still carrying
+    // `operation: "status"` must not be read as a start request and launched.
     const malformed = await tool.execute("call-1", {
       operation: "status",
       task_id: "none",
@@ -274,35 +236,39 @@ test("task tool explains malformed control payloads instead of reporting a gener
       prompt: "Review the current working tree.",
       description: "Review source changes",
     }, new AbortController().signal, undefined, { cwd: isolatedCwd });
-    assert.equal(malformed.content[0]?.text, "Invalid task control request: status/cancel require only operation and task_id; omit operation for start/resume.");
-    assert.equal(malformed.details?.error, "invalid_task_control_request");
+    assert.match(malformed.content[0]?.text ?? "", /operation is no longer a task parameter/);
+    assert.equal(malformed.details?.error, "invalid_task_request");
 
     const missingId = await tool.execute("call-2", {
       operation: "status",
     }, new AbortController().signal, undefined, { cwd: isolatedCwd });
-    assert.equal(missingId.content[0]?.text, "Invalid task control request: status/cancel require only operation and task_id; omit operation for start/resume.");
-    assert.equal(missingId.details?.error, "invalid_task_control_request");
+    assert.match(missingId.content[0]?.text ?? "", /operation is no longer a task parameter/);
+    assert.equal(missingId.details?.error, "invalid_task_request");
 
     const invalidStart = await tool.execute("call-3", {
-      operation: "start",
+      agent_type: "reviewer",
     }, new AbortController().signal, undefined, { cwd: isolatedCwd });
     assert.equal(
       invalidStart.content[0]?.text,
-      "Invalid task request: agent_type must be a string; prompt must be a string; description must be a string.",
+      "Invalid task request: prompt must be a string; description must be a string.",
     );
     assert.equal(invalidStart.details?.error, "invalid_task_request");
     assert.equal(
       invalidStart.details?.reason,
-      "agent_type must be a string; prompt must be a string; description must be a string",
+      "prompt must be a string; description must be a string",
     );
 
     mkdirSync(join(isolatedCwd, ".pi"), { recursive: true });
     writeFileSync(join(isolatedCwd, ".pi", "task-registry.json"), "{not-json", "utf-8");
+    // A start request fails closed on unreadable durable state.
     const corruptState = await tool.execute("call-4", {
-      operation: "status",
-      task_id: "none",
+      agent_type: "reviewer",
+      description: "Review source changes",
+      prompt: "Review the current working tree.",
+      parent_context: "The launch boundary must preserve durable state.",
+      proposed_changes: ["No design changes"],
     }, new AbortController().signal, undefined, { cwd: isolatedCwd });
-    assert.equal(corruptState.content[0]?.text, "Unreadable durable state: task-registry.json (parse). Cannot inspect or modify tasks until task-registry.json is repaired.");
+    assert.equal(corruptState.content[0]?.text, "Unreadable durable state: task-registry.json (parse). Repair the durable file before retrying the task operation.");
     assert.equal(corruptState.details?.error, "durable_state_unreadable");
 
     // Launches use the same tool boundary. A rejected admission promise must
@@ -331,6 +297,63 @@ test("task tool explains malformed control payloads instead of reporting a gener
     assert.equal(corruptLaunch.isError, true);
     assert.match(corruptLaunch.content[0]?.text ?? "", /repair the durable file/i);
     assert.equal(readFileSync(mapPath, "utf-8"), corruptMap);
+  } finally {
+    process.chdir(originalCwd);
+    rmSync(isolatedCwd, { recursive: true, force: true });
+    shutdown?.();
+  }
+});
+
+test("task control is reachable from the /task command", async () => {
+  type Command = {
+    description?: string;
+    handler: (args: unknown, ctx: unknown) => Promise<void> | void;
+  };
+  const commands = new Map<string, Command>();
+  const notices: Array<{ message: string; level: string }> = [];
+  let shutdown: (() => void) | undefined;
+  const pi = {
+    on(event: string, handler: () => void) {
+      if (event === "session_shutdown") shutdown = handler;
+    },
+    registerMessageRenderer() {},
+    registerFlag() {},
+    getFlag() { return undefined; },
+    registerTool() {},
+    registerCommand(name: string, options: Command) {
+      commands.set(name, options);
+    },
+    getAllTools() { return []; },
+  };
+
+  const originalCwd = process.cwd();
+  const isolatedCwd = mkdtempSync(join(tmpdir(), "pi-task-command-"));
+  process.chdir(isolatedCwd);
+  try {
+    registerTaskExtension(pi as never);
+    const task = commands.get("task");
+    assert.ok(task, "the /task command is registered");
+    assert.match(task.description ?? "", /cancel/i);
+
+    const ui = {
+      notify: (message: string, level: string) => notices.push({ message, level }),
+    };
+    const ctx = { ui, sessionManager: { getCwd: () => isolatedCwd } };
+
+    await task.handler("", ctx);
+    assert.equal(notices.at(-1)?.level, "info");
+    assert.match(notices.at(-1)?.message ?? "", /No durable pi-task conversations found/);
+
+    await task.handler("status", ctx);
+    assert.equal(notices.at(-1)?.level, "error");
+    assert.match(notices.at(-1)?.message ?? "", /needs a task id/);
+
+    // The control path still fails closed on unreadable durable state.
+    mkdirSync(join(isolatedCwd, ".pi"), { recursive: true });
+    writeFileSync(join(isolatedCwd, ".pi", "task-registry.json"), "{not-json", "utf-8");
+    await task.handler("status task-1", ctx);
+    assert.equal(notices.at(-1)?.level, "error");
+    assert.match(notices.at(-1)?.message ?? "", /Unreadable durable state: task-registry\.json/);
   } finally {
     process.chdir(originalCwd);
     rmSync(isolatedCwd, { recursive: true, force: true });

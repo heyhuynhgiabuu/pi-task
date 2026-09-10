@@ -65,7 +65,7 @@ Fast Mode is optional and driven by one flag: `pi --fast` applies the priority s
 }
 ```
 
-When effective Fast Mode is enabled, a configured OpenAI or OpenAI-Codex child uses `serviceTier: "priority"` when its model is listed in `pi-codex-fast.json` under the Pi agent directory. The config's `enabled` value is not consulted, and pi-task never writes the file. If that file is missing or invalid, the built-in fallback list applies: `openai/gpt-5.4`, `openai/gpt-5.5`, `openai-codex/gpt-5.4`, `openai-codex/gpt-5.5` (same behavior as pi-codex-fast). Unsupported or unlisted models use their normal streamer. Terminal children use an isolated provider bridge; SDK children inject the same bridge while keeping normal extension discovery disabled.
+When effective Fast Mode is enabled, a configured OpenAI or OpenAI-Codex child uses `serviceTier: "priority"` when its model is listed in `pi-codex-fast.json` under the Pi agent directory. The config's `enabled` value is not consulted, and pi-task never writes the file. If that file is missing or invalid, the built-in fallback list applies: `openai/gpt-5.4`, `openai/gpt-5.5`, `openai-codex/gpt-5.4`, `openai-codex/gpt-5.5`, `openai-codex/gpt-5.6-luna`. Unsupported or unlisted models use their normal streamer. Terminal children use an isolated provider bridge; SDK children inject the same bridge while keeping normal extension discovery disabled.
 
 A reviewer request with missing parent_context or proposed_changes is rejected. If there are no design changes, pass an explicit item such as “No proposed design changes; assess the implementation against the stated goal.”
 

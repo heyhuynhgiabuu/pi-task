@@ -43,7 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   the task request or agent frontmatter, and the parent's own calls were never
   fast. The flag now reaches children through `resolveTaskFastMode` and installs
   the same provider bridge for the parent, so one flag covers both. An agent's
-  frontmatter still overrides it.
+  frontmatter still overrides it. The built-in fallback also covers
+  `openai-codex/gpt-5.6-luna`.
 - The main extension entry installs the parent-side Fast Mode bridge after
   startup and handles isolated terminal children from the same flag owner.
   Pi-task and another extension that owns `--fast`, such as pi-codex-fast,

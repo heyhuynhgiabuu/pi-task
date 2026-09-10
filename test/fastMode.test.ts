@@ -37,11 +37,13 @@ const baseArgvOptions: BuildPiArgvOptions = {
   promptContent: "perform the task",
 };
 
-function createFastStreamHarness(models: string[]) {
+function createFastStreamHarness(models?: string[]) {
   const agentDir = mkdtempSync(join(tmpdir(), "pi-task-fast-options-"));
-  const configDir = join(agentDir, "extensions");
-  mkdirSync(configDir, { recursive: true });
-  writeFileSync(join(configDir, "pi-codex-fast.json"), JSON.stringify({ models }));
+  if (models !== undefined) {
+    const configDir = join(agentDir, "extensions");
+    mkdirSync(configDir, { recursive: true });
+    writeFileSync(join(configDir, "pi-codex-fast.json"), JSON.stringify({ models }));
+  }
 
   const calls: Array<{ model: unknown; context: unknown; options: Record<string, unknown> }> = [];
   const capture = (model: unknown, context: unknown, options: unknown) => {
@@ -247,6 +249,25 @@ test("SDK loader keeps extensions disabled and injects fast bridge only when req
   assert.equal(fast.extensionFactories?.[0]?.name, "pi-task-fast-mode");
   assert.equal(normal.noExtensions, true);
   assert.deepEqual(normal.extensionFactories ?? [], []);
+});
+
+test("the fallback fast model list includes openai-codex gpt-5.6-luna", () => {
+  const { agentDir, calls, stream } = createFastStreamHarness();
+  const model = {
+    provider: "openai-codex",
+    id: "gpt-5.6-luna",
+    api: "openai-codex-responses",
+    maxTokens: 20_000,
+    contextWindow: 400_000,
+    reasoning: true,
+  };
+
+  try {
+    stream(model as never, { messages: [] }, { reasoning: "high" });
+    assert.equal(calls[0]?.options.serviceTier, "priority");
+  } finally {
+    rmSync(agentDir, { recursive: true, force: true });
+  }
 });
 
 test("configured fast models preserve native options and add only priority", () => {

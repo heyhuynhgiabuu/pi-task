@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   field is rejected with the property named. Runtime validation remains the
   second layer for what the schema cannot express: a stale `operation`, blank
   strings, and the reviewer cross-field requirement.
+- Task calls accept an optional `thinking` level (`off`, `minimal`, `low`,
+  `medium`, `high`, `xhigh`, or `max`). Agent frontmatter remains authoritative;
+  the call-level value applies when the agent leaves it unset, across Pi, SDK,
+  Claude Code, and comparison launches.
 
 ### Added
 

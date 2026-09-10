@@ -46,6 +46,7 @@ import {
       discoverAgents,
   resolveTaskAgentPreflight,
   resolveTaskFastMode,
+  resolveTaskThinking,
   isTaskCompareAllowed,
   resolveCompareModels,
 } from "./helpers.js";
@@ -439,7 +440,7 @@ export default function (pi: ExtensionAPI) {
           isError: true,
         };
       }
-      const agent = preflight.agent;
+      const agent = resolveTaskThinking(preflight.agent, taskParams.thinking);
       if (taskParams.cwd !== undefined) {
         const requestedTaskCwd = resolveTaskCwd(ctx.cwd, taskParams.cwd);
         if (requestedTaskCwd.kind === "invalid") {

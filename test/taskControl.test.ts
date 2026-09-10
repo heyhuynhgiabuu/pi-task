@@ -17,6 +17,7 @@ import {
   taskStartRequestError,
   type TaskControlRecord,
 } from "../src/task-control.js";
+import { PI_THINKING_LEVELS } from "../src/thinking.js";
 
 // Delegated pi-task children disable recursive registration; this file registers the host extension.
 const inheritedTaskToolDisabled = process.env.PI_TASK_TOOL_DISABLED;
@@ -44,6 +45,40 @@ test("task start parsing supplies runtime validation for the flat provider schem
     description: "Inspect the repository",
     prompt: 42,
   }), undefined);
+});
+
+test("thinking accepts Pi's canonical levels and normalizes them", () => {
+  const base = {
+    agent_type: "explore",
+    description: "Inspect the repository",
+    prompt: "Map the repository.",
+  };
+
+  for (const level of PI_THINKING_LEVELS) {
+    assert.equal(
+      parseTaskStartRequest({ ...base, thinking: ` ${level.toUpperCase()} ` })?.thinking,
+      level,
+      `${level} is accepted and normalized`,
+    );
+  }
+  assert.equal(parseTaskStartRequest(base)?.thinking, undefined, "thinking remains optional");
+});
+
+test("thinking rejects unknown or non-string values", () => {
+  const base = {
+    agent_type: "explore",
+    description: "Inspect the repository",
+    prompt: "Map the repository.",
+  };
+
+  assert.equal(parseTaskStartRequest({ ...base, thinking: "turbo" }), undefined);
+  assert.equal(
+    taskStartRequestError({ ...base, thinking: "turbo" }),
+    "thinking must be one of: off, minimal, low, medium, high, xhigh, max",
+  );
+  assert.equal(parseTaskStartRequest({ ...base, thinking: 1 }), undefined);
+  assert.equal(taskStartRequestError({ ...base, thinking: 1 }), "thinking must be a string");
+  assert.match(taskStartRequestError({ ...base, thinking: "   " }) ?? "", /^thinking must be one of:/);
 });
 
 test("fast is rejected as a removed task parameter", () => {

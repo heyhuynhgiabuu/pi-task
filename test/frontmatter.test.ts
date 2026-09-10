@@ -3,7 +3,7 @@ import { strict as assert } from "node:assert";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { envTurnLimit, loadAgentsFromDir, parseBool, parseModelList, parseModelSpecs, resolveTaskFastMode, type AgentConfig } from "../src/helpers.js";
+import { envTurnLimit, loadAgentsFromDir, parseBool, parseModelList, parseModelSpecs, resolveTaskFastMode, resolveTaskThinking, type AgentConfig } from "../src/helpers.js";
 
 {
   const t = "parseBool";
@@ -84,6 +84,27 @@ No description.`,
   assert.equal(resolveTaskFastMode(undefined, false), false, t + ": no flag and no setting");
   assert.equal(resolveTaskFastMode(true, false), true, t + ": agent true wins");
   assert.equal(resolveTaskFastMode(false, true), false, t + ": agent false wins");
+}
+
+{
+  const t = "resolveTaskThinking uses the call value only when frontmatter is silent";
+  const base: AgentConfig = {
+    name: "dynamic",
+    description: "Dynamic agent",
+    body: "",
+    source: "bundled",
+    path: "",
+  };
+  const resolved = resolveTaskThinking(base, "high");
+  assert.equal(resolved.thinking, "high", t + ": call value applies");
+  assert.notEqual(resolved, base, t + ": dynamic agent is copied");
+  assert.equal(base.thinking, undefined, t + ": source agent is unchanged");
+  assert.equal(
+    resolveTaskThinking({ ...base, thinking: "max" }, "low").thinking,
+    "max",
+    t + ": frontmatter wins",
+  );
+  assert.equal(resolveTaskThinking(base), base, t + ": no request preserves identity");
 }
 
 {

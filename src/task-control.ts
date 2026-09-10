@@ -1,5 +1,10 @@
 import { getExitSentinelPath } from "./subagent/exitSentinel.js";
 import { claudeSessionFilePath } from "./subagent/claudeSession.js";
+import {
+  normalizePiThinkingLevel,
+  PI_THINKING_LEVELS,
+  type PiThinkingLevel,
+} from "./thinking.js";
 import type {
   BackgroundTask,
   ExecutionBackend,
@@ -26,6 +31,7 @@ export interface TaskStartRequest {
   agent_type: string;
   prompt: string;
   description: string;
+  thinking?: PiThinkingLevel;
   parent_context?: string;
   proposed_changes?: string[];
   workspace_group?: string;
@@ -226,6 +232,17 @@ function validateTaskStartRequest(value: unknown): TaskStartValidation {
   if (candidate.compare !== undefined && typeof candidate.compare !== "boolean") {
     problems.push("compare must be a boolean");
   }
+  let thinking: PiThinkingLevel | undefined;
+  if (candidate.thinking !== undefined) {
+    if (typeof candidate.thinking !== "string") {
+      problems.push("thinking must be a string");
+    } else {
+      thinking = normalizePiThinkingLevel(candidate.thinking);
+      if (thinking === undefined) {
+        problems.push(`thinking must be one of: ${PI_THINKING_LEVELS.join(", ")}`);
+      }
+    }
+  }
   if (problems.length > 0) return { problems };
 
   const parsedPromptHandoff = parsePromptHandoff(candidate.prompt as string);
@@ -287,6 +304,7 @@ function validateTaskStartRequest(value: unknown): TaskStartValidation {
       agent_type: candidate.agent_type as string,
       prompt: candidate.prompt as string,
       description: candidate.description as string,
+      ...(thinking !== undefined ? { thinking } : {}),
       ...(parentContext !== undefined ? { parent_context: parentContext } : {}),
       ...(proposedChanges !== undefined ? { proposed_changes: proposedChanges } : {}),
       ...(typeof candidate.workspace_group === "string" ? { workspace_group: candidate.workspace_group } : {}),

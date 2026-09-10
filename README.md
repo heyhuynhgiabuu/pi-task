@@ -20,6 +20,7 @@ For the full high-quality 89s @ 56 fps version, [download the MP4](https://githu
 - Tmux backend for observable subagent panes.
 - HerdR and tmux terminal backends, with SDK fallback when neither is available.
 - Agent frontmatter support: `model`, `thinking`, `fast`, `skills`, `tools`, `disallowed_tools`.
+- Per-call thinking control: an optional task `thinking` value uses Pi's canonical levels when the agent leaves `thinking` unset; frontmatter remains authoritative when present.
 - Task-local OpenAI/OpenAI-Codex Fast Mode: apply priority service tier to configured models without changing model, thinking level, or shared configuration.
 - Built-in starter agents: `scout`, `explore`, `general`, `reviewer`.
 - Project/user agent overrides via `.pi/agents/*.md` or `~/.pi/agent/agents/*.md`.
@@ -40,7 +41,7 @@ Restart Pi after installing or changing extension config.
 
 ## Usage
 
-The handoff contract lives in the `task` schema. Pi validates tool arguments against `parameters` before the tool runs and reports the missing property by name, so `agent_type`, `description`, and `prompt` are enforced rather than merely stated. Runtime validation is the second layer for what the schema cannot express: a stale `operation`, blank strings, and the reviewer cross-field requirement. `prompt` carries:
+The handoff contract lives in the `task` schema. Pi validates tool arguments against `parameters` before the tool runs and reports the missing property by name, so `agent_type`, `description`, and `prompt` are enforced rather than merely stated. Runtime validation is the second layer for what the schema cannot express: a stale `operation`, blank strings, thinking values, and the reviewer cross-field requirement. `prompt` carries:
 
 - goal: the exact outcome wanted
 - scope and references: what to inspect, why each reference matters, and the base/diff to review; paths are evidence, not context handoff
@@ -50,6 +51,8 @@ The handoff contract lives in the `task` schema. Pi validates tool arguments aga
 - verification recipe: checks to run or evidence to gather
 
 Parent reasoning that lives outside the referenced files goes in `parent_context` and `proposed_changes` rather than in `prompt`.
+
+An optional `thinking` task parameter accepts `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. Agent frontmatter wins; the call-level value applies only when the selected agent omits `thinking`. The resolved value is forwarded through Pi, SDK, Claude Code, and comparison launches.
 
 Fast Mode is optional and driven by one flag: `pi --fast` applies the priority service tier to the session's own model calls and to every child it delegates to. An agent's `fast: true` or `fast: false` frontmatter overrides it for that agent; behavior defaults to `false`. The package ships two extension entry points, `dist/index.js` for delegation and `dist/fast.js` for the parent-side bridge, and the second installs nothing unless the flag is set.
 

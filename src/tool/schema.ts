@@ -1,4 +1,5 @@
 import { Type, type Static } from "typebox";
+import { PI_THINKING_LEVELS } from "../thinking.js";
 
 /**
  * The model-facing parameter surface, paid on every turn.
@@ -7,7 +8,7 @@ import { Type, type Static } from "typebox";
  * validates tool arguments against `parameters` before `execute` and reports
  * the missing property by name, so `required` is enforced rather than stated.
  * `parseTaskStartRequest` covers what the schema cannot express — a stale
- * `operation`, blank strings, the reviewer cross-field requirement.
+ * `operation`, blank strings, thinking values, the reviewer cross-field requirement.
  *
  * Deliberately absent: `operation` (start and resume are told apart by
  * `task_id`; status and cancel belong to `/task`) and `fast` (a session or
@@ -31,6 +32,9 @@ export function taskParametersSchema() {
       description:
         "The handoff: goal, scope, non-goals, write policy, acceptance criteria, verification recipe. Parent reasoning learned outside the referenced files goes in parent_context and proposed_changes.",
     }),
+    thinking: Type.Optional(Type.String({
+      description: `Thinking; frontmatter wins: ${PI_THINKING_LEVELS.join("|")}`,
+    })),
     task_id: Type.Optional(
       Type.String({
         description: "Resume this task instead of starting a fresh one",

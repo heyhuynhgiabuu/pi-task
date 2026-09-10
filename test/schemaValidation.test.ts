@@ -96,6 +96,8 @@ test("the schema is the only home for the handoff contract", () => {
 	assert.match(schema.properties.parent_context?.description ?? "", /outside the referenced files/i, "parent_context says what belongs in it");
 	assert.match(schema.properties.parent_context?.description ?? "", /required for reviewer tasks/i, "parent_context names its reviewer requirement");
 	assert.match(schema.properties.proposed_changes?.description ?? "", /required non-empty for reviewer tasks/i, "proposed_changes names its reviewer requirement");
+	assert.match(schema.properties.thinking?.description ?? "", /frontmatter wins/i, "thinking states precedence");
+	assert.match(schema.properties.thinking?.description ?? "", /off\|minimal\|low\|medium\|high\|xhigh\|max/i, "thinking lists Pi's levels");
 	assert.match(schema.properties.cwd?.description ?? "", /absolute existing directory/i, "cwd states its validation");
 	assert.match(schema.properties.cwd?.description ?? "", /does not create.*worktree/i, "cwd states the worktree guarantee");
 });
@@ -104,6 +106,8 @@ test("optional fields accept their documented shapes and reject others", () => {
 	const base = { agent_type: "reviewer", description: "Review", prompt: "Review the diff." };
 
 	assert.equal(validate(base).accepted, true, "optional fields may be omitted");
+	assert.equal(validate({ ...base, thinking: "high" }).accepted, true, "thinking is an optional string");
+	assert.equal(validate({ ...base, thinking: 1 }).accepted, false, "thinking rejects non-strings");
 	assert.equal(
 		validate({ ...base, parent_context: "The parent read the diff.", proposed_changes: ["No design changes"] }).accepted,
 		true,

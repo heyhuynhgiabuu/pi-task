@@ -3,7 +3,6 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { Value } from "typebox/value";
 import { readRegistry, upsertTaskSessionHistory, writeRegistry } from "../src/conversation.js";
 import registerTaskExtension from "../src/index.js";
 import { completeTask as persistCompletedTask } from "../src/lifecycle/completion.js";
@@ -28,48 +27,6 @@ process.on("exit", () => {
   else process.env.PI_TASK_TOOL_DISABLED = inheritedTaskToolDisabled;
 });
 
-test("task control is a user command, not a tool operation", () => {
-  const schema = taskParametersSchema();
-
-  assert.equal(schema.type, "object");
-  assert.ok("properties" in schema);
-  assert.equal("anyOf" in schema, false);
-  // Status and cancel used to be tool operations, which cost the model a turn
-  // to reach and every turn a schema entry to describe. `/task` owns them now,
-  // so a control-shaped payload is simply an invalid start request.
-  assert.equal("operation" in (schema.properties ?? {}), false);
-  assert.equal(Value.Check(schema, { operation: "status", task_id: "task-1" }), false);
-  assert.equal(Value.Check(schema, { operation: "cancel", task_id: "task-1" }), false);
-  assert.equal(Value.Check(schema, { operation: "status" }), false);
-});
-
-test("task start requests require the handoff fields", () => {
-  const schema = taskParametersSchema();
-
-  assert.equal(
-    Value.Check(schema, {
-      agent_type: "explore",
-      description: "Inspect the repository",
-      prompt: "Map the repository and return evidence.",
-    }),
-    true,
-  );
-  // The schema is the contract: these were prose bullets before, and prose is
-  // not enforced.
-  assert.equal(Value.Check(schema, { description: "Inspect", prompt: "Map it." }), false);
-  assert.equal(Value.Check(schema, { agent_type: "explore", prompt: "Map it." }), false);
-  assert.equal(Value.Check(schema, { agent_type: "explore", description: "Inspect" }), false);
-  assert.equal(
-    Value.Check(schema, {
-      agent_type: "explore",
-      description: "Inspect the repository",
-      prompt: "Map the repository.",
-      task_id: "task-1",
-    }),
-    true,
-  );
-});
-
 test("task start parsing supplies runtime validation for the flat provider schema", () => {
   assert.equal(parseTaskStartRequest({
     agent_type: "explore",
@@ -90,16 +47,20 @@ test("task start parsing supplies runtime validation for the flat provider schem
   }), undefined);
 });
 
-test("fast is an optional start setting and survives task control parsing", () => {
-  const schema = taskParametersSchema();
+test("fast survives parsing as a compatibility setting but is not advertised", () => {
   const base = {
     agent_type: "explore",
     description: "Inspect the repository",
     prompt: "Map the repository.",
   };
 
-  assert.equal(Value.Check(schema, { ...base, fast: true }), true);
-  assert.equal(Value.Check(schema, { ...base, fast: false }), true);
+  // `fast` left the model-facing schema — it is a user preference, set by agent
+  // frontmatter or the --fast flag — but the parser still accepts it so a
+  // resumed session carrying the old shape keeps working.
+  assert.equal(
+    "fast" in ((taskParametersSchema() as unknown as { properties: object }).properties),
+    false,
+  );
   assert.equal(parseTaskStartRequest({ ...base, fast: true })?.fast, true);
   assert.equal(parseTaskStartRequest({ ...base, fast: false })?.fast, false);
   assert.equal(parseTaskStartRequest({ ...base, fast: "true" }), undefined);
@@ -110,16 +71,13 @@ test("fast is an optional start setting and survives task control parsing", () =
   }), undefined);
 });
 
-test("compare is an optional start setting and survives task control parsing", () => {
-  const schema = taskParametersSchema();
+test("compare survives task control parsing as an optional boolean", () => {
   const base = {
     agent_type: "explore",
     description: "Inspect the repository",
     prompt: "Map the repository.",
   };
 
-  assert.equal(Value.Check(schema, { ...base, compare: true }), true);
-  assert.equal(Value.Check(schema, { ...base, compare: false }), true);
   assert.equal(parseTaskStartRequest({ ...base, compare: true })?.compare, true);
   assert.equal(parseTaskStartRequest({ ...base, compare: false })?.compare, false);
   assert.equal(parseTaskStartRequest({ ...base, compare: "true" }), undefined);
@@ -162,16 +120,16 @@ test("reviewer starts require structured parent context and proposed semantics",
 });
 
 test("start parsing accepts the resume alias and reports targeted rejection reasons", () => {
-  const schema = taskParametersSchema();
   const base = {
     agent_type: "explore",
     description: "Inspect the repository",
     prompt: "Map the repository.",
   };
 
-  // Schema accepts the resume alias for providers that require a mode discriminator.
-  assert.equal(Value.Check(schema, { ...base, operation: "resume" }), true);
-  // The alias parses exactly like an explicit start.
+  // The alias is no longer advertised — start and resume are told apart by
+  // task_id — but the parser still accepts it for a session whose stored
+  // arguments predate the change. The alias parses exactly like an explicit
+  // start.
   const resumed = parseTaskStartRequest({ ...base, operation: "resume" });
   assert.equal(resumed?.agent_type, "explore");
   assert.equal(resumed?.description, "Inspect the repository");

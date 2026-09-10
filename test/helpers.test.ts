@@ -15,7 +15,6 @@ import {
 import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
 import { resolveAgentToolAllowlist } from "../src/agent-tools.js";
-import { taskParametersSchema } from "../src/tool/schema.js";
 import {
   parseResultXml,
   extractTag,
@@ -1422,38 +1421,9 @@ import {
         /review what a writer changed/i,
         t + " requires verification",
       );
-      // The handoff contract lives in the schema now, and Pi validates tool
-      // arguments against it before the tool runs, so `required` is enforced
-      // rather than merely stated. Runtime validation stays the second layer
-      // for what the schema cannot express. Asserting the fields here keeps the
-      // two in step.
-      const schema = taskParametersSchema() as {
-        properties?: Record<string, { description?: string }>;
-        required?: string[];
-      };
-      for (const field of ["agent_type", "description", "prompt"]) {
-        assert.ok(
-          schema.required?.includes(field),
-          `${t}: ${field} is required by the schema`,
-        );
-      }
-      assert.match(
-        schema.properties?.prompt?.description ?? "",
-        /goal, scope, non-goals, write policy, acceptance criteria, verification recipe/i,
-        t + ": prompt carries the handoff fields",
-      );
-      assert.match(
-        schema.properties?.parent_context?.description ?? "",
-        /required for reviewer tasks/i,
-        t + ": parent_context names its reviewer requirement",
-      );
-      assert.match(
-        schema.properties?.proposed_changes?.description ?? "",
-        /required non-empty for reviewer tasks/i,
-        t + ": proposed_changes names its reviewer requirement",
-      );
       // Size budget: the description is model-visible on every turn. Keep it
-      // tight to protect context.
+      // tight to protect context. The schema's own contract is asserted in
+      // schemaValidation.test.ts.
       assert.ok(
         TASK_TOOL_DESCRIPTION.length < 800,
         `${t}: description stays under the size budget (${TASK_TOOL_DESCRIPTION.length} chars)`,

@@ -16,7 +16,6 @@ import test from "node:test";
 import { Compile } from "typebox/compile";
 
 import { taskParametersSchema } from "../src/tool/schema.js";
-
 interface ValidationError {
 	keyword?: string;
 	instancePath?: string;
@@ -79,6 +78,29 @@ test("a stale control payload cannot pass the schema as a start request", () => 
 	assert.deepEqual(bare.errors.slice().sort(), ["agent_type", "description", "prompt"]);
 });
 
+test("the schema is the only home for the handoff contract", () => {
+	const schema = taskParametersSchema() as unknown as {
+		properties: Record<string, { description?: string }>;
+		required?: string[];
+		anyOf?: unknown;
+	};
+
+	// Pi's Anthropic adapter reads root-level properties/required and does not
+	// preserve a root anyOf union, so the schema has to stay flat.
+	assert.equal("anyOf" in schema, false, "the schema stays a flat object");
+	assert.equal("operation" in schema.properties, false, "control is not a tool operation");
+	assert.equal("fast" in schema.properties, false, "the service tier is not a model decision");
+
+	// Each field description carries its own rule, so the tool description does
+	// not have to restate it on every turn.
+	assert.match(schema.properties.prompt?.description ?? "", /goal, scope, non-goals, write policy, acceptance criteria, verification recipe/i, "prompt lists the handoff fields");
+	assert.match(schema.properties.parent_context?.description ?? "", /outside the referenced files/i, "parent_context says what belongs in it");
+	assert.match(schema.properties.parent_context?.description ?? "", /required for reviewer tasks/i, "parent_context names its reviewer requirement");
+	assert.match(schema.properties.proposed_changes?.description ?? "", /required non-empty for reviewer tasks/i, "proposed_changes names its reviewer requirement");
+	assert.match(schema.properties.cwd?.description ?? "", /absolute existing directory/i, "cwd states its validation");
+	assert.match(schema.properties.cwd?.description ?? "", /does not create.*worktree/i, "cwd states the worktree guarantee");
+});
+
 test("optional fields accept their documented shapes and reject others", () => {
 	const base = { agent_type: "reviewer", description: "Review", prompt: "Review the diff." };
 
@@ -94,6 +116,7 @@ test("optional fields accept their documented shapes and reject others", () => {
 		"both resume references are accepted",
 	);
 	assert.equal(validate({ ...base, background: true }).accepted, true, "background is a boolean");
+	assert.equal(validate({ ...base, compare: true }).accepted, true, "compare is a boolean");
 	assert.equal(validate({ ...base, background: "yes" }).accepted, false, "a non-boolean background is rejected");
 	assert.equal(validate({ ...base, prompt: 42 }).accepted, false, "a non-string prompt is rejected");
 });

@@ -1,26 +1,21 @@
 import { Type, type Static } from "typebox";
 
 /**
- * The model-facing parameter surface.
+ * The model-facing parameter surface, paid on every turn.
  *
- * Every field here is paid on every turn, so the schema is kept to the fields
- * a caller actually sets and their descriptions are one line each. The handoff
- * contract lives here rather than in the tool description because Pi validates
- * tool arguments against `parameters` before `execute` and reports the missing
- * property by name, so `required` is enforced rather than merely stated.
+ * The handoff contract lives here rather than in the tool description: Pi
+ * validates tool arguments against `parameters` before `execute` and reports
+ * the missing property by name, so `required` is enforced rather than stated.
+ * `parseTaskStartRequest` covers what the schema cannot express — a stale
+ * `operation`, blank strings, the reviewer cross-field requirement.
  *
- * `parseTaskStartRequest` remains the second layer for what the schema cannot
- * express: a stale `operation`, blank strings, and the reviewer cross-field
- * requirement.
+ * Deliberately absent: `operation` (start and resume are told apart by
+ * `task_id`; status and cancel belong to `/task`) and `fast` (a user
+ * preference, set by agent frontmatter or the `--fast` flag).
  *
- * Deliberately absent:
- * - `operation` — start/resume are told apart by `task_id`, and status/cancel
- *   belong to the `/task` command, not to a model turn.
- * - `fast` — a user preference, set by agent frontmatter or the `--fast` flag.
- *
- * `conversation_id` stays: it is not a synonym for `task_id`. The durable
+ * `conversation_id` stays. It is not a synonym for `task_id`: the durable
  * registry is keyed by conversation, and the conversation-resume path is only
- * reachable when this field is supplied.
+ * reachable when it is supplied.
  */
 export function taskParametersSchema() {
   // Keep a single object at the schema root. Pi's Anthropic adapter reads

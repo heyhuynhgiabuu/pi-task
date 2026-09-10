@@ -106,16 +106,6 @@ Durable specialist conversation:
 
 `conversation_id` maps to a durable subagent run. Reused across calls to keep specialist memory, e.g. a reusable research assistant. Use `/task` to list known durable conversations.
 
-## Task control
-
-Status and cancel are a user action, so they live on a command rather than on the model-facing tool:
-
-- `/task` or `/task list` — durable conversations
-- `/task status <id>` — inspect a task without touching its backend resources
-- `/task cancel <id>` — cancel a live tmux or HerdR background task; a cleanup failure reports `cleanup_pending` with a durable retry receipt
-
-`/task-sessions` remains an alias for the listing. A control request that is sent to the tool instead is rejected as an invalid start request rather than launched.
-
         Stored files:
 
         ```
@@ -137,6 +127,7 @@ If Pi restarts while background tasks are still running, pi-task restores them o
 Control is a user action, so it lives on the `/task` command rather than on the model-facing tool:
 
 ```
+/task              # list durable conversations (also /task list, /task-sessions)
 /task status <task-id-or-conversation-id>
 /task cancel <task-id-or-conversation-id>
 ```

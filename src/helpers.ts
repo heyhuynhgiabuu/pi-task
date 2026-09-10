@@ -203,13 +203,10 @@ End with a concise, self-contained plain-text or Markdown report. Start with one
 /**
  * The model-facing tool description.
  *
- * Capability only. Routing policy (when to delegate, when not to) is injected
- * as a system-prompt addition instead, because it is policy rather than a
- * description of what this tool does, and because it has to vary by model.
- *
- * The handoff contract is deliberately absent: the field descriptions in the
- * schema carry it, and `required` enforces it. What used to be eight bullets
- * here was the same content, unenforced and paid on every turn.
+ * Capability only: what the tool does, what it is not for, and the roster.
+ * The handoff contract lives in the schema, where Pi validates it, and routing
+ * policy belongs to the host's own system prompt — this description used to
+ * restate both, and paid for them on every turn.
  */
 export const TASK_TOOL_DESCRIPTION = `Launch a subagent for a complex, multistep task that benefits from isolated context. The subagent starts with fresh context, so the prompt is the whole handoff — referenced files are evidence, not a handoff.
 

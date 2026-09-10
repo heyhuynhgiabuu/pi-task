@@ -972,7 +972,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerCommand("task", {
     description: "List tasks, or inspect or cancel one: /task [list | status <id> | cancel <id>]",
     handler: async (args, ctx) => {
-      const [subcommand, id] = String(args ?? "").trim().split(/\s+/).filter(Boolean);
+      const [subcommand, id] = args.trim().split(/\s+/).filter(Boolean);
       if (subcommand !== "status" && subcommand !== "cancel") {
         const listing = taskSessionListing(ctx.sessionManager?.getCwd?.() ?? process.cwd());
         ctx.ui.notify(listing.text, listing.level);

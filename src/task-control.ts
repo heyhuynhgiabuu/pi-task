@@ -309,6 +309,10 @@ export function taskStartRequestError(value: unknown): string | undefined {
   return problems.length > 0 ? problems.join("; ") : undefined;
 }
 
+/**
+ * The control request shape, checked before `parseTaskControlRequest` reads it.
+ * The `/task` command builds these requests; the tool never does.
+ */
 export function taskControlRequestError(value: unknown): string | undefined {
   if (!value || typeof value !== "object") return undefined;
   const candidate = value as Record<string, unknown>;

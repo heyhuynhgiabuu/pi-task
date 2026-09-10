@@ -1,77 +1,77 @@
 import { Type, type Static } from "typebox";
 
+/**
+ * The model-facing parameter surface.
+ *
+ * Every field here is paid on every turn, so the schema is kept to the fields
+ * a caller actually sets and their descriptions are one line each. The handoff
+ * contract lives here rather than in the tool description because Pi validates
+ * tool arguments against `parameters` before `execute` and reports the missing
+ * property by name, so `required` is enforced rather than merely stated.
+ *
+ * `parseTaskStartRequest` remains the second layer for what the schema cannot
+ * express: a stale `operation`, blank strings, and the reviewer cross-field
+ * requirement.
+ *
+ * Deliberately absent:
+ * - `operation` — start/resume are told apart by `task_id`, and status/cancel
+ *   belong to the `/task` command, not to a model turn.
+ * - `fast` — a user preference, set by agent frontmatter or the `--fast` flag.
+ *
+ * `conversation_id` stays: it is not a synonym for `task_id`. The durable
+ * registry is keyed by conversation, and the conversation-resume path is only
+ * reachable when this field is supplied.
+ */
 export function taskParametersSchema() {
   // Keep a single object at the schema root. Pi's Anthropic adapter reads
   // root-level properties/required and does not preserve a root anyOf union.
   return Type.Object({
-    operation: Type.Optional(
-      Type.Union([
-        Type.Literal("start"),
-        Type.Literal("resume"),
-        Type.Literal("status"),
-        Type.Literal("cancel"),
-      ], {
-        description: 'Optional; "start"/"resume" launch, "status"/"cancel" control',
-      }),
-    ),
+    agent_type: Type.String({
+      description: "Specialist agent type for this task",
+    }),
+    description: Type.String({
+      description: "A short (3-5 words) summary of the task",
+    }),
+    prompt: Type.String({
+      description:
+        "The handoff: goal, scope, non-goals, write policy, acceptance criteria, verification recipe. Parent reasoning learned outside the referenced files goes in parent_context and proposed_changes.",
+    }),
     task_id: Type.Optional(
       Type.String({
-        description: "Existing task id, session name, or conversation id",
+        description: "Resume this task instead of starting a fresh one",
       }),
     ),
     conversation_id: Type.Optional(
       Type.String({
-        description: "Conversation id to resume; maps to one durable task id",
-      }),
-    ),
-    agent_type: Type.Optional(
-      Type.String({
-        description: "Specialist agent type for this task",
-      }),
-    ),
-    prompt: Type.Optional(
-      Type.String({
-        description:
-          "Required for start requests; omitted for status/cancel controls. Follow the prompt contract in the tool description; parent reasoning in parent_context; design changes in proposed_changes.",
+        description: "Resume a durable conversation by id; it maps to one task id",
       }),
     ),
     parent_context: Type.Optional(
       Type.String({
-        description: "Parent-learned facts/decisions/constraints outside the referenced files. Required for reviewer tasks.",
+        description:
+          "Facts, decisions, and constraints the parent learned outside the referenced files. Required for reviewer tasks.",
       }),
     ),
     proposed_changes: Type.Optional(
       Type.Array(Type.String(), {
-        description: "One item per change: intended semantics + acceptance implication. Required non-empty for reviewer tasks; explicit 'no design changes' item when none.",
-      }),
-    ),
-    description: Type.Optional(
-      Type.String({
-        description: "A short (3-5 word) summary of the task",
+        description:
+          "One item per change: intended semantics and acceptance implication. Required non-empty for reviewer tasks; pass an explicit 'no design changes' item when there are none.",
       }),
     ),
     workspace_group: Type.Optional(Type.String({
-      description: "Shared HerdR workspace group; same value = panes in one workspace.",
+      description: "Shared HerdR workspace group; same value = panes in one workspace",
     })),
     cwd: Type.Optional(Type.String({
-      description: "Set cwd to an absolute existing directory (parent-created Git worktree for writer isolation). Defaults to caller cwd; resumes reuse stored cwd. pi-task does not create, merge, or remove worktrees.",
+      description: "Absolute existing directory for the child. pi-task does not create, merge, or remove worktrees. Defaults to the caller's; a resume reuses the stored one.",
     })),
-    fast: Type.Optional(
-      Type.Boolean({
-        description:
-          "Priority service tier when the model is in pi-codex-fast config (fallback: built-in gpt-5.4/5.5 list). Defaults to agent frontmatter fast, else false. No model or thinking-level change.",
-      }),
-    ),
     compare: Type.Optional(
       Type.Boolean({
-        description:
-          "Run dual-model evaluation comparison on read-only agents.",
+        description: "Run a dual-model comparison on read-only agents",
       }),
     ),
     background: Type.Optional(
       Type.Boolean({
-        description:
-          "Run async in background; default true",
+        description: "Run async in background; default true",
         default: true,
       }),
     ),

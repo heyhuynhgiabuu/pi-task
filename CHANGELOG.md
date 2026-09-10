@@ -4,6 +4,34 @@ All notable changes to `@heyhuynhgiabuu/pi-task` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- The `task` tool's model-visible surface costs ~892 tokens per turn instead of
+  ~1,480. The description is now capability only, and the handoff contract moved
+  into the schema where `required` enforces it.
+- `agent_type`, `description`, and `prompt` are now required by the schema. Pi
+  validates tool arguments against `parameters` before `execute`, so a missing
+  field is rejected with the property named. Runtime validation remains the
+  second layer for what the schema cannot express: a stale `operation`, blank
+  strings, and the reviewer cross-field requirement.
+
+### Added
+
+- `/task` command for task control: `/task` or `/task list` lists durable
+  conversations, `/task status <id>` inspects a task, and `/task cancel <id>`
+  cancels a live one. `/task-sessions` remains an alias for the listing.
+- `npm run cost` prints the model-visible `task` surface budget.
+
+### Removed
+
+- `operation` on the tool. Start and resume are told apart by `task_id`, and a
+  payload that still carries `operation` is rejected as an invalid start request
+  so a stale control call cannot launch work.
+- `fast` on the tool. It is a user preference: set it in agent frontmatter or
+  pass the `--fast` flag.
+
 ## [0.7.2] - 2026-09-08
 
 ### Added

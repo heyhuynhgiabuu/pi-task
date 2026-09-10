@@ -200,33 +200,24 @@ export const TASK_PROMPT_INSTRUCTIONS = `Your final assistant message IS the res
 
 End with a concise, self-contained plain-text or Markdown report. Start with one of these lines: "Status: success", "Status: failure", "Status: blocked", or "Status: partial". Then put the outcome first and include the reasoning, evidence, files, checks, caveats, and next steps that matter. Do not emit an XML or JSON wrapper. Do not write a RESULT.md file — the parent reads your final assistant message from the session JSONL, not from any file.`;
 
-export const TASK_TOOL_DESCRIPTION = `Launch a subagent for a complex, multistep task that benefits from isolated context. The subagent starts with fresh context — everything it needs goes in the prompt: parent-synthesized facts, decisions, and proposed-change semantics (file paths alone are not a context handoff).
+/**
+ * The model-facing tool description.
+ *
+ * Capability only. Routing policy (when to delegate, when not to) is injected
+ * as a system-prompt addition instead, because it is policy rather than a
+ * description of what this tool does, and because it has to vary by model.
+ *
+ * The handoff contract is deliberately absent: the field descriptions in the
+ * schema carry it, and `required` enforces it. What used to be eight bullets
+ * here was the same content, unenforced and paid on every turn.
+ */
+export const TASK_TOOL_DESCRIPTION = `Launch a subagent for a complex, multistep task that benefits from isolated context. The subagent starts with fresh context, so the prompt is the whole handoff — referenced files are evidence, not a handoff.
 
-When NOT to use: file/symbol lookups (Read/Grep), 2-3 file edits (directly), or no suitable agent type (other tools).
+Not for: file or symbol lookups, 2-3 file edits, or when no agent type fits.
 
-Prompt contract (put these fields in the task request):
-- Goal: the exact outcome wanted
-- Parent context: facts, decisions, and constraints learned outside the referenced files
-- Proposed changes: one item per change, including intended semantics and acceptance implications
-- Scope and references: what to inspect, why each reference matters, and the base/diff to review; paths are evidence, not context handoff
-- Non-goals: what to avoid or leave untouched
-- Write/read policy: whether the agent may edit files or must stay read-only
-- Acceptance criteria and stop condition: observable conditions that must be true before stopping
-- Verification recipe: checks to run or evidence to gather
+The child's final message is the result and is not shown to the user, so summarize it yourself. Launch independent agents concurrently and do not duplicate delegated work; review what a writer changed before claiming completion.
 
-A reviewer request with missing parent_context or proposed_changes is rejected; if there are no design changes, pass an explicit "No proposed design changes" item. Generic tasks may omit these fields but must still copy parent reasoning into the prompt.
-
-Usage:
-1. Launch independent agents concurrently; do NOT duplicate delegated work — wait or work on non-overlapping tasks
-2. Background is the default (async; you'll be notified on completion); use background:false only to wait inline; never sleep/poll a background task
-3. Do not trust delegated output blindly: read changed files, review the diff, verify scope, and run relevant checks before claiming completion
-4. Tell the agent whether to write code or research; its result is not user-visible — send the user a concise summary
-5. Pass task_id to resume a previous subagent session
-
-Task control:
-- operation "status" + task_id: inspect a task without relaunching it
-- operation "cancel" + task_id: cancel a live tmux or HerdR background task (cleanup failure → cleanup_pending + durable retry receipt; SDK cancel → unsupported)
-- Omit operation for start/resume ("start"/"resume" explicit when the provider requires it); never combine "status"/"cancel" with start/resume fields`;
+Pass task_id to resume a previous subagent session. Background by default; set background false only to wait inline.`;
 
 /** @deprecated Import from ./agent-tools.js */
 export { ALL_TOOL_NAMES } from "./agent-tools.js";

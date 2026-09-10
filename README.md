@@ -40,24 +40,23 @@ Restart Pi after installing or changing extension config.
 
 ## Usage
 
-Prompt contract for every non-trivial task:
+The handoff contract lives in the `task` schema. Pi validates tool arguments against `parameters` before the tool runs and reports the missing property by name, so `agent_type`, `description`, and `prompt` are enforced rather than merely stated. Runtime validation is the second layer for what the schema cannot express: a stale `operation`, blank strings, and the reviewer cross-field requirement. `prompt` carries:
+
 - goal: the exact outcome wanted
-- parent_context: facts, decisions, and constraints learned outside referenced files
-- proposed_changes: one item per change, including intended semantics and acceptance implications; required and non-empty for a new reviewer task
 - scope and references: what to inspect, why each reference matters, and the base/diff to review; paths are evidence, not context handoff
 - non-goals: what to avoid or leave untouched
 - write/read policy: whether the child may edit or must stay read-only
 - acceptance criteria and stop condition: observable conditions that must be true before stopping
 - verification recipe: checks to run or evidence to gather
 
-Task-local Fast Mode is optional. Set `fast: true` or `fast: false` on a start/resume request; when omitted, the selected agent's optional `fast:` frontmatter value applies, then behavior defaults to `false`.
+Parent reasoning that lives outside the referenced files goes in `parent_context` and `proposed_changes` rather than in `prompt`.
+
+Task-local Fast Mode is optional and is not a request parameter: set `fast: true` or `fast: false` in the selected agent's frontmatter, or pass the `--fast` flag. Behavior defaults to `false`.
 
 ```json
 {
-  "operation": "start",
   "agent_type": "general",
   "description": "Implement focused fix",
-  "fast": true,
   "background": false,
   "prompt": "Goal: implement the bounded fix. Non-goals: do not change the model or thinking level. Write/read policy: edit only the requested files. Acceptance criteria: tests pass. Stop condition: the fix is verified. Verification: run the focused tests."
 }
@@ -105,9 +104,17 @@ Durable specialist conversation:
 }
 ```
 
-        `conversation_id` maps to a durable subagent run. Reused across calls
-        to keep specialist memory, e.g. a reusable research assistant.
-        Use `/task-sessions` to list known durable conversations.
+`conversation_id` maps to a durable subagent run. Reused across calls to keep specialist memory, e.g. a reusable research assistant. Use `/task` to list known durable conversations.
+
+## Task control
+
+Status and cancel are a user action, so they live on a command rather than on the model-facing tool:
+
+- `/task` or `/task list` — durable conversations
+- `/task status <id>` — inspect a task without touching its backend resources
+- `/task cancel <id>` — cancel a live tmux or HerdR background task; a cleanup failure reports `cleanup_pending` with a durable retry receipt
+
+`/task-sessions` remains an alias for the listing. A control request that is sent to the tool instead is rejected as an invalid start request rather than launched.
 
         Stored files:
 
@@ -127,23 +134,16 @@ If Pi restarts while background tasks are still running, pi-task restores them o
 
 ### Task control
 
-The existing `task` tool also exposes lifecycle control without starting another agent:
+Control is a user action, so it lives on the `/task` command rather than on the model-facing tool:
 
-```json
-{
-  "operation": "status",
-  "task_id": "task-id-or-conversation-id"
-}
+```
+/task status <task-id-or-conversation-id>
+/task cancel <task-id-or-conversation-id>
 ```
 
-```json
-{
-  "operation": "cancel",
-  "task_id": "task-id-or-conversation-id"
-}
-```
+`status` is read-only and resolves by task id, session name, or conversation id. Its structured details include lifecycle timestamps, elapsed milliseconds, runtime/session metadata, available transcript turn/tool counts, persisted result diagnostics, and a verified terminal exit code when an exit sentinel exists. `cancel` only closes a live task-owned tmux or strongly-identified HerdR resource and persists `cancelled` before cleanup. If cleanup fails, it reports `cleanup_pending` and keeps a durable retry receipt for the next restore. SDK background cancellation is reported as unsupported because the SDK backend currently does not retain a durable cancellation handle.
 
-`status` is read-only and resolves by task id, session name, or conversation id. Its structured details include lifecycle timestamps, elapsed milliseconds, runtime/session metadata, available transcript turn/tool counts, persisted result diagnostics, and a verified terminal exit code when an exit sentinel exists. `cancel` only closes a live task-owned tmux or strongly-identified HerdR resource and persists `cancelled` before cleanup. If cleanup fails, the tool reports `cleanup_pending` and keeps a durable retry receipt for the next restore. SDK background cancellation is reported as unsupported because the SDK backend currently does not retain a durable cancellation handle. Start/resume requests may omit `operation` for compatibility or use `"operation": "start"` (or the equivalent `"resume"`) when a provider requires an explicit mode; never combine `status`/`cancel` with start fields. A rejected start/resume request returns a targeted reason naming each invalid field (for example `agent_type must be a string; prompt must be a string`) instead of one generic message.
+A start/resume request that is missing a required field returns a targeted reason naming each one (for example `prompt must be a string; description must be a string`) instead of one generic message. A payload that still carries `operation` is rejected as an invalid start request, so a stale control call cannot launch work.
 
 ## Agent precedence
 
@@ -232,6 +232,7 @@ That means the tmux pane died before a session JSONL result was available — no
 npm install
 npm run typecheck
 npm test
+npm run cost    # model-visible task surface budget, in tokens
 npm run smoke   # requires `pi` on PATH; checks peer version
 npm run build
 npm pack --dry-run

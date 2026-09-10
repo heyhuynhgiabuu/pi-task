@@ -111,7 +111,6 @@ import { handleTaskControl } from "./task-control-api.js";
 import {
   parseTaskControlRequest,
   parseTaskStartRequest,
-  taskControlRequestError,
   taskStartRequestError,
 } from "./task-control.js";
 
@@ -403,16 +402,8 @@ export default function (pi: ExtensionAPI) {
 
         async execute(_toolCallId, params, signal, onUpdate, ctx) {
       try {
-      const controlError = taskControlRequestError(params);
-      if (controlError) {
-        return {
-          content: [{ type: "text" as const, text: controlError }],
-          details: { phase: "failed" as const, error: "invalid_task_control_request" },
-          isError: true,
-        };
-      }
-      const controlRequest = parseTaskControlRequest(params);
-      if (controlRequest) return controlTask(controlRequest);
+      // Control requests (status/cancel) are a user action and live on the
+      // `/task` command, so every tool call here starts or resumes work.
       const parsedTaskParams = parseTaskStartRequest(params);
       if (!parsedTaskParams) {
         const reason = taskStartRequestError(params) ?? "expected a start/resume request";
@@ -939,30 +930,61 @@ export default function (pi: ExtensionAPI) {
         renderResult,
   });
 
+  /** Durable conversation rows for a pi dir, or a reason they could not be read. */
+  const taskSessionListing = (cwd: string): { text: string; level: "info" | "error" } => {
+    try {
+      const { piDir } = discoverAgents(cwd);
+      const registry = readTaskSessionsRegistry(piDir);
+      const rows = Object.entries(registry)
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([conversationId, entry]) => `- ${conversationId} -> ${entry.task_id}`);
+      return {
+        text: rows.length > 0
+          ? `Durable pi-task conversations:\n${rows.join("\n")}`
+          : "No durable pi-task conversations found.",
+        level: "info",
+      };
+    } catch (error) {
+      return {
+        text: error instanceof Error
+          ? `${error.message} Repair the file before retrying.`
+          : `Could not read durable pi-task conversations: ${String(error)}`,
+        level: "error",
+      };
+    }
+  };
+
   pi.registerCommand("task-sessions", {
     description: "List durable pi-task conversations",
     handler: async (_args, ctx) => {
-      const cwd = ctx.sessionManager?.getCwd?.() ?? process.cwd();
-      const { piDir } = discoverAgents(cwd);
-      try {
-        const registry = readTaskSessionsRegistry(piDir);
-        const rows = Object.entries(registry)
-          .sort(([a], [b]) => a.localeCompare(b))
-          .map(([conversationId, entry]) => `- ${conversationId} -> ${entry.task_id}`);
-        ctx.ui.notify(
-          rows.length > 0
-            ? `Durable pi-task conversations:\n${rows.join("\n")}`
-            : "No durable pi-task conversations found.",
-          "info",
-        );
-      } catch (error) {
-        ctx.ui.notify(
-          error instanceof Error
-            ? `${error.message} Repair the file before retrying.`
-            : `Could not read durable pi-task conversations: ${String(error)}`,
-          "error",
-        );
+      const listing = taskSessionListing(ctx.sessionManager?.getCwd?.() ?? process.cwd());
+      ctx.ui.notify(listing.text, listing.level);
+    },
+  });
+
+  /**
+   * Task control for the user.
+   *
+   * Status and cancel used to be tool operations, which cost the model a turn
+   * to reach and every turn a schema entry to describe. They are a user action,
+   * so they belong on a command.
+   */
+  pi.registerCommand("task", {
+    description: "List tasks, or inspect or cancel one: /task [list | status <id> | cancel <id>]",
+    handler: async (args, ctx) => {
+      const [subcommand, id] = String(args ?? "").trim().split(/\s+/).filter(Boolean);
+      if (subcommand !== "status" && subcommand !== "cancel") {
+        const listing = taskSessionListing(ctx.sessionManager?.getCwd?.() ?? process.cwd());
+        ctx.ui.notify(listing.text, listing.level);
+        return;
       }
+      const request = parseTaskControlRequest({ operation: subcommand, task_id: id });
+      if (!request) {
+        ctx.ui.notify(`/task ${subcommand} needs a task id. Run /task to list them.`, "error");
+        return;
+      }
+      const result = await controlTask(request);
+      ctx.ui.notify(result.content[0].text.trim(), result.isError ? "error" : "info");
     },
   });
 }

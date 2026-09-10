@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import taskExtension from "../src/index.js";
-import { TASK_PROMPT_INSTRUCTIONS } from "../src/helpers.js";
+import { TASK_PROMPT_INSTRUCTIONS, TASK_TOOL_DESCRIPTION } from "../src/helpers.js";
 import { buildTaskFollowUpPrompt, buildTaskPrompt, taskParametersSchema } from "../src/tool/index.js";
 import { resolveTaskCwd } from "../src/task-cwd.js";
 import { upsertTaskSessionHistory } from "../src/conversation.js";
@@ -930,9 +930,18 @@ if (process.platform !== "win32") {
   // Guidance must not be duplicated in a second model-visible block:
   // promptGuidelines were removed and folded into the tool description.
   assert.ok(!indexSrc.includes("promptGuidelines"), t + " no duplicated guidelines block");
-  assert.ok(schemaSrc.toLowerCase().includes("set cwd to an absolute existing directory"), t + " cwd hint");
-  assert.ok(helpersSrc.includes("file paths alone are not a context handoff"), t + " handoff guidance");
-  assert.ok(helpersSrc.includes("parent-synthesized facts, decisions"), t + " context handoff folded into description");
+  // Assert the rules, not the wording: a source-grep for an exact sentence
+  // fails on any reword and does not describe the contract.
+  const schemaProperties = (taskParametersSchema() as {
+    properties?: Record<string, { description?: string }>;
+  }).properties;
+  assert.match(schemaProperties?.cwd?.description ?? "", /absolute existing directory/i, t + " cwd hint");
+  assert.match(TASK_TOOL_DESCRIPTION, /referenced files are evidence, not a handoff/i, t + " handoff guidance");
+  assert.match(
+    schemaProperties?.parent_context?.description ?? "",
+    /outside the referenced files/i,
+    t + " context handoff carried by a field",
+  );
   // Schema descriptions are lean call-time pointers, not a second copy of
   // the prompt contract (which lives in the tool description).
   const schemaDescs = [...schemaSrc.matchAll(/description:\s*(?:\n\s*)?"([^"]+)"/g)].map((m) => m[1]);

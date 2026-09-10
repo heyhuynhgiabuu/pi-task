@@ -842,11 +842,18 @@ export function parseBool(value: unknown): boolean | undefined {
   return undefined;
 }
 
+/**
+ * Whether a child runs with the priority service tier.
+ *
+ * An agent's own frontmatter is the explicit setting, so it wins; the parent's
+ * `--fast` flag is the default for every child. `--fast` on the parent reaches
+ * children through here, which is why the task tool needs no parameter for it.
+ */
 export function resolveTaskFastMode(
-  taskFast: boolean | undefined,
   agentFast: boolean | undefined,
+  sessionFast: boolean,
 ): boolean {
-  return taskFast ?? agentFast ?? false;
+  return agentFast ?? sessionFast;
 }
 
 /** Turn limits (issue #19) must be positive integers; anything else is unlimited. */

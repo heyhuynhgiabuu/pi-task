@@ -10,8 +10,8 @@ import { Type, type Static } from "typebox";
  * `operation`, blank strings, the reviewer cross-field requirement.
  *
  * Deliberately absent: `operation` (start and resume are told apart by
- * `task_id`; status and cancel belong to `/task`) and `fast` (a user
- * preference, set by agent frontmatter or the `--fast` flag).
+ * `task_id`; status and cancel belong to `/task`) and `fast` (a session or
+ * agent setting, so `pi --fast` and agent frontmatter carry it).
  *
  * `conversation_id` stays. It is not a synonym for `task_id`: the durable
  * registry is keyed by conversation, and the conversation-resume path is only

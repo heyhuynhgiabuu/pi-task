@@ -32,7 +32,6 @@ export interface TaskStartRequest {
   cwd?: string;
   task_id?: string;
   conversation_id?: string;
-  fast?: boolean;
   background?: boolean;
   compare?: boolean;
 }
@@ -200,11 +199,16 @@ function validateTaskStartRequest(value: unknown): TaskStartValidation {
   const candidate = value as Record<string, unknown>;
   const problems: string[] = [];
 
-  const operation = candidate.operation;
-  if (operation !== undefined && operation !== "start" && operation !== "resume") {
-    problems.push(
-      `operation must be "start" or "resume" (or omitted); received ${JSON.stringify(operation)}`,
-    );
+  // `operation` and `fast` left the tool. They are rejected rather than
+  // ignored: a control payload must not launch work, and silently dropping a
+  // service-tier preference would downgrade the child without saying so.
+  for (const [field, replacement] of [
+    ["operation", "start and resume are told apart by task_id, and status and cancel live on the /task command"],
+    ["fast", "pass --fast to the parent, or set fast in the agent's frontmatter"],
+  ] as const) {
+    if (candidate[field] !== undefined) {
+      problems.push(`${field} is no longer a task parameter; ${replacement}`);
+    }
   }
   for (const field of ["agent_type", "prompt", "description"] as const) {
     if (typeof candidate[field] !== "string") problems.push(`${field} must be a string`);
@@ -215,9 +219,6 @@ function validateTaskStartRequest(value: unknown): TaskStartValidation {
     if (candidate[field] !== undefined && typeof candidate[field] !== "string") {
       problems.push(`${field} must be a string`);
     }
-  }
-  if (candidate.fast !== undefined && typeof candidate.fast !== "boolean") {
-    problems.push("fast must be a boolean");
   }
   if (candidate.background !== undefined && typeof candidate.background !== "boolean") {
     problems.push("background must be a boolean");
@@ -292,7 +293,6 @@ function validateTaskStartRequest(value: unknown): TaskStartValidation {
       ...(typeof candidate.cwd === "string" ? { cwd: candidate.cwd } : {}),
       ...(typeof candidate.task_id === "string" ? { task_id: candidate.task_id } : {}),
       ...(typeof candidate.conversation_id === "string" ? { conversation_id: candidate.conversation_id } : {}),
-      ...(typeof candidate.fast === "boolean" ? { fast: candidate.fast } : {}),
       ...(typeof candidate.background === "boolean" ? { background: candidate.background } : {}),
       ...(typeof candidate.compare === "boolean" ? { compare: candidate.compare } : {}),
     },

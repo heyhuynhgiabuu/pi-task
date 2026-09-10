@@ -92,6 +92,7 @@ process.on("exit", () => {
     },
     registerMessageRenderer() {},
       registerFlag() {},
+      getFlag() { return undefined; },
     registerTool(value: typeof tool) {
       tool = value;
     },
@@ -169,6 +170,7 @@ if (process.platform !== "win32") {
       },
       registerMessageRenderer() {},
       registerFlag() {},
+      getFlag() { return undefined; },
       registerTool(value: typeof tool) {
         tool = value;
       },
@@ -279,6 +281,7 @@ if (process.platform !== "win32") {
       },
       registerMessageRenderer() {},
       registerFlag() {},
+      getFlag() { return undefined; },
       registerTool(value: typeof tool) {
         tool = value;
       },
@@ -354,6 +357,7 @@ if (process.platform !== "win32") {
       },
       registerMessageRenderer() {},
       registerFlag() {},
+      getFlag() { return undefined; },
       registerTool(value: typeof tool) {
         tool = value;
       },
@@ -429,6 +433,7 @@ if (process.platform !== "win32") {
       },
       registerMessageRenderer() {},
       registerFlag() {},
+      getFlag() { return undefined; },
       registerTool(value: typeof tool) {
         tool = value;
       },
@@ -516,6 +521,7 @@ if (process.platform !== "win32") {
       },
       registerMessageRenderer() {},
       registerFlag() {},
+      getFlag() { return undefined; },
       registerTool(value: typeof tool) {
         tool = value;
       },
@@ -620,6 +626,7 @@ if (process.platform !== "win32") {
       },
       registerMessageRenderer() {},
       registerFlag() {},
+      getFlag() { return undefined; },
       registerTool(value: typeof tool) {
         tool = value;
       },
@@ -734,6 +741,7 @@ if (process.platform !== "win32") {
       },
       registerMessageRenderer() {},
       registerFlag() {},
+      getFlag() { return undefined; },
       registerTool(value: typeof tool) {
         tool = value;
       },
@@ -839,6 +847,7 @@ if (process.platform !== "win32") {
       },
       registerMessageRenderer() {},
       registerFlag() {},
+      getFlag() { return undefined; },
       registerTool(value: typeof tool) {
         tool = value;
       },
@@ -1003,6 +1012,7 @@ if (process.platform !== "win32") {
       },
       registerMessageRenderer() {},
       registerFlag() {},
+      getFlag() { return undefined; },
       registerTool(value: typeof tool) {
         tool = value;
       },
@@ -1080,6 +1090,7 @@ if (process.platform !== "win32") {
       },
       registerMessageRenderer() {},
       registerFlag() {},
+      getFlag() { return undefined; },
       registerTool(value: typeof tool) {
         tool = value;
       },
@@ -1262,6 +1273,7 @@ if (process.platform !== "win32") {
       },
       registerMessageRenderer() {},
       registerFlag() {},
+      getFlag() { return undefined; },
       registerTool() {},
       registerCommand() {},
       appendEntry() {},
@@ -1409,6 +1421,7 @@ if (process.platform !== "win32") {
       },
       registerMessageRenderer() {},
       registerFlag() {},
+      getFlag() { return undefined; },
       registerTool(value: typeof tool) {
         tool = value;
       },

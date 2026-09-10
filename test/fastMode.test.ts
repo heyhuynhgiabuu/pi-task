@@ -56,16 +56,14 @@ function createFastStreamHarness(models: string[]) {
   return { agentDir, calls, stream };
 }
 
-test("fast is not a model-facing parameter", () => {
+test("fast is a session and agent setting, not a task parameter", () => {
   const schema = taskParametersSchema() as {
     properties?: Record<string, unknown>;
     required?: string[];
   };
 
-  // Choosing a service tier is a user preference, not a model decision, and it
-  // is already reachable from agent frontmatter and the --fast flag. Keeping it
-  // out of the schema also keeps its provider-specific wording out of every
-  // turn's prompt.
+  // `pi --fast` covers the session and agent frontmatter covers one agent, so
+  // the model has nothing to choose here and the field stays out of the prompt.
   assert.equal(schema.properties?.fast, undefined);
   assert.equal(Boolean(schema.required?.includes("fast")), false);
 });

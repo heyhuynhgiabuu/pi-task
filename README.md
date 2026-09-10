@@ -51,7 +51,7 @@ The handoff contract lives in the `task` schema. Pi validates tool arguments aga
 
 Parent reasoning that lives outside the referenced files goes in `parent_context` and `proposed_changes` rather than in `prompt`.
 
-Task-local Fast Mode is optional and is not a request parameter: set `fast: true` or `fast: false` in the selected agent's frontmatter, or pass the `--fast` flag. Behavior defaults to `false`.
+Task-local Fast Mode is optional. `pi --fast` applies the priority service tier to every child of that session; an agent's `fast: true` or `fast: false` frontmatter overrides it for that agent. Behavior defaults to `false`. This covers children only — `--fast` on the parent does not change the parent's own model calls.
 
 ```json
 {
@@ -120,14 +120,14 @@ Durable specialist conversation:
 
     Note: true conversation resume requires the tmux/CLI backend so Pi can reopen the saved subagent session. SDK fallback can run foreground or background one-shot tasks, but it cannot resume a prior Pi session.
 
-If Pi restarts while background tasks are still running, pi-task restores them on startup. Treat restored tasks as still in flight: do not relaunch overlapping work unless you intentionally want a second competing run. An active background task cannot be converted into a foreground relaunch; steer it in background mode or wait for completion. Use `/task-sessions` to inspect what was restored before taking action.
+If Pi restarts while background tasks are still running, pi-task restores them on startup. Treat restored tasks as still in flight: do not relaunch overlapping work unless you intentionally want a second competing run. An active background task cannot be converted into a foreground relaunch; steer it in background mode or wait for completion. Use `/task` to inspect what was restored before taking action.
 
 ### Task control
 
 Control is a user action, so it lives on the `/task` command rather than on the model-facing tool:
 
 ```
-/task              # list durable conversations (also /task list, /task-sessions)
+/task              # list durable conversations (also /task list)
 /task status <task-id-or-conversation-id>
 /task cancel <task-id-or-conversation-id>
 ```

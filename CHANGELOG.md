@@ -21,16 +21,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 - `/task` command for task control: `/task` or `/task list` lists durable
   conversations, `/task status <id>` inspects a task, and `/task cancel <id>`
-  cancels a live one. `/task-sessions` remains an alias for the listing.
+  cancels a live one.
 - `npm run cost` prints the model-visible `task` surface budget.
 
 ### Removed
 
-- `operation` on the tool. Start and resume are told apart by `task_id`, and a
-  payload that still carries `operation` is rejected as an invalid start request
-  so a stale control call cannot launch work.
-- `fast` on the tool. It is a user preference: set it in agent frontmatter or
-  pass the `--fast` flag.
+- `operation` and `fast` on the tool. Start and resume are told apart by
+  `task_id`, status and cancel live on the `/task` command, and `fast` is a
+  session flag plus agent frontmatter. A payload that still carries either field
+  is rejected rather than ignored, so a stale control call cannot launch work and
+  a dropped service-tier preference cannot silently downgrade a child.
+
+### Changed (continued)
+
+- `pi --fast` now reaches the children. The parent registered the flag but only
+  the child branch read it, so the session flag did nothing; a child's fast mode
+  was reachable only from the task request or agent frontmatter. Children now
+  inherit the session flag, and an agent's frontmatter still overrides it.
+- The parent's own model calls are unchanged: the provider bridge stays scoped to
+  children, so `--fast` on the parent does not make the parent itself fast.
 
 ## [0.7.2] - 2026-09-08
 

@@ -7,7 +7,6 @@ import { readRegistry, upsertTaskSessionHistory, writeRegistry } from "../src/co
 import registerTaskExtension from "../src/index.js";
 import { completeTask as persistCompletedTask } from "../src/lifecycle/completion.js";
 import { handleTaskControl } from "../src/task-control-api.js";
-import { taskParametersSchema } from "../src/tool/schema.js";
 import {
   decideCancellation,
   findTaskRecord,
@@ -38,7 +37,7 @@ test("task start parsing supplies runtime validation for the flat provider schem
     agent_type: "explore",
     description: "Inspect the repository",
     prompt: "Map the repository.",
-  })?.agent_type, "explore");
+  }), undefined);
   assert.equal(parseTaskStartRequest({ operation: "status" }), undefined);
   assert.equal(parseTaskStartRequest({
     agent_type: "explore",
@@ -47,23 +46,18 @@ test("task start parsing supplies runtime validation for the flat provider schem
   }), undefined);
 });
 
-test("fast survives parsing as a compatibility setting but is not advertised", () => {
+test("fast is rejected as a removed task parameter", () => {
   const base = {
     agent_type: "explore",
     description: "Inspect the repository",
     prompt: "Map the repository.",
   };
 
-  // `fast` left the model-facing schema — it is a user preference, set by agent
-  // frontmatter or the --fast flag — but the parser still accepts it so a
-  // resumed session carrying the old shape keeps working.
-  assert.equal(
-    "fast" in ((taskParametersSchema() as unknown as { properties: object }).properties),
-    false,
+  assert.equal(parseTaskStartRequest({ ...base, fast: true }), undefined);
+  assert.match(
+    taskStartRequestError({ ...base, fast: true })!,
+    /^fast is no longer a task parameter/,
   );
-  assert.equal(parseTaskStartRequest({ ...base, fast: true })?.fast, true);
-  assert.equal(parseTaskStartRequest({ ...base, fast: false })?.fast, false);
-  assert.equal(parseTaskStartRequest({ ...base, fast: "true" }), undefined);
   assert.equal(parseTaskControlRequest({
     operation: "status",
     task_id: "task-1",
@@ -119,31 +113,31 @@ test("reviewer starts require structured parent context and proposed semantics",
   ]);
 });
 
-test("start parsing accepts the resume alias and reports targeted rejection reasons", () => {
+test("start parsing rejects the removed operation field", () => {
   const base = {
     agent_type: "explore",
     description: "Inspect the repository",
     prompt: "Map the repository.",
   };
 
-  // The alias is no longer advertised — start and resume are told apart by
-  // task_id — but the parser still accepts it for a session whose stored
-  // arguments predate the change. The alias parses exactly like an explicit
-  // start.
-  const resumed = parseTaskStartRequest({ ...base, operation: "resume" });
-  assert.equal(resumed?.agent_type, "explore");
-  assert.equal(resumed?.description, "Inspect the repository");
+  // Start and resume are told apart by task_id, and status and cancel live on
+  // the /task command. The field is rejected rather than aliased, so a stale
+  // control payload cannot be read as a start request and launched.
+  for (const operation of ["start", "resume", "status", "cancel", "deploy"]) {
+    assert.equal(
+      parseTaskStartRequest({ ...base, operation }),
+      undefined,
+      `operation ${operation} is rejected`,
+    );
+    assert.match(
+      taskStartRequestError({ ...base, operation })!,
+      /^operation is no longer a task parameter/,
+      `operation ${operation} gets an actionable reason`,
+    );
+  }
 
   // Valid starts produce no error text.
   assert.equal(taskStartRequestError(base), undefined);
-  assert.equal(taskStartRequestError({ ...base, operation: "start" }), undefined);
-  assert.equal(taskStartRequestError({ ...base, operation: "resume" }), undefined);
-
-  // Unknown operations get a targeted, actionable reason instead of a generic one.
-  assert.match(
-    taskStartRequestError({ ...base, operation: "deploy" })!,
-    /^operation must be "start" or "resume" \(or omitted\); received "deploy"$/,
-  );
 
   // Missing or mistyped required fields are each named.
   assert.equal(
@@ -151,13 +145,12 @@ test("start parsing accepts the resume alias and reports targeted rejection reas
     "description must be a string",
   );
   assert.equal(
-    taskStartRequestError({ operation: "start", agent_type: 7, prompt: 42, description: null }),
+    taskStartRequestError({ agent_type: 7, prompt: 42, description: null }),
     "agent_type must be a string; prompt must be a string; description must be a string",
   );
 
   // Optional fields with wrong types are named too.
   assert.equal(taskStartRequestError({ ...base, background: "true" }), "background must be a boolean");
-  assert.equal(taskStartRequestError({ ...base, fast: 1 }), "fast must be a boolean");
   assert.equal(taskStartRequestError({ ...base, task_id: 123 }), "task_id must be a string");
   assert.equal(
     taskStartRequestError({ ...base, cwd: "/tmp", workspace_group: [] }),
@@ -217,6 +210,7 @@ test("task tool refuses a control-shaped payload instead of launching work", asy
     },
     registerMessageRenderer() {},
       registerFlag() {},
+      getFlag() { return undefined; },
     registerTool(definition: CapturedTaskTool) {
       tool = definition;
     },
@@ -242,13 +236,13 @@ test("task tool refuses a control-shaped payload instead of launching work", asy
       prompt: "Review the current working tree.",
       description: "Review source changes",
     }, new AbortController().signal, undefined, { cwd: isolatedCwd });
-    assert.match(malformed.content[0]?.text ?? "", /operation must be/);
+    assert.match(malformed.content[0]?.text ?? "", /operation is no longer a task parameter/);
     assert.equal(malformed.details?.error, "invalid_task_request");
 
     const missingId = await tool.execute("call-2", {
       operation: "status",
     }, new AbortController().signal, undefined, { cwd: isolatedCwd });
-    assert.match(missingId.content[0]?.text ?? "", /operation must be/);
+    assert.match(missingId.content[0]?.text ?? "", /operation is no longer a task parameter/);
     assert.equal(missingId.details?.error, "invalid_task_request");
 
     const invalidStart = await tool.execute("call-3", {
@@ -324,6 +318,7 @@ test("task control is reachable from the /task command", async () => {
     },
     registerMessageRenderer() {},
     registerFlag() {},
+    getFlag() { return undefined; },
     registerTool() {},
     registerCommand(name: string, options: Command) {
       commands.set(name, options);

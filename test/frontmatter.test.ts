@@ -79,12 +79,11 @@ No description.`,
 }
 
 {
-  const t = "resolveTaskFastMode gives explicit task fast precedence over agent defaults";
-  assert.equal(resolveTaskFastMode(undefined, true), true, t + " omitted task uses agent true");
-  assert.equal(resolveTaskFastMode(undefined, false), false, t + " omitted task uses agent false");
-  assert.equal(resolveTaskFastMode(undefined, undefined), false, t + " omitted defaults false");
-  assert.equal(resolveTaskFastMode(true, false), true, t + " explicit true wins");
-  assert.equal(resolveTaskFastMode(false, true), false, t + " explicit false wins");
+  const t = "resolveTaskFastMode prefers the agent setting over the session flag";
+  assert.equal(resolveTaskFastMode(undefined, true), true, t + ": the session flag applies when the agent is silent");
+  assert.equal(resolveTaskFastMode(undefined, false), false, t + ": no flag and no setting");
+  assert.equal(resolveTaskFastMode(true, false), true, t + ": agent true wins");
+  assert.equal(resolveTaskFastMode(false, true), false, t + ": agent false wins");
 }
 
 {

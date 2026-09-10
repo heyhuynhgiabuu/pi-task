@@ -89,7 +89,6 @@ test("the schema is the only home for the handoff contract", () => {
 	// preserve a root anyOf union, so the schema has to stay flat.
 	assert.equal("anyOf" in schema, false, "the schema stays a flat object");
 	assert.equal("operation" in schema.properties, false, "control is not a tool operation");
-	assert.equal("fast" in schema.properties, false, "the service tier is not a model decision");
 
 	// Each field description carries its own rule, so the tool description does
 	// not have to restate it on every turn.

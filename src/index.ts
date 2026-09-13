@@ -26,7 +26,6 @@ import {
   BACKGROUND_CHECK_MS,
   COUNT_POLL_MS,
   MAX_POLL_ERRORS,
-  TASK_TIMEOUT_MS,
 } from "./constants.js";
 import { registerParentFastMode } from "./fast.js";
 export { createTaskFastModeStream, registerTaskFastModeBridge } from "./fast-mode.js";
@@ -43,7 +42,8 @@ import {
 import {
   buildPiArgs,
   buildTaskToolDescription,
-      discoverAgents,
+  discoverAgents,
+  envHardTimeoutMs,
   resolveTaskAgentPreflight,
   resolveTaskFastMode,
   resolveTaskThinking,
@@ -346,7 +346,7 @@ export default function (pi: ExtensionAPI) {
         const ctx = taskWidget.getContext();
         return ctx ? deliveryGuard.allows(sessionViewOf(ctx), id) : true;
       },
-      TASK_TIMEOUT_MS,
+      hardTimeoutMs: envHardTimeoutMs(),
       MAX_POLL_ERRORS,
       piDir,
       pi,

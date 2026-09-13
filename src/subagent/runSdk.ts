@@ -151,6 +151,19 @@ function extractAssistantText(content: unknown): string {
     .join("\n");
 }
 
+const MAX_TIMER_MS = 2_147_483_647; // above this Node coerces the delay to 1 ms
+
+/** Delay for the run's timeout timer, or undefined when no timer must be
+ * armed: `undefined` means the caller configured no limit and `Infinity`
+ * means the limit is disabled (issue #28). Values past the setTimeout range
+ * are clamped — Node coerces those to 1 ms, which would abort the run
+ * immediately instead of waiting for the requested ceiling.
+ */
+export function armableTimeoutMs(timeoutMs: number | undefined): number | undefined {
+  if (timeoutMs === undefined || !Number.isFinite(timeoutMs)) return undefined;
+  return Math.min(timeoutMs, MAX_TIMER_MS);
+}
+
 export async function runSdkSubagent(options: RunSdkSubagentOptions): Promise<{
   output: string;
   sessionPath?: string;
@@ -228,8 +241,9 @@ export async function runSdkSubagent(options: RunSdkSubagentOptions): Promise<{
     const onAbort = () => interrupt("cancelled");
     if (options.signal?.aborted) onAbort();
     else options.signal?.addEventListener("abort", onAbort, { once: true });
-    if (options.timeoutMs !== undefined) {
-      timeoutHandle = setTimeout(() => interrupt("timeout"), options.timeoutMs);
+    const armedTimeoutMs = armableTimeoutMs(options.timeoutMs);
+    if (armedTimeoutMs !== undefined) {
+      timeoutHandle = setTimeout(() => interrupt("timeout"), armedTimeoutMs);
     }
     try {
       if (interruption) throw interruption;

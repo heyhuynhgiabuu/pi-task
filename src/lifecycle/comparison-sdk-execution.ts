@@ -2,9 +2,9 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { TASK_TIMEOUT_MS } from "../constants.js";
 import {
   assessTaskResult,
+  envHardTimeoutMs,
   formatComparisonReport,
   parseResultXml,
   subscribeToolEvents,
@@ -144,7 +144,7 @@ export async function executeSdkComparison({
               skillPaths,
               fast,
               signal,
-              timeoutMs: TASK_TIMEOUT_MS,
+              timeoutMs: envHardTimeoutMs(),
             });
             const parsed = parseResultXml(res.output);
             const assess = assessTaskResult(parsed);
@@ -291,7 +291,7 @@ export async function executeSdkComparison({
           systemPrompt: agent.body,
           skillPaths,
           fast,
-          timeoutMs: TASK_TIMEOUT_MS,
+          timeoutMs: envHardTimeoutMs(),
         }),
       onComplete: (result) => {
         bg.status = "done";

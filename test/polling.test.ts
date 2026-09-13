@@ -19,6 +19,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { BACKGROUND_POLL_CONCURRENCY } from "../src/constants.js";
+import { envHardTimeoutMs } from "../src/helpers.js";
 import { DurableStateError } from "../src/conversation.js";
 import { startBackgroundPolling } from "../src/lifecycle/polling.js";
 import { startToolStatsPolling } from "../src/lifecycle/toolStats.js";
@@ -31,7 +32,7 @@ function makeDeps(
     backgroundTasks: Map<any, any>;
     checkTaskCompletion: any;
     clearTaskWidgetIfIdle: any;
-    TASK_TIMEOUT_MS: number;
+    hardTimeoutMs: number;
     MAX_POLL_ERRORS: number;
     piDir: string;
     pi: any;
@@ -43,7 +44,7 @@ function makeDeps(
     checkTaskCompletion: async () => ({ status: "running" }),
     clearTaskWidgetIfIdle: () => {},
     completeTask: () => {},
-    TASK_TIMEOUT_MS: 10_000,
+    hardTimeoutMs: 10_000,
     MAX_POLL_ERRORS: 3,
     piDir: "/tmp",
     pi: { __pi: "captured" },
@@ -52,6 +53,70 @@ function makeDeps(
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
+
+{
+  const t = "a disabled wall-clock ceiling never times out a stale task";
+  const backgroundTasks = new Map<any, any>();
+  backgroundTasks.set("t1", {
+    id: "t1",
+    dir: "/tmp",
+    sessionName: "s1",
+    paneId: undefined,
+    originalPane: null,
+    startedAt: Date.now() - 2 * 60 * 60 * 1000, // two hours old
+  });
+  let settled: any;
+  const stop = startBackgroundPolling(
+    makeDeps({
+      backgroundTasks,
+      hardTimeoutMs: envHardTimeoutMs({ PI_TASK_HARD_TIMEOUT_MINUTES: "0" }),
+      completeTask: (options: any) => {
+        settled = options;
+      },
+    }),
+    5,
+  );
+  await sleep(40);
+  stop();
+  assert.equal(settled, undefined, t);
+}
+
+{
+  const t = "the turn soft limit still settles when the wall clock is disabled";
+  const root = mkdtempSync(join(tmpdir(), "pi-task-polling-disabled-"));
+  try {
+    const taskId = "task-soft-limit";
+    mkdirSync(join(root, "sessions", taskId), { recursive: true });
+    const backgroundTasks = new Map<any, any>();
+    backgroundTasks.set(taskId, {
+      id: taskId,
+      dir: root,
+      sessionName: taskId,
+      paneId: undefined,
+      originalPane: null,
+      startedAt: Date.now() - 2 * 60 * 60 * 1000,
+      maxTurns: 3,
+      turns: 3,
+    });
+    let settled: { content: string; phase: string } | undefined;
+    const stop = startBackgroundPolling(
+      makeDeps({
+        backgroundTasks,
+        hardTimeoutMs: envHardTimeoutMs({ PI_TASK_HARD_TIMEOUT_MINUTES: "0" }),
+        completeTask: ({ content, phase }: any) => {
+          settled = { content, phase };
+        },
+      }),
+      5,
+    );
+    await sleep(40);
+    stop();
+    assert.equal(settled?.phase, "timeout", `${t}: limit phase`);
+    assert.match(settled?.content ?? "", /reached the 3-turn limit/, t);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
 
 {
   const t = "startBackgroundPolling returns a function (stop handle)";
@@ -145,7 +210,7 @@ function makeDeps(
     const stop = startBackgroundPolling(
       makeDeps({
         backgroundTasks,
-        TASK_TIMEOUT_MS: 0,
+        hardTimeoutMs: 0,
         completeTask: ({ content, phase }: any) => {
           settled = { content, phase };
         },

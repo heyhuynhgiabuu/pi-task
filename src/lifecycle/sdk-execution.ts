@@ -2,12 +2,12 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { TASK_TIMEOUT_MS } from "../constants.js";
 import { upsertTaskSessionHistory } from "../conversation.js";
 import {
   assessTaskResult,
   buildTaskEnvelope,
   completionDeliveryOptions,
+  envHardTimeoutMs,
   formatTaskIdPointer,
   parseResultXml,
   structuredResultPayload,
@@ -107,7 +107,7 @@ export async function executeSdkTask({
       skillPaths,
       fast,
       signal: task ? signal : undefined,
-      timeoutMs: TASK_TIMEOUT_MS,
+      timeoutMs: envHardTimeoutMs(),
     });
 
   if (isBackground) {

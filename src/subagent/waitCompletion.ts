@@ -35,7 +35,8 @@ export interface WaitForTaskCompletionOptions {
   artifactsDir?: string;
   taskId?: string;
   signal?: AbortSignal;
-  timeoutMs?: number;
+  /** Wall-clock ceiling in ms; `Infinity` disables it (issue #28). */
+  timeoutMs: number;
   pollMs?: number;
   sinceMs?: number;
   resourceExists?: () => ResourceProbe | Promise<ResourceProbe>;
@@ -198,7 +199,7 @@ export async function waitForTaskCompletion(
   options: WaitForTaskCompletionOptions,
 ): Promise<TaskCompletionSnapshot> {
   const started = Date.now();
-  const timeoutMs = options.timeoutMs ?? 30 * 60 * 1000;
+  const timeoutMs = options.timeoutMs;
   const pollMs = options.pollMs ?? 1000;
 
   while (Date.now() - started < timeoutMs) {

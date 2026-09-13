@@ -15,6 +15,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, parse } from "node:path";
 import { resolveAgentToolAllowlist } from "../src/agent-tools.js";
+import { TASK_TIMEOUT_MS } from "../src/constants.js";
 import {
   parseResultXml,
   extractTag,
@@ -40,6 +41,7 @@ import {
   formatComparisonReport,
   isTaskCompareAllowed,
   resolveCompareModels,
+  envHardTimeoutMs,
   type AgentConfig,
   type ComparisonRunResult,
 } from "../src/helpers.js";
@@ -1722,4 +1724,29 @@ console.log("ALL TASK HELPER TESTS PASSED");
     "Task ID: sync-task-1 — pass as task_id to resume this session.",
     t + " (pointer format)",
   );
+}
+
+{
+  const t =
+    "envHardTimeoutMs: PI_TASK_HARD_TIMEOUT_MINUTES ceiling with 0 disabling it";
+  const prev = process.env.PI_TASK_HARD_TIMEOUT_MINUTES;
+  try {
+    delete process.env.PI_TASK_HARD_TIMEOUT_MINUTES;
+    assert.equal(envHardTimeoutMs(), TASK_TIMEOUT_MS, t + " (unset keeps the default)");
+    process.env.PI_TASK_HARD_TIMEOUT_MINUTES = "0";
+    assert.equal(envHardTimeoutMs(), Number.POSITIVE_INFINITY, t + " (zero disables it)");
+    process.env.PI_TASK_HARD_TIMEOUT_MINUTES = "45";
+    assert.equal(envHardTimeoutMs(), 45 * 60_000, t + " (minutes become milliseconds)");
+    process.env.PI_TASK_HARD_TIMEOUT_MINUTES = " 10 ";
+    assert.equal(envHardTimeoutMs(), 10 * 60_000, t + " (whitespace is trimmed)");
+    process.env.PI_TASK_HARD_TIMEOUT_MINUTES = "banana";
+    assert.equal(envHardTimeoutMs(), TASK_TIMEOUT_MS, t + " (invalid keeps the default)");
+    process.env.PI_TASK_HARD_TIMEOUT_MINUTES = "-5";
+    assert.equal(envHardTimeoutMs(), TASK_TIMEOUT_MS, t + " (negative keeps the default)");
+    process.env.PI_TASK_HARD_TIMEOUT_MINUTES = "";
+    assert.equal(envHardTimeoutMs(), TASK_TIMEOUT_MS, t + " (empty keeps the default)");
+  } finally {
+    if (prev === undefined) delete process.env.PI_TASK_HARD_TIMEOUT_MINUTES;
+    else process.env.PI_TASK_HARD_TIMEOUT_MINUTES = prev;
+  }
 }

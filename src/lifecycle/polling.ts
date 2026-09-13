@@ -43,7 +43,8 @@ export interface BackgroundPollingDeps {
   deliveryGuard?: (taskId: string) => boolean;
   /** Notified with the completed task so the panel can keep a lingering row. */
   onTaskFinished?: (id: string, task: BackgroundTask) => void;
-  TASK_TIMEOUT_MS: number;
+  /** Resolved wall-clock ceiling in ms; `Infinity` when disabled (issue #28). */
+  hardTimeoutMs: number;
   MAX_POLL_ERRORS: number;
   piDir: string;
   pi: ExtensionAPI;
@@ -115,7 +116,7 @@ export function startBackgroundPolling(
     try {
       const sessionDir = join(task.dir, "sessions", id);
       const elapsed = Date.now() - task.startedAt;
-      if (elapsed > deps.TASK_TIMEOUT_MS) {
+      if (elapsed > deps.hardTimeoutMs) {
         if (deps.backgroundTasks.get(id) !== task) return;
         const terminalResult = getLastAssistantResultFromSessionDir(
           sessionDir,
@@ -124,7 +125,7 @@ export function startBackgroundPolling(
         );
         const timeoutContent =
           terminalResult?.content ||
-          `Task timed out after ${Math.round(deps.TASK_TIMEOUT_MS / 1000)}s without producing a result.`;
+          `Task timed out after ${Math.round(deps.hardTimeoutMs / 1000)}s without producing a result.`;
         settle(
           id,
           task,

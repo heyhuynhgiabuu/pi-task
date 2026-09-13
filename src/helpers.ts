@@ -12,6 +12,7 @@ import {
   resolveAgentToolAllowlist,
 } from "./agent-tools.js";
 import { parseMergedDisallowedTools } from "./policy.js";
+import { TASK_TIMEOUT_MS } from "./constants.js";
 import type { PiThinkingLevel } from "./thinking.js";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
@@ -899,6 +900,20 @@ function parsePositiveInt(value: unknown): number | undefined {
  */
 export function envTurnLimit(env: NodeJS.ProcessEnv = process.env): number | undefined {
   return parsePositiveInt(env.PI_TASK_MAX_TURNS);
+}
+
+/**
+ * Wall-clock safety ceiling (issue #28) from
+ * `PI_TASK_HARD_TIMEOUT_MINUTES`. Absent, empty, or invalid values keep the
+ * 30-minute default; `0` disables the ceiling entirely. Returned in
+ * milliseconds, where `Infinity` means "never time out".
+ */
+export function envHardTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = (env.PI_TASK_HARD_TIMEOUT_MINUTES ?? "").trim();
+  if (!raw) return TASK_TIMEOUT_MS;
+  const minutes = Number(raw);
+  if (!Number.isFinite(minutes) || minutes < 0) return TASK_TIMEOUT_MS;
+  return minutes === 0 ? Number.POSITIVE_INFINITY : minutes * 60_000;
 }
 
 function isAgentHidden(agent: AgentConfig): boolean {

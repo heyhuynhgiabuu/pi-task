@@ -1,4 +1,3 @@
-import { TASK_TIMEOUT_MS } from "../constants.js";
 import {
   findJsonlSessionByName,
   upsertTaskSessionHistory,
@@ -6,6 +5,7 @@ import {
 import {
   assessTaskResult,
   countToolUses,
+  envHardTimeoutMs,
   parseResultXml,
   type ComparisonRunResult,
 } from "../helpers.js";
@@ -130,7 +130,7 @@ export async function executeComparisonTerminalForeground({
           sessionName: task.sessionName,
           paneId: task.paneId,
           signal,
-          timeoutMs: TASK_TIMEOUT_MS,
+          timeoutMs: envHardTimeoutMs(),
           pollMs: 1000,
           sinceMs: task.startedAt,
           resourceExists: selectedBackend === "herdr"

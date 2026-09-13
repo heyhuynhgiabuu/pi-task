@@ -10,6 +10,7 @@
  */
 
 import { strict as assert } from "node:assert";
+import { setTimeout as sleep } from "node:timers/promises";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -299,6 +300,31 @@ for (const reason of ["error", "aborted"]) {
     });
     assert.equal(result.status, "failed", t);
     assert.match(result.content, /provider stayed unavailable/, t);
+  } finally {
+    cleanup(dir);
+  }
+}
+
+{
+  const t = "an infinite timeout keeps waiting instead of expiring immediately";
+  const dir = mkdtempSync(join(tmpdir(), "pi-task-wait-"));
+  try {
+    const sessionDir = join(dir, "sessions", "test-task");
+    mkdirSync(sessionDir, { recursive: true });
+    const controller = new AbortController();
+    const pending = waitForTaskCompletion({
+      sessionDir,
+      sessionName: "test-task",
+      paneId: undefined,
+      signal: controller.signal,
+      timeoutMs: Number.POSITIVE_INFINITY,
+      pollMs: 5,
+      resourceExists: () => "alive",
+    });
+    await sleep(30);
+    controller.abort();
+    const result = await pending;
+    assert.equal(result.status, "cancelled", `${t}: still waiting, not timed out`);
   } finally {
     cleanup(dir);
   }

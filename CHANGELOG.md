@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   mode, and the child session file), so `/task status` and transcript review
   work for them the way they already do for terminal foreground runs.
 - Task call rows and task result rows show a `sync`/`async` label.
+- The wall-clock safety ceiling is now configurable and can be disabled
+  (issue #28): `PI_TASK_HARD_TIMEOUT_MINUTES` takes a positive number of
+  minutes or `0` to disable the ceiling, keeping the 30-minute default for
+  absent or invalid values. The turn-based `max_turns` soft limit keeps
+  applying independently for terminal background tasks, and an SDK run no
+  longer arms its timeout timer for a disabled or oversized ceiling (Node
+  coerces such delays to 1 ms).
 
 ## [0.7.3] - 2026-09-10
 

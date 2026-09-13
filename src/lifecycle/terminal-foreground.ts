@@ -1,4 +1,3 @@
-import { TASK_TIMEOUT_MS } from "../constants.js";
 import {
   findJsonlSessionByName,
   upsertTaskSessionHistory,
@@ -7,6 +6,7 @@ import {
   assessTaskResult,
   buildTaskEnvelope,
   countToolUses,
+  envHardTimeoutMs,
   parseResultXml,
 } from "../helpers.js";
 import type { BackgroundTask, TerminalHandle } from "../types.js";
@@ -126,7 +126,7 @@ export async function executeTerminalForegroundTask({
     sessionName,
     paneId,
     signal,
-    timeoutMs: TASK_TIMEOUT_MS,
+    timeoutMs: envHardTimeoutMs(),
     pollMs: 1000,
     sinceMs: startedAt,
     resourceExists: selectedBackend === "herdr"

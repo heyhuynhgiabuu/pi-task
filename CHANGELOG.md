@@ -4,6 +4,20 @@ All notable changes to `@heyhuynhgiabuu/pi-task` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- Synchronous (`background: false`) task results now name their durable
+  `task_id` in the model-visible content, so a sync task can be resumed or
+  reviewed by the parent instead of only the async receipt carrying the id.
+  SDK and Claude Code tasks state that session resume is unavailable rather
+  than promising it.
+- SDK foreground runs now persist a durable task-session history row (status,
+  mode, and the child session file), so `/task status` and transcript review
+  work for them the way they already do for terminal foreground runs.
+- Task call rows and task result rows show a `sync`/`async` label.
+
 ## [0.7.3] - 2026-09-10
 
 ### Changed

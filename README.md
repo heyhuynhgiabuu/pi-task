@@ -123,6 +123,8 @@ Durable specialist conversation:
 
     Note: true conversation resume requires the tmux/CLI backend so Pi can reopen the saved subagent session. SDK fallback can run foreground or background one-shot tasks, but it cannot resume a prior Pi session.
 
+    A foreground (`background: false`) task result names its durable task id in the model-visible content (`Task ID: <id> — pass as task_id to resume this session.`), so the parent can resume the same session instead of repeating discovery. Pi terminal runs reopen the saved session; SDK and Claude Code runs report that session resume is unavailable and use the id for status and transcript review. Tool-call and result rows label the mode (`sync`/`async`).
+
 If Pi restarts while background tasks are still running, pi-task restores them on startup. Treat restored tasks as still in flight: do not relaunch overlapping work unless you intentionally want a second competing run. An active background task cannot be converted into a foreground relaunch; steer it in background mode or wait for completion. Use `/task` to inspect what was restored before taking action.
 
 ### Task control

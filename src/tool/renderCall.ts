@@ -22,6 +22,9 @@ export function renderCall(
   const description = String(args.description ?? "").trim();
   const toolUses = progress?.toolUses ?? 0;
   const elapsedMs = progress?.durationMs ?? 0;
+  // Pi passes the raw tool-call arguments here, and an omitted `background`
+  // means the async default — so this is the authoritative mode signal.
+  const mode = args.background === false ? "sync" : "async";
 
   const sep = theme.fg("muted", " • ");
 
@@ -34,7 +37,7 @@ export function renderCall(
         sep +
         theme.fg("success", formatElapsed(elapsedMs));
 
-  container.addChild(new Text(summary, 0, 0));
+  container.addChild(new Text(summary + sep + theme.fg("muted", mode), 0, 0));
 
   return container;
 }

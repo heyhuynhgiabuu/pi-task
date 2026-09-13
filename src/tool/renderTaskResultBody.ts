@@ -46,21 +46,26 @@ export function renderTaskResultBody(
 
   const container = new Container();
 
+  // Explicit sync/async label: `background` also drives the tight layout, but
+  // the mode was never stated, so a sync and an async result looked alike.
+  const stats: string[] = [];
+  if (typeof details.background === "boolean") {
+    stats.push(theme.fg("muted", details.background ? "async" : "sync"));
+  }
   if (typeof details.tool_uses === "number" && details.tool_uses > 0) {
-    const toolsLabel =
-      details.tool_uses === 1
-        ? "1 toolcall"
-        : `${details.tool_uses} toolcalls`;
-    const statsText =
-      " " +
-      theme.fg("muted", toolsLabel) +
-      (durationMs > 0
-        ? theme.fg("muted", " • ") + theme.fg("success", formatElapsed(durationMs))
-        : "");
-    container.addChild(new Text(statsText, 0, 0));
-  } else if (durationMs > 0) {
+    stats.push(
+      theme.fg(
+        "muted",
+        details.tool_uses === 1 ? "1 toolcall" : `${details.tool_uses} toolcalls`,
+      ),
+    );
+  }
+  if (durationMs > 0) {
+    stats.push(theme.fg("success", formatElapsed(durationMs)));
+  }
+  if (stats.length > 0) {
     container.addChild(
-      new Text(" " + theme.fg("success", formatElapsed(durationMs)), 0, 0),
+      new Text(" " + stats.join(theme.fg("muted", " • ")), 0, 0),
     );
   }
 

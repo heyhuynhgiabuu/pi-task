@@ -1677,4 +1677,49 @@ console.log("ALL TASK HELPER TESTS PASSED");
   assert.equal(structured.raw_status, "stalled", t + " (raw_status field)");
   assert.equal(structured.valid, false, t + " (valid field)");
   assert.equal(envelope.details.raw_status, "stalled", t + " (details raw_status)");
+  assert.equal(envelope.details.task_id, undefined, t + " (no task id without meta)");
+  assert.ok(
+    !(envelope.content[0]?.text ?? "").includes("Task ID:"),
+    t + " (no recovery pointer without a task id)",
+  );
+}
+
+{
+  const { parseResultXml, buildTaskEnvelope, formatTaskIdPointer } = await import(
+    "../src/helpers.js"
+  );
+  const t = "buildTaskEnvelope surfaces the durable task id to the parent model";
+  const parsed = parseResultXml("Status: success\n\nDone.");
+  const envelope = buildTaskEnvelope(parsed, {
+    agent_type: "general",
+    description: "d",
+    tool_uses: 1,
+    duration_ms: 10,
+    background: false,
+    task: { id: "sync-task-1", resumable: true },
+  });
+  const content = envelope.content[0]?.text ?? "";
+  assert.ok(content.startsWith("Status: success\n\nDone."), t + " (report retained)");
+  assert.match(content, /Task ID: sync-task-1/, t + " (content names the id)");
+  assert.match(content, /pass as task_id to resume/, t + " (content states resume)");
+  assert.equal(envelope.details.task_id, "sync-task-1", t + " (details task id)");
+
+  const sdkEnvelope = buildTaskEnvelope(parsed, {
+    agent_type: "general",
+    description: "d",
+    tool_uses: 1,
+    duration_ms: 10,
+    background: false,
+    task: { id: "sync-sdk-1", resumable: false },
+  });
+  assert.match(
+    sdkEnvelope.content[0]?.text ?? "",
+    /session resume is unavailable/,
+    t + " (non-resumable task does not promise resume)",
+  );
+  assert.equal(
+    formatTaskIdPointer({ id: "sync-task-1", resumable: true }),
+    "Task ID: sync-task-1 — pass as task_id to resume this session.",
+    t + " (pointer format)",
+  );
 }

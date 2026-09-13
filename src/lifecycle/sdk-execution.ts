@@ -3,10 +3,12 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { TASK_TIMEOUT_MS } from "../constants.js";
+import { upsertTaskSessionHistory } from "../conversation.js";
 import {
   assessTaskResult,
   buildTaskEnvelope,
   completionDeliveryOptions,
+  formatTaskIdPointer,
   parseResultXml,
   structuredResultPayload,
   subscribeToolEvents,
@@ -240,33 +242,40 @@ export async function executeSdkTask({
     };
   }
 
+  // SDK foreground work has no terminal resource, but it still owns a durable
+  // record: the task id and child session file are the recovery path for
+  // `/task status` and transcript review.
+  const historyBase = {
+    id,
+    agentType: agent.name,
+    description,
+    sessionName,
+    startedAt: foregroundTask!.startedAt,
+    piDir,
+    dir: artifactsDir,
+    cwd,
+    conversationId,
+    background: false,
+    ...durableParentOf(sessionViewOf(ctx)),
+    ownerPid: process.pid,
+  };
+  const clearForegroundRow = () => {
+    foregroundTasks.delete(id);
+    clearTaskWidgetIfIdle();
+  };
   try {
-    const { output, sessionPath } = await runSdkFallback(foregroundTask);
-    const finalOutput = output || "SDK subagent completed without assistant text.";
-    const parsed = parseResultXml(finalOutput);
-    const assessment = assessTaskResult(parsed);
-    const envelope = buildTaskEnvelope(parsed, {
-      agent_type: agent.name,
-      description,
-      tool_uses: foregroundTask!.toolUses,
-      duration_ms: Date.now() - foregroundTask!.startedAt,
-      background: false,
-    });
-    return {
-      content: envelope.content,
-      details: {
-        ...envelope.details,
-        phase: "done" as const,
-        execution_phase: "done" as const,
-        reported_status: assessment.reportedStatus,
-        raw_status: assessment.rawStatus,
-        result_valid: assessment.valid,
-        backend: "sdk" as const,
-        session_path: sessionPath,
-        conversation_id: conversationId,
-        full_output: parsed.raw.trim() || finalOutput,
-      },
-    };
+    upsertTaskSessionHistory(piDir, { ...historyBase, status: "running" });
+  } catch (error) {
+    // The run's cleanup lives in the finally below, which this throw would
+    // skip: a stranded foreground row keeps the widget alive indefinitely.
+    clearForegroundRow();
+    throw error;
+  }
+
+  let output: string;
+  let sessionPath: string | undefined;
+  try {
+    ({ output, sessionPath } = await runSdkFallback(foregroundTask));
   } catch (error) {
     const interrupted = error instanceof SdkSubagentInterruptedError;
     const phase = interrupted && error.kind === "cancelled"
@@ -275,9 +284,19 @@ export async function executeSdkTask({
         ? "timeout"
         : "failed";
     const message = error instanceof Error ? error.message : String(error);
+    upsertTaskSessionHistory(piDir, {
+      ...historyBase,
+      status: phase,
+      completedAt: Date.now(),
+    });
     return {
-      content: [{ type: "text" as const, text: `SDK task ${phase}: ${message}` }],
+      content: [{
+        type: "text" as const,
+        text: `SDK task ${phase}: ${message}\n\n${formatTaskIdPointer({ id, resumable: false })}`,
+      }],
       details: {
+        task_id: id,
+        background: false,
         phase,
         execution_phase: phase,
         status: "unknown",
@@ -289,7 +308,42 @@ export async function executeSdkTask({
       isError: phase === "failed",
     };
   } finally {
-    foregroundTasks.delete(id);
-    clearTaskWidgetIfIdle();
+    clearForegroundRow();
   }
+
+  const finalOutput = output || "SDK subagent completed without assistant text.";
+  const parsed = parseResultXml(finalOutput);
+  const assessment = assessTaskResult(parsed);
+  const envelope = buildTaskEnvelope(parsed, {
+    agent_type: agent.name,
+    description,
+    tool_uses: foregroundTask!.toolUses,
+    duration_ms: Date.now() - foregroundTask!.startedAt,
+    background: false,
+    task: { id, resumable: false },
+  });
+  upsertTaskSessionHistory(piDir, {
+    ...historyBase,
+    ...(sessionPath !== undefined ? { sessionRef: sessionPath } : {}),
+    status: "done",
+    reportedStatus: assessment.reportedStatus,
+    rawStatus: assessment.rawStatus,
+    resultValid: assessment.valid,
+    completedAt: Date.now(),
+  });
+  return {
+    content: envelope.content,
+    details: {
+      ...envelope.details,
+      phase: "done" as const,
+      execution_phase: "done" as const,
+      reported_status: assessment.reportedStatus,
+      raw_status: assessment.rawStatus,
+      result_valid: assessment.valid,
+      backend: "sdk" as const,
+      session_path: sessionPath,
+      conversation_id: conversationId,
+      full_output: parsed.raw.trim() || finalOutput,
+    },
+  };
 }

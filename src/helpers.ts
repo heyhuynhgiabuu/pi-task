@@ -423,6 +423,19 @@ ${errorBlock}${summaryBlock}${formatSection("Findings", run.findings)}${formatSe
   return report;
 }
 
+/**
+ * Model-visible recovery pointer appended to a task result. `resumable` is
+ * false for tasks that cannot reopen a prior session (SDK, Claude Code), so
+ * the pointer never promises a resume that will not happen.
+ */
+export function formatTaskIdPointer(
+  { id, resumable }: { id: string; resumable: boolean },
+): string {
+  return resumable
+    ? `Task ID: ${id} — pass as task_id to resume this session.`
+    : `Task ID: ${id} — session resume is unavailable for this task; the id identifies the durable record.`;
+}
+
 export function buildTaskEnvelope(
   parsed: ParsedResult,
   meta: {
@@ -431,12 +444,19 @@ export function buildTaskEnvelope(
     tool_uses: number;
     duration_ms: number;
     background: boolean;
+    /** Durable task id and whether this task can reopen its session. */
+    task?: { id: string; resumable: boolean };
   },
 ): { content: Array<{ type: "text"; text: string }>; details: Record<string, unknown> } {
   const assessment = assessTaskResult(parsed);
+  const resultText = taskResultContentText(parsed, assessment);
+  const text = meta.task
+    ? `${resultText}\n\n${formatTaskIdPointer(meta.task)}`
+    : resultText;
   return {
-    content: [{ type: "text", text: taskResultContentText(parsed, assessment) }],
+    content: [{ type: "text", text }],
     details: {
+      ...(meta.task ? { task_id: meta.task.id } : {}),
       agent_type: meta.agent_type,
       description: meta.description,
       tool_uses: meta.tool_uses,

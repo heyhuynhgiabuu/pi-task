@@ -203,12 +203,12 @@ export async function executeTerminalForegroundTask({
     tool_uses: toolUses,
     duration_ms: durationMs,
     background: false,
+    task: { id, resumable: !claudeRuntime },
   });
   return {
     ...envelope,
     details: {
       ...envelope.details,
-      task_id: id,
       phase,
       execution_phase: phase,
       reported_status: assessment.reportedStatus,

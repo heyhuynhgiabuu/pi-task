@@ -4,6 +4,16 @@ All notable changes to `@heyhuynhgiabuu/pi-task` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] - 2026-09-22
+
+### Changed
+
+- Peer and development dependencies now target Pi `0.87.0`; TypeBox is pinned to
+  `1.3.27` and the published peer range follows the tested compatibility line.
+- The task-local Fast Mode provider bridge now uses Pi `0.87.0`'s
+  `TranscriptContext` contract while preserving native streaming options and
+  priority service-tier behavior.
+
 ## [0.7.4] - 2026-09-13
 
 ### Added

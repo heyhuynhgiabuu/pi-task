@@ -8,8 +8,8 @@ import {
   streamSimpleOpenAIResponses,
   type Api,
   type AssistantMessageEventStream,
-  type Context,
   type Model,
+  type TranscriptContext,
   type OpenAICodexResponsesOptions,
   type OpenAIResponsesOptions,
   type SimpleStreamOptions,
@@ -45,22 +45,22 @@ interface TaskFastModeConfig {
 export interface TaskFastModeStreamers {
   streamOpenAIResponses: (
     model: Model<"openai-responses">,
-    context: Context,
+    context: TranscriptContext,
     options?: OpenAIResponsesOptions,
   ) => AssistantMessageEventStream;
   streamSimpleOpenAIResponses: (
     model: Model<"openai-responses">,
-    context: Context,
+    context: TranscriptContext,
     options?: SimpleStreamOptions,
   ) => AssistantMessageEventStream;
   streamOpenAICodexResponses: (
     model: Model<"openai-codex-responses">,
-    context: Context,
+    context: TranscriptContext,
     options?: OpenAICodexResponsesOptions,
   ) => AssistantMessageEventStream;
   streamSimpleOpenAICodexResponses: (
     model: Model<"openai-codex-responses">,
-    context: Context,
+    context: TranscriptContext,
     options?: SimpleStreamOptions,
   ) => AssistantMessageEventStream;
 }
@@ -173,7 +173,7 @@ export function createTaskFastModeStream(
 ) {
   return (
     model: Model<Api>,
-    context: Context,
+    context: TranscriptContext,
     options?: SimpleStreamOptions,
   ): AssistantMessageEventStream => {
     const applyFast = isConfiguredModel(loadTaskFastModeConfig(agentDir), model);

@@ -150,7 +150,9 @@ export async function executeComparisonTerminalForeground({
           ? "done"
           : completion.status === "cancelled"
             ? "cancelled"
-            : "failed";
+            : completion.status === "timeout"
+              ? "timeout"
+              : "failed";
         const completedSessionRef = findJsonlSessionByName(
           piDir,
           task.id,

@@ -191,13 +191,15 @@ export function startBackgroundPolling(
           : {}),
       });
 
-      if (stopped) return;
+      if (stopped || deps.backgroundTasks.get(id) !== task) return;
+
+      // A non-throwing probe means this poll did not fail. Only consecutive
+      // probe failures should count toward MAX_POLL_ERRORS.
+      pollErrors.delete(id);
 
       if (snapshot.status === "completed") {
-        if (deps.backgroundTasks.get(id) !== task) return;
         settle(id, task, snapshot.content, "done");
       } else if (snapshot.status === "failed" || snapshot.status === "timeout") {
-        if (deps.backgroundTasks.get(id) !== task) return;
         settle(
           id,
           task,

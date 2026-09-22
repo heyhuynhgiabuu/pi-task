@@ -932,6 +932,14 @@ if (process.platform !== "win32") {
     fileURLToPath(new URL("../src/lifecycle/task-resume.ts", import.meta.url)),
     "utf8",
   );
+  const comparisonTerminalBackgroundSrc = readFileSync(
+    fileURLToPath(new URL("../src/lifecycle/comparison-terminal-background.ts", import.meta.url)),
+    "utf8",
+  );
+  const comparisonSdkExecutionSrc = readFileSync(
+    fileURLToPath(new URL("../src/lifecycle/comparison-sdk-execution.ts", import.meta.url)),
+    "utf8",
+  );
   const taskPreparationSrc = readFileSync(
     fileURLToPath(new URL("../src/lifecycle/task-preparation.ts", import.meta.url)),
     "utf8",
@@ -954,6 +962,26 @@ if (process.platform !== "win32") {
   assert.ok(terminalLaunchSrc.includes("splitWindowPane(cwd"), t + " tmux pane cwd");
   assert.ok(conversationResumeSrc.includes("previous?.cwd"), t + " conversation resume cwd");
   assert.ok(taskResumeSrc.includes("const persistedTaskCwd = entry.cwd"), t + " task resume cwd");
+  assert.ok(
+    taskResumeSrc.includes("The result is durable and will be delivered when it finishes"),
+    t + " resume promises durable completion delivery",
+  );
+  assert.ok(
+    !taskResumeSrc.includes("Use /task status <id> to inspect it"),
+    t + " does not tell the model to invoke a user-only command",
+  );
+  assert.ok(
+    comparisonTerminalBackgroundSrc.includes(
+      "complete. ${COMPARISON_BACKGROUND_RECEIPT_GUIDANCE}`",
+    ),
+    t + " comparison terminal receipts interpolate plural no-poll guidance",
+  );
+  assert.ok(
+    comparisonSdkExecutionSrc.includes(
+      "complete. ${COMPARISON_BACKGROUND_RECEIPT_GUIDANCE}`",
+    ),
+    t + " comparison SDK receipts interpolate plural no-poll guidance",
+  );
   assert.ok(taskPreparationSrc.includes("resolveTaskCwd(ctx.cwd, taskParams.cwd, persistedTaskCwd)"), t + " resume precedence");
 }
 

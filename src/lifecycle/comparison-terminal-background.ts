@@ -1,4 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { COMPARISON_BACKGROUND_RECEIPT_GUIDANCE } from "../constants.js";
 import {
   updateRegistry,
   upsertTaskSessionHistory,
@@ -144,7 +145,7 @@ export function executeComparisonTerminalBackground({
 - Model A: \`${tasks[0]!.model}\` (task \`${tasks[0]!.id}\`, pane \`${tasks[0]!.paneId}\`)
 - Model B: \`${tasks[1]!.model}\` (task \`${tasks[1]!.id}\`, pane \`${tasks[1]!.paneId}\`)
 
-Both subagents are running in background. Results will be compared and delivered once both complete.`,
+Both subagents are running in background. Results will be compared and delivered once both complete. ${COMPARISON_BACKGROUND_RECEIPT_GUIDANCE}`,
       },
     ],
     details: {

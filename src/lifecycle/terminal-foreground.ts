@@ -146,7 +146,9 @@ export async function executeTerminalForegroundTask({
     ? "done"
     : completion.status === "cancelled"
       ? "cancelled"
-      : "failed";
+      : completion.status === "timeout"
+        ? "timeout"
+        : "failed";
   const completedSessionRef = findJsonlSessionByName(
     piDir,
     id,

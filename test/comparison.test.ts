@@ -17,6 +17,11 @@ import {
 } from "../src/comparison.js";
 import type { ComparisonRunResult } from "../src/helpers.js";
 import { restoreComparisonGroups } from "../src/index.js";
+import { executeComparisonTerminalForeground } from "../src/lifecycle/comparison-terminal-foreground.js";
+import { executeSdkComparison } from "../src/lifecycle/comparison-sdk-execution.js";
+import { DeliveryGuard } from "../src/panel/delivery.js";
+import type { SdkBackgroundTaskInput } from "../src/subagent/sdkBackground.js";
+import type { TerminalBackend } from "../src/subagent/terminalBackend.js";
 import type { BackgroundTask } from "../src/types.js";
 
 test("ComparisonCoordinator registers groups and tracks comparison tasks", () => {
@@ -972,4 +977,192 @@ test("restoreComparisonGroups skips history runs owned by another session", () =
 
   const own = restoreComparisonGroups(piDir, new Map(), new ComparisonCoordinator(), "sess-a");
   assert.equal(own.length, 2, "the owning session replays both siblings");
+});
+
+test("comparison terminal foreground preserves timeout history status", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-comparison-timeout-"));
+  const previousTimeout = process.env.PI_TASK_HARD_TIMEOUT_MINUTES;
+  try {
+    // ~0.6 ms is effectively immediate; the always-alive fake pane makes the
+    // first probe report running before the timeout snapshot is returned.
+    process.env.PI_TASK_HARD_TIMEOUT_MINUTES = "0.00001";
+    const piDir = join(root, ".pi");
+    const artifactsDir = join(piDir, "artifacts", "tasks");
+    mkdirSync(artifactsDir, { recursive: true });
+
+    const terminalBackend = {
+      kind: "herdr",
+      available: async () => true,
+      launch: async () => {
+        throw new Error("not used");
+      },
+      isAlive: async () => true,
+      send: async () => {},
+      readTail: async () => "",
+      close: async () => {},
+    } as unknown as TerminalBackend;
+    const tasks = ([0, 1] as const).map((index) => {
+      const id = `comparison-timeout-${index}`;
+      const sessionDir = join(artifactsDir, "sessions", id);
+      mkdirSync(sessionDir, { recursive: true });
+      return {
+        id,
+        index,
+        model: `model-${index}`,
+        desc: "comparison timeout",
+        sessionName: `task-${id}`,
+        sessionDir,
+        handle: {
+          backend: "herdr" as const,
+          resourceId: `pane-${index}`,
+          socketPath: join(root, "herdr.sock"),
+          terminalId: `terminal-${index}`,
+        },
+        paneId: "",
+        originalPane: null,
+        startedAt: Date.now() - 1_000,
+      };
+    });
+
+    await executeComparisonTerminalForeground({
+      tasks,
+      agentType: "reviewer",
+      description: "comparison timeout",
+      groupId: "comparison-timeout-group",
+      artifactsDir,
+      taskCwd: root,
+      piDir,
+      selectedBackend: "herdr",
+      terminalBackend,
+      foregroundTasks: new Map(),
+      requestRender: () => {},
+      clearTaskWidgetIfIdle: () => {},
+    });
+
+    const history = readTaskSessionHistory(piDir)
+      .filter((entry) => entry.comparisonGroupId === "comparison-timeout-group")
+      .sort((a, b) => a.id.localeCompare(b.id));
+    assert.deepEqual(
+      history.map((entry) => entry.status),
+      ["timeout", "timeout"],
+      "both comparison siblings persist timeout status",
+    );
+  } finally {
+    if (previousTimeout === undefined) delete process.env.PI_TASK_HARD_TIMEOUT_MINUTES;
+    else process.env.PI_TASK_HARD_TIMEOUT_MINUTES = previousTimeout;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("SDK comparison marks history delivered after grouped completion", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-sdk-comparison-delivery-"));
+  try {
+    const piDir = join(root, ".pi");
+    const artifactsDir = join(piDir, "artifacts");
+    mkdirSync(artifactsDir, { recursive: true });
+    const agent = {
+      name: "reviewer",
+      description: "SDK comparison",
+      body: "",
+      source: "project" as const,
+    };
+    const siblings = [
+      {
+        id: "sdk-comparison-m0",
+        index: 0 as const,
+        model: "model-a",
+        agent,
+        desc: "SDK comparison [model-a]",
+        sessionName: "task-sdk-comparison-m0",
+        sessionDir: join(artifactsDir, "sessions", "sdk-comparison-m0"),
+      },
+      {
+        id: "sdk-comparison-m1",
+        index: 1 as const,
+        model: "model-b",
+        agent,
+        desc: "SDK comparison [model-b]",
+        sessionName: "task-sdk-comparison-m1",
+        sessionDir: join(artifactsDir, "sessions", "sdk-comparison-m1"),
+      },
+    ] as const;
+    const starts: SdkBackgroundTaskInput[] = [];
+    const startBackgroundTask = (input: SdkBackgroundTaskInput): void => {
+      starts.push(input);
+      upsertTaskSessionHistory(piDir, {
+        id: input.id,
+        agentType: input.agentType,
+        description: input.description,
+        sessionName: input.sessionName,
+        startedAt: input.startedAt,
+        piDir,
+        dir: artifactsDir,
+        cwd: input.cwd,
+        status: "running",
+        background: true,
+        comparisonGroupId: input.comparisonGroupId,
+        comparisonModel: input.comparisonModel,
+        comparisonDescription: input.comparisonDescription,
+        comparisonIndex: input.comparisonIndex,
+      });
+    };
+    const sentMessages: unknown[] = [];
+
+    await executeSdkComparison({
+      siblings,
+      baseId: "sdk-comparison-base",
+      groupId: "sdk-comparison-group",
+      agent,
+      description: "SDK comparison",
+      prompt: "Return a result.",
+      cwd: root,
+      ctx: {} as never,
+      pi: { sendMessage: (message: unknown) => sentMessages.push(message) } as never,
+      piDir,
+      artifactsDir,
+      skillPaths: [],
+      fast: false,
+      isBackground: true,
+      toolSelection: { tools: [], excludeTools: [] },
+      foregroundTasks: new Map(),
+      backgroundTasks: new Map(),
+      deliveryGuard: new DeliveryGuard(),
+      comparisonCoordinator: new ComparisonCoordinator(),
+      taskWidget: {
+        requestRender: () => {},
+        getContext: () => null,
+        noteTaskFinished: () => {},
+      },
+      ensureTaskWidget: () => {},
+      clearTaskWidgetIfIdle: () => {},
+      markComparisonGroupDelivered: (taskIds) => markComparisonGroupDelivered(piDir, taskIds),
+      markComparisonGroupPartiallyDelivered: () => {},
+      startBackgroundTask,
+    });
+
+    assert.equal(starts.length, 2, "both SDK siblings are started");
+    starts[0]!.onComplete?.({
+      output: "<status>success</status><summary>model A done</summary>",
+      sessionPath: join(root, "model-a.jsonl"),
+    });
+    starts[1]!.onComplete?.({
+      output: "<status>success</status><summary>model B done</summary>",
+      sessionPath: join(root, "model-b.jsonl"),
+    });
+
+    assert.equal(sentMessages.length, 1, "grouped SDK report is delivered once");
+    const history = readTaskSessionHistory(piDir);
+    assert.equal(
+      history.length,
+      2,
+      "both SDK siblings remain in durable history",
+    );
+    assert.equal(
+      history.every((entry) => entry.comparisonDelivered === true),
+      true,
+      "grouped SDK delivery marks both siblings to suppress replay",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

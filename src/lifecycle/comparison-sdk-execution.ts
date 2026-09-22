@@ -2,6 +2,7 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { COMPARISON_BACKGROUND_RECEIPT_GUIDANCE } from "../constants.js";
 import {
   assessTaskResult,
   envHardTimeoutMs,
@@ -19,7 +20,10 @@ import type { BackgroundTask } from "../types.js";
 import { durableParentOf } from "./ownership.js";
 import type { TaskWidgetController } from "./widget.js";
 import { runSdkSubagent } from "../subagent/runSdk.js";
-import { startSdkBackgroundTask } from "../subagent/sdkBackground.js";
+import {
+  startSdkBackgroundTask,
+  type SdkBackgroundTaskInput,
+} from "../subagent/sdkBackground.js";
 
 export interface SdkComparisonSibling {
   id: string;
@@ -61,7 +65,9 @@ export interface SdkComparisonExecutionOptions {
   >;
   ensureTaskWidget: () => void;
   clearTaskWidgetIfIdle: () => void;
+  markComparisonGroupDelivered: (taskIds: string[]) => void;
   markComparisonGroupPartiallyDelivered: (taskIds: string[]) => void;
+  startBackgroundTask?: (input: SdkBackgroundTaskInput) => void;
 }
 
 export async function executeSdkComparison({
@@ -88,7 +94,9 @@ export async function executeSdkComparison({
   taskWidget,
   ensureTaskWidget,
   clearTaskWidgetIfIdle,
+  markComparisonGroupDelivered,
   markComparisonGroupPartiallyDelivered,
+  startBackgroundTask = startSdkBackgroundTask,
 }: SdkComparisonExecutionOptions) {
   if (!isBackground) {
     const fgTasks = siblings.map((s) => {
@@ -261,7 +269,7 @@ export async function executeSdkComparison({
     backgroundTasks.set(s.id, bg);
     deliveryGuard.track(s.id, sessionViewOf(ctx));
 
-    startSdkBackgroundTask({
+    startBackgroundTask({
       id: s.id,
       agentType: agent.name,
       description: s.desc,
@@ -316,7 +324,7 @@ export async function executeSdkComparison({
           },
           pi,
           deliveryGuard.allows(sessionViewOf(ctx), s.id),
-          undefined,
+          markComparisonGroupDelivered,
           (taskId) => {
             const current = taskWidget.getContext();
             return current
@@ -347,7 +355,7 @@ export async function executeSdkComparison({
           },
           pi,
           deliveryGuard.allows(sessionViewOf(ctx), s.id),
-          undefined,
+          markComparisonGroupDelivered,
           (taskId) => {
             const current = taskWidget.getContext();
             return current
@@ -374,7 +382,7 @@ export async function executeSdkComparison({
 - Model A: \`${siblings[0].model}\` (task \`${siblings[0].id}\`)
 - Model B: \`${siblings[1].model}\` (task \`${siblings[1].id}\`)
 
-Both subagents are running in background. Results will be compared and delivered once both complete.`,
+Both subagents are running in background. Results will be compared and delivered once both complete. ${COMPARISON_BACKGROUND_RECEIPT_GUIDANCE}`,
       },
     ],
     details: {

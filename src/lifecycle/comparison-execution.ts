@@ -70,6 +70,7 @@ export interface ComparisonExecutionOptions {
   >;
   clearTaskWidgetIfIdle: () => void;
   ensureTaskWidget: () => void;
+  markComparisonGroupDelivered: (taskIds: string[]) => void;
   markComparisonGroupPartiallyDelivered: (taskIds: string[]) => void;
 }
 
@@ -137,6 +138,7 @@ export async function executeComparisonTask({
   taskWidget,
   clearTaskWidgetIfIdle,
   ensureTaskWidget,
+  markComparisonGroupDelivered,
   markComparisonGroupPartiallyDelivered,
 }: ComparisonExecutionOptions) {
   const compareModels = resolveCompareModels(agent);
@@ -215,6 +217,7 @@ export async function executeComparisonTask({
       taskWidget,
       ensureTaskWidget,
       clearTaskWidgetIfIdle,
+      markComparisonGroupDelivered,
       markComparisonGroupPartiallyDelivered,
     });
   }

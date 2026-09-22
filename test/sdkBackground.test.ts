@@ -3,9 +3,19 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  formatSdkBackgroundReceipt,
   reconcileStaleSdkBackgroundTasks,
   startSdkBackgroundTask,
 } from "../src/subagent/sdkBackground.js";
+
+{
+  const t = "SDK background receipt promises automatic delivery without polling";
+  const receipt = formatSdkBackgroundReceipt("sdk-receipt");
+  assert.match(receipt, /host process/i, t + ": identifies the host process");
+  assert.match(receipt, /result is delivered automatically when ready/i, t + ": promises automatic delivery");
+  assert.match(receipt, /do not poll/i, t + ": forbids polling");
+  assert.doesNotMatch(receipt, /OpenPi/, t + ": avoids the stale product name");
+}
 
 async function eventually(assertion: () => void): Promise<void> {
   const started = Date.now();

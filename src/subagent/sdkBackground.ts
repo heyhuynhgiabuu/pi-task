@@ -4,6 +4,7 @@ import {
   upsertTaskSessionHistory,
 } from "../conversation.js";
 import { assessTaskResult, parseResultXml } from "../helpers.js";
+import { TASK_BACKGROUND_RECEIPT_GUIDANCE } from "../constants.js";
 import type { TaskSessionHistoryEntry } from "../types.js";
 
 export interface SdkBackgroundResult {
@@ -186,6 +187,7 @@ export function reconcileStaleSdkBackgroundTasks(piDir: string): string[] {
 export function formatSdkBackgroundReceipt(id: string): string {
   return [
     `Task ${id} is running in the background.`,
-    "OpenPi will keep the task alive while the app-side Pi process is alive and will surface its sub-session when it finishes.",
+    "The host process will keep the task alive while the parent Pi process is running and will surface its sub-session when it finishes.",
+    TASK_BACKGROUND_RECEIPT_GUIDANCE,
   ].join("\n");
 }

@@ -4,6 +4,23 @@ All notable changes to `@heyhuynhgiabuu/pi-task` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.8.1] - 2026-09-22
+
+### Fixed
+
+- SDK comparison deliveries now persist `comparisonDelivered` for both siblings,
+  preventing already-delivered reports from replaying after a Pi restart.
+- Terminal and comparison foreground history preserves `timeout` instead of
+  reporting a timed-out task as `failed`.
+- Successful background probes reset consecutive polling errors, so transient
+  backend failures do not accumulate across healthy checks.
+
+### Changed
+
+- Background task receipts and task guidance now state that results are
+  delivered automatically and should not be polled; resume and SDK receipts
+  use the same durable-delivery wording.
+
 ## [0.8.0] - 2026-09-22
 
 ### Changed

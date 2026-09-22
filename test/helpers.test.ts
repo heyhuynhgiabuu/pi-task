@@ -1403,6 +1403,8 @@ import {
         receipt.includes("/tmp/.pi/artifacts/sessions/2026-06-25T07-41-43-885Z_task-123.jsonl"),
         t + " includes exact session jsonl path",
       );
+      assert.match(receipt, /result is delivered automatically when ready/i, t + " promises automatic delivery");
+      assert.match(receipt, /do not poll.*session file/i, t + " forbids session polling");
     }
 
 
@@ -1422,6 +1424,16 @@ import {
         TASK_TOOL_DESCRIPTION,
         /review what a writer changed/i,
         t + " requires verification",
+      );
+      assert.match(
+        TASK_TOOL_DESCRIPTION,
+        /results are delivered automatically when ready/i,
+        t + " promises automatic delivery",
+      );
+      assert.match(
+        TASK_TOOL_DESCRIPTION,
+        /do not poll the task or its session file/i,
+        t + " forbids session polling",
       );
       // Size budget: the description is model-visible on every turn. Keep it
       // tight to protect context. The schema's own contract is asserted in

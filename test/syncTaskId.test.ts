@@ -108,6 +108,29 @@ test("terminal foreground result carries the task id in model-visible content", 
   }
 });
 
+test("terminal foreground timeout is reported as timeout", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-sync-timeout-"));
+  const previousTimeout = process.env.PI_TASK_HARD_TIMEOUT_MINUTES;
+  try {
+    process.env.PI_TASK_HARD_TIMEOUT_MINUTES = "0.00001";
+    const piDir = join(root, ".pi");
+    const artifactsDir = join(piDir, "artifacts", "tasks");
+    const id = "sync-terminal-timeout";
+    const { options } = terminalForegroundFixture(root, piDir, artifactsDir, id);
+    options.paneId = "";
+    options.startedAt = Date.now() - 1_000;
+
+    const result = await executeTerminalForegroundTask(options);
+    const details = (result as { details: Record<string, unknown> }).details;
+    assert.equal(details.phase, "timeout");
+    assert.equal(readTaskSessionHistory(piDir).find((entry) => entry.id === id)?.status, "timeout");
+  } finally {
+    if (previousTimeout === undefined) delete process.env.PI_TASK_HARD_TIMEOUT_MINUTES;
+    else process.env.PI_TASK_HARD_TIMEOUT_MINUTES = previousTimeout;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("Claude Code foreground result carries the id without promising resume", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-task-sync-claude-"));
   try {

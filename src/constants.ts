@@ -3,6 +3,10 @@ export const BACKGROUND_POLL_CONCURRENCY = 4; // bound concurrent backend probes
 export const COUNT_POLL_MS = 3_000; // update toolcall counts every 3 sec
 export const TASK_TIMEOUT_MS = 30 * 60 * 1_000; // 30 minutes; default for PI_TASK_HARD_TIMEOUT_MINUTES (issue #28)
 export const MAX_POLL_ERRORS = 3; // consecutive poll failures before giving up on a task
+export const TASK_BACKGROUND_RECEIPT_GUIDANCE =
+  "The result is delivered automatically when ready; do not poll this task or its session file.";
+export const COMPARISON_BACKGROUND_RECEIPT_GUIDANCE =
+  "Results are delivered automatically when both tasks finish; do not poll either task or their session files.";
 
 export const FOREGROUND_PROGRESS_POLL_MS = 1_000;
 /**

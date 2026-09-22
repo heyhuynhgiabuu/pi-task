@@ -764,6 +764,8 @@ export default function (pi: ExtensionAPI) {
           clearTaskWidgetIfIdle,
           ensureTaskWidget: () =>
             ignoreStaleExtensionCtx(() => ensureTaskWidget(ctx)),
+          markComparisonGroupDelivered: (taskIds) =>
+            markComparisonGroupDelivered(piDir, taskIds),
           markComparisonGroupPartiallyDelivered: (taskIds) =>
             markComparisonGroupPartiallyDelivered(piDir, taskIds),
         });

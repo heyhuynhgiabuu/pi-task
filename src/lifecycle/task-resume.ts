@@ -204,7 +204,7 @@ export function resolveTaskResume({
         content: [
           {
             type: "text",
-            text: `Resumed task "${requestedTaskId}" and delivered the follow-up prompt. The subagent is still running in background; avoid relaunching overlapping work. Use /task status <id> to inspect it, and it will notify on completion.`,
+            text: `Resumed task "${requestedTaskId}" and delivered the follow-up prompt. The subagent is still running in background; avoid relaunching overlapping work. The result is durable and will be delivered when it finishes; ask the user to run /task status <id> if you need a snapshot.`,
           },
         ],
         details: {

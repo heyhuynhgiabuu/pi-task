@@ -44,8 +44,6 @@ export interface BackgroundTask {
   ownerLeafId?: string | null;
   /** Most recent tool calls (capped), updated every COUNT_POLL_MS. */
   recentCalls: ToolCallRecord[];
-  /** Consecutive completion-poll failures; reset to 0 on a successful poll. */
-  pollErrors?: number;
   status?: "running" | "done" | "cancelled" | "aborted" | "failed" | "timeout";
   phase?: string;
   result?: string;

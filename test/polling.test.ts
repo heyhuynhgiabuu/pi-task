@@ -126,6 +126,39 @@ function makeDeps(
 }
 
 {
+  const t = "successful probes reset transient polling errors";
+  const backgroundTasks = new Map<any, any>([["t-reset", {
+    dir: "/tmp",
+    sessionName: "s-reset",
+    paneId: undefined,
+    originalPane: null,
+    startedAt: Date.now(),
+  }]]);
+  let calls = 0;
+  let settled = false;
+  const stop = startBackgroundPolling(
+    makeDeps({
+      backgroundTasks,
+      MAX_POLL_ERRORS: 2,
+      checkTaskCompletion: async () => {
+        calls += 1;
+        if (calls === 1 || calls === 3) throw new Error(`transient-${calls}`);
+        return { status: "running", content: "" };
+      },
+      completeTask: () => {
+        settled = true;
+      },
+    }),
+    5,
+  );
+  await sleep(70);
+  stop();
+  assert.ok(calls >= 3, `${t}: exercised failure, success, failure sequence`);
+  assert.equal(settled, false, `${t}: task remains alive after reset`);
+  assert.equal(backgroundTasks.has("t-reset"), true, `${t}: task remains registered`);
+}
+
+{
   const t = "stop() prevents future ticks from calling completeTask with stale pi";
   let completeCallCount = 0;
   let lastPi: any = undefined;

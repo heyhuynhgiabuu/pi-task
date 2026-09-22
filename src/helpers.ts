@@ -12,7 +12,10 @@ import {
   resolveAgentToolAllowlist,
 } from "./agent-tools.js";
 import { parseMergedDisallowedTools } from "./policy.js";
-import { TASK_TIMEOUT_MS } from "./constants.js";
+import {
+  TASK_BACKGROUND_RECEIPT_GUIDANCE,
+  TASK_TIMEOUT_MS,
+} from "./constants.js";
 import type { PiThinkingLevel } from "./thinking.js";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
@@ -216,7 +219,7 @@ Not for: file or symbol lookups, 2-3 file edits, or when no agent type fits.
 
 The child's final message is the result and is not shown to the user, so summarize it yourself. Launch independent agents concurrently and do not duplicate delegated work; review what a writer changed before claiming completion.
 
-Pass task_id to resume a previous subagent session. Background by default; set background false only to wait inline.`;
+Pass task_id to resume a previous subagent session. Background by default; set background false only to wait inline. Results are delivered automatically when ready; do not poll the task or its session file—do other work or end your reply.`;
 
 /** @deprecated Import from ./agent-tools.js */
 export { ALL_TOOL_NAMES } from "./agent-tools.js";
@@ -591,6 +594,7 @@ export function formatBackgroundReceipt(input: BackgroundReceiptInput): string {
     `⎿ Started task ${input.taskId} with ${input.agentType}.`,
     ...(input.backend ? [`  Backend: ${input.backend}${input.backendReason ? ` (${input.backendReason})` : ""}`] : []),
     `  Subagent sessions: ${input.sessionPath}`,
+    `  ${TASK_BACKGROUND_RECEIPT_GUIDANCE}`,
   ].join("\n");
 }
 

@@ -2,9 +2,11 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { existsSync } from "node:fs";
 import { upsertTaskSessionHistory } from "../conversation.js";
 import {
   assessTaskResult,
+  buildAcpTaskSessionData,
   buildTaskEnvelope,
   completionDeliveryOptions,
   envHardTimeoutMs,
@@ -29,9 +31,15 @@ import {
   startSdkBackgroundTask,
 } from "../subagent/sdkBackground.js";
 import { ignoreStaleExtensionCtx } from "../stale-ctx.js";
+import {
+  sendAcpTaskSessionLink,
+  watchChildSessionReady,
+} from "../subagent/acpBridge.js";
 
 export interface SdkTaskExecutionOptions {
   id: string;
+  /** The parent Pi tool-call id for this `task` call, used to link the child session early. */
+  piToolCallId?: string;
   agent: AgentConfig;
   description: string;
   sessionName: string;
@@ -60,8 +68,17 @@ export interface SdkTaskExecutionOptions {
   enqueueDelivery: (delivery: () => void) => void;
 }
 
+/**
+ * A child session is only linkable once its transcript exists on disk, because the
+ * client loads it by file. A run that failed before writing one reports no session.
+ */
+function linkableSessionId(sessionId?: string, sessionPath?: string | null): string | undefined {
+  return sessionId && sessionPath && existsSync(sessionPath) ? sessionId : undefined;
+}
+
 export async function executeSdkTask({
   id,
+  piToolCallId,
   agent,
   description,
   sessionName,
@@ -86,14 +103,34 @@ export async function executeSdkTask({
   clearTaskWidgetIfIdle,
   enqueueDelivery,
 }: SdkTaskExecutionOptions) {
+  let sdkSessionId: string | undefined;
+  let sdkSessionPath: string | undefined;
   const runSdkFallback = async (
     task?: BackgroundTask,
     onSession?: (session: any) => () => void,
   ) =>
     runSdkSubagent({
-      onSession: task
-        ? (session) => subscribeToolEvents(session, task, 10, taskWidget.requestRender)
-        : onSession,
+      onSession: (session) => {
+        const sessionId = typeof session?.sessionId === "string" ? session.sessionId : undefined;
+        const sessionPath = typeof session?.sessionFile === "string" ? session.sessionFile : undefined;
+        sdkSessionId = sessionId;
+        sdkSessionPath = sessionPath;
+
+        let unsubscribeSessionReady: (() => void) | undefined;
+        if (process.env.PI_ACP === "1" && sessionId && sessionPath) {
+          unsubscribeSessionReady = watchChildSessionReady(session, sessionPath, () =>
+            sendAcpTaskSessionLink(pi, { taskId: id, sessionId, piToolCallId }),
+          );
+        }
+
+        const unsubscribeTaskTools = task
+          ? subscribeToolEvents(session, task, 10, taskWidget.requestRender)
+          : onSession?.(session);
+        return () => {
+          unsubscribeSessionReady?.();
+          unsubscribeTaskTools?.();
+        };
+      },
       sessionName: task?.sessionName ?? sessionName,
       prompt,
       agent,
@@ -160,7 +197,11 @@ export async function executeSdkTask({
               content: `Background task ${id} (${agent.name}) done.\n\n${summary}`,
               display: true,
               details: {
-                task_id: id,
+                ...buildAcpTaskSessionData(
+                  id,
+                  linkableSessionId(result.sessionId, result.sessionPath),
+                  piToolCallId,
+                ),
                 agent_type: agent.name,
                 description,
                 phase: "done",
@@ -202,7 +243,11 @@ export async function executeSdkTask({
               content: `Background task ${id} (${agent.name}) ${phase}.\n\n${message}`,
               display: true,
               details: {
-                task_id: id,
+                ...buildAcpTaskSessionData(
+                  id,
+                  linkableSessionId(sdkSessionId, sdkSessionPath),
+                  piToolCallId,
+                ),
                 agent_type: agent.name,
                 description,
                 phase,
@@ -273,9 +318,10 @@ export async function executeSdkTask({
   }
 
   let output: string;
+  let sessionId: string | undefined;
   let sessionPath: string | undefined;
   try {
-    ({ output, sessionPath } = await runSdkFallback(foregroundTask));
+    ({ output, sessionId, sessionPath } = await runSdkFallback(foregroundTask));
   } catch (error) {
     const interrupted = error instanceof SdkSubagentInterruptedError;
     const phase = interrupted && error.kind === "cancelled"
@@ -284,6 +330,7 @@ export async function executeSdkTask({
         ? "timeout"
         : "failed";
     const message = error instanceof Error ? error.message : String(error);
+    const failedSessionId = linkableSessionId(sdkSessionId, sdkSessionPath);
     upsertTaskSessionHistory(piDir, {
       ...historyBase,
       status: phase,
@@ -303,6 +350,7 @@ export async function executeSdkTask({
         reported_status: "unknown",
         result_valid: false,
         backend: "sdk" as const,
+        ...(failedSessionId ? { session_id: failedSessionId } : {}),
         error: message,
       },
       isError: phase === "failed",
@@ -312,6 +360,7 @@ export async function executeSdkTask({
   }
 
   const finalOutput = output || "SDK subagent completed without assistant text.";
+  const completedSessionId = linkableSessionId(sessionId, sessionPath);
   const parsed = parseResultXml(finalOutput);
   const assessment = assessTaskResult(parsed);
   const envelope = buildTaskEnvelope(parsed, {
@@ -341,6 +390,7 @@ export async function executeSdkTask({
       raw_status: assessment.rawStatus,
       result_valid: assessment.valid,
       backend: "sdk" as const,
+      ...(completedSessionId ? { session_id: completedSessionId } : {}),
       session_path: sessionPath,
       conversation_id: conversationId,
       full_output: parsed.raw.trim() || finalOutput,

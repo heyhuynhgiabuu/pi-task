@@ -8,6 +8,7 @@ import {
   CLI_TIMEOUT_MS,
   createDefaultCommandRunner,
   createTmuxTerminalBackend,
+  selectTerminalBackend,
 } from "../src/subagent/terminalBackend.js";
 import {
   killAgentPaneStrictAsync,
@@ -15,6 +16,75 @@ import {
   probePaneAsync,
   tmuxSteerPaneAsync,
 } from "../src/subagent/tmux.js";
+import { resolveTaskBackend } from "../src/subagent/selectBackend.js";
+
+test("ACP auto backend keeps task subagents in the ACP output flow", () => {
+  assert.equal(
+    selectTerminalBackend({
+      requested: "auto",
+      hasHerdr: true,
+      hasTmux: true,
+      isAcp: true,
+    }),
+    "sdk",
+  );
+  assert.equal(
+    selectTerminalBackend({
+      requested: "herdr",
+      hasHerdr: true,
+      hasTmux: true,
+      isAcp: true,
+    }),
+    "herdr",
+  );
+  assert.equal(
+    selectTerminalBackend({
+      requested: "tmux",
+      hasHerdr: true,
+      hasTmux: true,
+      isAcp: true,
+    }),
+    "tmux",
+  );
+  assert.equal(
+    selectTerminalBackend({
+      requested: "auto",
+      hasHerdr: true,
+      hasTmux: true,
+      isAcp: false,
+    }),
+    "herdr",
+  );
+});
+
+test("task backend detects pi-acp when selecting the automatic backend", async () => {
+  const keys = [
+    "PI_ACP",
+    "PI_TASK_BACKEND",
+    "PI_TASK_USE_TMUX_BACKEND",
+    "PI_TASK_USE_SDK_BACKEND",
+  ] as const;
+  const previous = new Map(keys.map((key) => [key, process.env[key]]));
+
+  process.env.PI_ACP = "1";
+  delete process.env.PI_TASK_BACKEND;
+  delete process.env.PI_TASK_USE_TMUX_BACKEND;
+  delete process.env.PI_TASK_USE_SDK_BACKEND;
+
+  try {
+    const result = await resolveTaskBackend();
+    assert.equal(result.ok, true);
+    if (!result.ok) assert.fail(result.error);
+    assert.equal(result.requestedBackend, "auto");
+    assert.equal(result.selectedBackend, "sdk");
+  } finally {
+    for (const key of keys) {
+      const value = previous.get(key);
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
 
 test("tmux terminal backend preserves the launch handle contract", async () => {
   const calls: string[][] = [];

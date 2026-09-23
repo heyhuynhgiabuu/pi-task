@@ -396,7 +396,7 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "Delegate work to a specialist agent",
         parameters: taskParametersSchema(),
 
-        async execute(_toolCallId, params, signal, onUpdate, ctx) {
+        async execute(toolCallId, params, signal, onUpdate, ctx) {
       try {
       // Control requests (status/cancel) are a user action and live on the
       // `/task` command, so every tool call here starts or resumes work.
@@ -678,7 +678,9 @@ export default function (pi: ExtensionAPI) {
         : undefined;
 
       // ─── Build and run the sub-agent pi process ──────────────────────────
-      const backendResolution = await resolveTaskBackend();
+      const backendResolution = await resolveTaskBackend({
+        allowAcpSession: !claudeRuntime && !conversationId,
+      });
       if (!backendResolution.ok) {
         return {
           content: [{ type: "text", text: backendResolution.error }],
@@ -847,6 +849,7 @@ export default function (pi: ExtensionAPI) {
           if (useSdkBackend) {
             return executeSdkTask({
               id,
+              piToolCallId: toolCallId,
               agent,
               description: descText,
               sessionName,

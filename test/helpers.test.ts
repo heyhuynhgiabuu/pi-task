@@ -1612,6 +1612,26 @@ console.log("ALL TASK HELPER TESTS PASSED");
 }
 
 {
+  const { buildAcpTaskSessionData } = await import("../src/helpers.js");
+  const t = "buildAcpTaskSessionData builds the task-session payload";
+  assert.deepEqual(
+    buildAcpTaskSessionData("task-1", "child-1", "call-9"),
+    { task_id: "task-1", session_id: "child-1", pi_tool_call_id: "call-9" },
+    t,
+  );
+  assert.deepEqual(
+    buildAcpTaskSessionData("task-1", "child-1"),
+    { task_id: "task-1", session_id: "child-1" },
+    t + " omits an unknown parent tool-call id",
+  );
+  assert.deepEqual(
+    buildAcpTaskSessionData("task-1"),
+    { task_id: "task-1" },
+    t + " keeps the task identity when the child transcript never appeared",
+  );
+}
+
+{
   const { completionDeliveryOptions } = await import("../src/helpers.js");
   const t = "completionDeliveryOptions keeps the turn trigger and defers delivery per config";
   assert.deepEqual(

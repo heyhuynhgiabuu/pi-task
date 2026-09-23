@@ -550,6 +550,26 @@ export function resolveCompletionDelivery(
 }
 
 /**
+ * Payload of a task-session link.
+ *
+ * The parent's own tool-call id lets the ACP adapter attach the child session to
+ * the right `task` call as soon as the child exists; parallel `task` calls stay
+ * unambiguous. A child session is omitted when its transcript never appeared, so a
+ * run that failed before writing one still reports its task identity.
+ */
+export function buildAcpTaskSessionData(
+  taskId: string,
+  sessionId?: string,
+  piToolCallId?: string,
+) {
+  return {
+    task_id: taskId,
+    ...(sessionId ? { session_id: sessionId } : {}),
+    ...(piToolCallId ? { pi_tool_call_id: piToolCallId } : {}),
+  } as const;
+}
+
+/**
  * Send options for background task-completion notifications. `triggerTurn`
  * stays true so an idle parent still gets a turn; while streaming, Pi routes
  * by `deliverAs` — `steer` folds into the current turn, `followUp` queues a

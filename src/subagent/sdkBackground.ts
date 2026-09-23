@@ -9,6 +9,7 @@ import type { TaskSessionHistoryEntry } from "../types.js";
 
 export interface SdkBackgroundResult {
   output: string;
+  sessionId?: string;
   sessionPath?: string | null;
 }
 

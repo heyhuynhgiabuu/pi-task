@@ -21,7 +21,9 @@ export type TaskBackendResolution =
       error: string;
     };
 
-export async function resolveTaskBackend(): Promise<TaskBackendResolution> {
+export async function resolveTaskBackend(
+  options: { allowAcpSession?: boolean } = {},
+): Promise<TaskBackendResolution> {
   const legacyRequestedBackend = process.env.PI_TASK_USE_TMUX_BACKEND === "1"
     ? "tmux"
     : process.env.PI_TASK_USE_SDK_BACKEND === "1"
@@ -40,13 +42,20 @@ export async function resolveTaskBackend(): Promise<TaskBackendResolution> {
   }
 
   const herdrBackend = createDefaultHerdrTerminalBackend();
-  const hasHerdr = requestedBackend === "auto" || requestedBackend === "herdr"
-    ? await herdrBackend.available()
-    : false;
+  const isAcp = process.env.PI_ACP === "1" && options.allowAcpSession !== false;
+  const hasHerdr =
+    requestedBackend === "herdr" || (requestedBackend === "auto" && !isAcp)
+      ? await herdrBackend.available()
+      : false;
+  const tmuxAvailable =
+    requestedBackend === "tmux" || (requestedBackend === "auto" && !isAcp)
+      ? hasTmux()
+      : false;
   const selectedBackend = selectTerminalBackend({
     requested: requestedBackend as RequestedBackendKind,
     hasHerdr,
-    hasTmux: hasTmux(),
+    hasTmux: tmuxAvailable,
+    isAcp,
   });
   if (!selectedBackend) {
     const error = requestedBackend === "herdr"

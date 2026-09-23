@@ -166,6 +166,7 @@ export function armableTimeoutMs(timeoutMs: number | undefined): number | undefi
 
 export async function runSdkSubagent(options: RunSdkSubagentOptions): Promise<{
   output: string;
+  sessionId?: string;
   sessionPath?: string;
 }> {
   const requestedModel = options.model ?? options.agent.model;
@@ -254,10 +255,11 @@ export async function runSdkSubagent(options: RunSdkSubagentOptions): Promise<{
       options.signal?.removeEventListener("abort", onAbort);
     }
 
+    const sessionId = session.sessionId;
     const sessionPath = session.sessionFile;
     const result = getFinalAssistantResult(session.messages);
     if ("error" in result) throw new Error(result.error);
-    return { output: result.output, sessionPath };
+    return { output: result.output, sessionId, sessionPath };
   } finally {
     unsubSession?.();
     session?.dispose?.();

@@ -18,7 +18,7 @@ import {
 } from "../src/subagent/tmux.js";
 import { resolveTaskBackend } from "../src/subagent/selectBackend.js";
 
-test("ACP auto backend keeps task subagents in the ACP output flow", () => {
+test("automatic tasks prefer a herdr pane, then ACP, then tmux", () => {
   assert.equal(
     selectTerminalBackend({
       requested: "auto",
@@ -26,7 +26,27 @@ test("ACP auto backend keeps task subagents in the ACP output flow", () => {
       hasTmux: true,
       isAcp: true,
     }),
+    "herdr",
+    "a visible pane wins over an in-process ACP run",
+  );
+  assert.equal(
+    selectTerminalBackend({
+      requested: "auto",
+      hasHerdr: false,
+      hasTmux: true,
+      isAcp: true,
+    }),
     "sdk",
+    "ACP takes the task when no pane exists",
+  );
+  assert.equal(
+    selectTerminalBackend({
+      requested: "auto",
+      hasHerdr: false,
+      hasTmux: true,
+      isAcp: false,
+    }),
+    "tmux",
   );
   assert.equal(
     selectTerminalBackend({
@@ -36,6 +56,7 @@ test("ACP auto backend keeps task subagents in the ACP output flow", () => {
       isAcp: true,
     }),
     "herdr",
+    "an explicit request is never overridden by ACP",
   );
   assert.equal(
     selectTerminalBackend({
@@ -46,23 +67,17 @@ test("ACP auto backend keeps task subagents in the ACP output flow", () => {
     }),
     "tmux",
   );
-  assert.equal(
-    selectTerminalBackend({
-      requested: "auto",
-      hasHerdr: true,
-      hasTmux: true,
-      isAcp: false,
-    }),
-    "herdr",
-  );
 });
 
-test("task backend detects pi-acp when selecting the automatic backend", async () => {
+test("ACP automatic tasks use the SDK backend when no pane is available", async () => {
   const keys = [
     "PI_ACP",
     "PI_TASK_BACKEND",
     "PI_TASK_USE_TMUX_BACKEND",
     "PI_TASK_USE_SDK_BACKEND",
+    "HERDR_ENV",
+    "HERDR_PANE_ID",
+    "HERDR_SOCKET_PATH",
   ] as const;
   const previous = new Map(keys.map((key) => [key, process.env[key]]));
 
@@ -70,6 +85,10 @@ test("task backend detects pi-acp when selecting the automatic backend", async (
   delete process.env.PI_TASK_BACKEND;
   delete process.env.PI_TASK_USE_TMUX_BACKEND;
   delete process.env.PI_TASK_USE_SDK_BACKEND;
+  // No pane, so the outcome cannot depend on where the suite happens to run.
+  delete process.env.HERDR_ENV;
+  delete process.env.HERDR_PANE_ID;
+  delete process.env.HERDR_SOCKET_PATH;
 
   try {
     const result = await resolveTaskBackend();

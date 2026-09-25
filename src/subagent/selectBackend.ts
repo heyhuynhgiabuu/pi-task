@@ -43,12 +43,15 @@ export async function resolveTaskBackend(
 
   const herdrBackend = createDefaultHerdrTerminalBackend();
   const isAcp = process.env.PI_ACP === "1" && options.allowAcpSession !== false;
+  // A visible herdr pane is the most observable way to run a task, so automatic tasks
+  // prefer it whenever it exists — including when this process is an ACP child.
   const hasHerdr =
-    requestedBackend === "herdr" || (requestedBackend === "auto" && !isAcp)
+    requestedBackend === "herdr" || requestedBackend === "auto"
       ? await herdrBackend.available()
       : false;
+  // tmux only matters when herdr is absent and ACP is not about to claim the task.
   const tmuxAvailable =
-    requestedBackend === "tmux" || (requestedBackend === "auto" && !isAcp)
+    requestedBackend === "tmux" || (requestedBackend === "auto" && !hasHerdr && !isAcp)
       ? hasTmux()
       : false;
   const selectedBackend = selectTerminalBackend({

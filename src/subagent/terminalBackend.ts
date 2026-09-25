@@ -171,9 +171,10 @@ export function selectTerminalBackend(input: {
   if (input.requested === "sdk") return "sdk";
   if (input.requested === "herdr") return input.hasHerdr ? "herdr" : null;
   if (input.requested === "tmux") return input.hasTmux ? "tmux" : null;
-  // pi-task cannot attach its terminal backends to ACP, so auto tasks use SDK results.
-  if (input.isAcp) return "sdk";
+  // A pane the user can watch beats an in-process run, so herdr wins over ACP.
   if (input.hasHerdr) return "herdr";
+  // pi-task cannot attach its terminal backends to ACP, so ACP auto tasks use SDK results.
+  if (input.isAcp) return "sdk";
   if (input.hasTmux) return "tmux";
   return "sdk";
 }

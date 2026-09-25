@@ -4,6 +4,22 @@ All notable changes to `@heyhuynhgiabuu/pi-task` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.9.0] - 2026-09-25
+
+### Added
+
+- ACP parents now link a task's child Pi session to the parent `task` tool call,
+  so Zed can open the subagent as a child thread. The link is written as a
+  `task-session` session entry, and only once the child transcript exists on
+  disk.
+
+### Changed
+
+- Automatic (`auto`) backend selection now prefers a HerdR pane whenever one is
+  available, falling back to the ACP SDK backend and then tmux. A session that
+  inherits a stale `PI_ACP=1` no longer silently runs its tasks in-process
+  without a pane.
+
 ## [0.8.1] - 2026-09-22
 
 ### Fixed

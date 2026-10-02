@@ -295,6 +295,7 @@ test("configured fast models preserve native options and add only priority", () 
     apiKey: "test-key",
     env: { HTTPS_PROXY: "http://proxy.test" },
     websocketConnectTimeoutMs: 12_345,
+    onProviderStreamEvent: async () => {},
   };
 
   try {

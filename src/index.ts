@@ -109,6 +109,7 @@ import {
   withTaskStructuredContent,
 } from "./tool/structured.js";
 import type { BackgroundTask } from "./types.js";
+import { startIntentHash } from "./task-intent.js";
 import { ignoreStaleExtensionCtx } from "./stale-ctx.js";
 import { resolveTaskCwd } from "./task-cwd.js";
 import { serializeTaskAdmission } from "./task-admission.js";
@@ -562,11 +563,24 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
+      // Replay safety (pi-durable's find-before-create): a fresh start is
+      // identified by its intent, so a re-invocation of the same delegation
+      // is answered with the live task instead of spawning a twin.
+      const startIntent = startIntentHash({
+        agentName: agent.name,
+        params: taskParams,
+        ctxCwd: ctx.cwd,
+        claudeRuntime,
+      });
+      const durableOwner = durableParentOf(sessionViewOf(ctx));
+
       const admissionKey = conversationId
         ? `${piDir}\u0000conversation:${conversationId}`
         : taskId
           ? `${piDir}\u0000task:${taskId}`
-          : undefined;
+          : startIntent
+            ? `${piDir}\u0000intent:${startIntent}`
+            : undefined;
       return await serializeTaskAdmission(admissionKey, async () => {
         const taskSessionsRegistry = conversationId
           ? readTaskSessionsRegistry(piDir)
@@ -574,8 +588,37 @@ export default function (pi: ExtensionAPI) {
         // Validate every durable source before resolving/resuming or launching
         // a child. Missing files remain valid empty state; unreadable files
         // fail before any backend resource can be created.
-        readRegistry(piDir);
+        const registryEntries = readRegistry(piDir);
         readTaskSessionHistory(piDir);
+
+        if (startIntent !== undefined) {
+          // Find-before-create: a live registry entry with this intent owned
+          // by this session is the same delegation — answer with it.
+          const twin = registryEntries.find(
+            (entry) =>
+              entry.intentHash === startIntent &&
+              entry.ownerSessionId !== undefined &&
+              entry.ownerSessionId === durableOwner.ownerSessionId,
+          );
+          if (twin) {
+            return {
+              content: [
+                {
+                  type: "text" as const,
+                  text: `An identical task is already running as task_id "${twin.id}" (${twin.agentType}). Inspect or resume it with that task_id instead of starting a duplicate; /task cancel ${twin.id} stops it, or vary the prompt to run a second copy.`,
+                },
+              ],
+              details: {
+                phase: "running" as const,
+                task_id: twin.id,
+                agent_type: twin.agentType,
+                description: twin.description,
+                background: true,
+                duplicate_start: true,
+              },
+            };
+          }
+        }
         const registeredTaskId = conversationId
           ? taskSessionsRegistry[conversationId]?.task_id
           : undefined;
@@ -900,6 +943,7 @@ export default function (pi: ExtensionAPI) {
         artifactsDir,
         cwd: taskCwd,
         conversationId,
+        ...(startIntent !== undefined ? { intentHash: startIntent } : {}),
         piDir,
         prompt: claudePrompt ?? promptContent,
         runtime: claudeTaskRuntime,

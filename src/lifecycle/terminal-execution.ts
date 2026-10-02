@@ -30,6 +30,8 @@ export interface TerminalExecutionOptions {
   artifactsDir: string;
   cwd: string;
   conversationId?: string;
+  /** Replay-safety identity of a fresh start; recorded on the registry entry. */
+  intentHash?: string;
   piDir: string;
   prompt: string;
   piArgs: string[];
@@ -78,6 +80,7 @@ export async function executeTerminalTask({
   artifactsDir,
   cwd,
   conversationId,
+  intentHash,
   piDir,
   prompt,
   piArgs,
@@ -218,6 +221,7 @@ export async function executeTerminalTask({
     conversationId,
     ownerSessionId,
     ownerLeafId,
+    ...(intentHash !== undefined ? { intentHash } : {}),
     recentCalls: [],
     backend: selectedBackend,
   };

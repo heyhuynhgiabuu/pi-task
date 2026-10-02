@@ -48,6 +48,8 @@ export interface BackgroundTask {
   phase?: string;
   result?: string;
   completedAt?: number;
+  /** Identity of the fresh start; recorded on the durable registry entry. */
+  intentHash?: string;
   comparisonGroupId?: string;
   comparisonModel?: string;
   comparisonDescription?: string;
@@ -90,6 +92,13 @@ export interface RegistryEntry {
   ownerLeafId?: string | null;
   /** OS pid of the owning Pi process; a dead pid lets others recover the task. */
   ownerPid?: number;
+  /**
+   * Identity of the fresh start that created this task (replay safety): a
+   * re-invocation of the same delegation finds this entry and is answered
+   * with it instead of spawning a twin. Absent on resumes, comparisons, and
+   * legacy entries.
+   */
+  intentHash?: string;
   /** Terminal cleanup must be retried before this record is removed. */
   cleanupPending?: boolean;
   cleanupPhase?: "done" | "cancelled" | "timeout" | "failed";

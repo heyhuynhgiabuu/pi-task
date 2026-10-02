@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Replay safety for fresh task starts (adapted from Pi Durable's subagent
+  pattern): a fresh start is identified by an intent hash (agent, prompt,
+  cwd, mode) recorded on the durable registry entry, and a re-invocation of
+  the same delegation is answered with the live task — `duplicate_start` in
+  the structured result, with its `task_id` — instead of spawning a twin.
+  Resumes, comparisons, other sessions' tasks, and finished tasks never
+  deduplicate.
+
 - The `task` tool now declares pi 1.0.0 tool metadata: `annotations`
   (`readOnlyHint: false`, `openWorldHint: true`) so permission extensions can
   classify task calls truthfully, and an `outputSchema` whose

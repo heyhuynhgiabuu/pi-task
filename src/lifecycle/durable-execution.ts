@@ -13,8 +13,14 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
+import {
+  type DurableModelsFactory,
+  durableDatabasePath,
+  resumeDurableTasks,
+  runDurableTask,
+} from "../subagent/durable.js";
 import { upsertTaskSessionHistory, findTaskSessionHistory } from "../conversation.js";
-import type { TaskSessionHistoryEntry } from "../types.js";
+import type { TaskSessionHistoryEntry, BackgroundTask } from "../types.js";
 import {
   assessTaskResult,
   buildTaskEnvelope,
@@ -25,16 +31,10 @@ import {
   taskResultContentText,
   type AgentConfig,
 } from "../helpers.js";
-import type { BackgroundTask } from "../types.js";
 import { sessionViewOf, type DeliveryGuard } from "../panel/delivery.js";
 import { durableParentOf } from "./ownership.js";
 import type { TaskWidgetController } from "./widget.js";
 import { startSdkBackgroundTask } from "../subagent/sdkBackground.js";
-import {
-  durableDatabasePath,
-  resumeDurableTasks,
-  runDurableTask,
-} from "../subagent/durable.js";
 import { ignoreStaleExtensionCtx } from "../stale-ctx.js";
 
 export interface DurableTaskExecutionOptions {
@@ -81,7 +81,7 @@ export async function resumeDurableAfterRestart(deps: {
   sessionId?: string;
   /** Test seams, mirroring the controller's open options. */
   databasePath?: string;
-  models?: import("../subagent/durable.js").DurableModelsFactory;
+  models?: DurableModelsFactory;
 }): Promise<void> {
   const { pi, piDir, sessionId } = deps;
   if (!existsSync(durableDatabasePath(piDir))) return;
@@ -107,7 +107,7 @@ export async function resumeDurableAfterRestart(deps: {
   await resumeDurableTasks(
     piDir,
     {
-      onRecovered: (taskId, output) => {
+      onRecovered: (taskId, output, usage) => {
         const history = owned(taskId);
         if (history === "other-session") return;
         const parsed = parseResultXml(output);
@@ -127,9 +127,10 @@ export async function resumeDurableAfterRestart(deps: {
           }
         }
         const summary = taskResultContentText(parsed, assessment) || output.trim();
-        void notify(
+        notify(
           `Background task ${taskId} (durable) resumed after restart and finished.\n\n${summary}`,
           {
+            usage,
             agent_type: history?.agentType ?? "task",
             description: history?.description ?? "",
             phase: "done",
@@ -168,7 +169,7 @@ export async function resumeDurableAfterRestart(deps: {
             // History is best-effort.
           }
         }
-        void notify(
+        notify(
           `Background task ${taskId} (durable) did not survive the restart.\n\n${reason}`,
           {
             agent_type: history?.agentType ?? "task",
@@ -231,7 +232,7 @@ export async function executeDurableTask({
       task: prompt,
       cwd,
       model,
-    }).then((result) => ({ output: result.answer }));
+    }).then((result) => ({ output: result.answer, usage: result.usage }));
 
   if (isBackground) {
     const backgroundTask: BackgroundTask = {
@@ -365,7 +366,7 @@ export async function executeDurableTask({
   upsertTaskSessionHistory(piDir, { ...historyBase, status: "running" });
 
   try {
-    const { output } = await run();
+    const { output, usage } = await run();
     const finalOutput = output || "Durable subagent completed without assistant text.";
     const parsed = parseResultXml(finalOutput);
     const assessment = assessTaskResult(parsed);
@@ -396,6 +397,7 @@ export async function executeDurableTask({
         result_valid: assessment.valid,
         backend: "durable" as const,
         conversation_id: conversationId,
+        usage: usage,
         full_output: parsed.raw.trim() || finalOutput,
       },
     };

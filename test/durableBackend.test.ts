@@ -42,6 +42,14 @@ function withEnv(values: Record<string, string | undefined>, run: () => Promise<
   });
 }
 
+const makeModels = (steps: string[]) => () => {
+  const models = createModels();
+  const faux = fauxProvider();
+  models.setProvider(faux.provider);
+  faux.setResponses(steps.map((text) => fauxAssistantMessage(text)));
+  return models;
+};
+
 test("PI_TASK_BACKEND=durable selects the durable backend when the packages exist", () => {
   return withEnv({ PI_TASK_BACKEND: "durable", PI_ACP: undefined }, async () => {
     const resolution = await resolveTaskBackend();
@@ -91,14 +99,6 @@ test("runDurableTask answers, reuses the child on rerun, steers, and aborts", ()
   const dir = mkdtempSync(join(tmpdir(), "pi-task-durable-"));
   try {
     const db = join(dir, "tasks.sqlite");
-    const makeModels = (steps: string[]) => () => {
-      const models = createModels();
-      const faux = fauxProvider();
-      models.setProvider(faux.provider);
-      faux.setResponses(steps.map((text) => fauxAssistantMessage(text)));
-      return models;
-    };
-
     const root = mkdtempSync(join(tmpdir(), "pi-task-durable-pi-"));
     const piDir = join(root, ".pi");
     const databasePath = join(piDir, "durable", "tasks.sqlite");
@@ -114,6 +114,9 @@ test("runDurableTask answers, reuses the child on rerun, steers, and aborts", ()
         models: makeModels(["Magic words.", "Second answer."]),
       });
       assert.equal(first.answer, "Magic words.");
+      // The spend ledger is surfaced even when a faux model reports nothing.
+      assert.ok(first.usage, "usage ledger present");
+      assert.equal(typeof first.usage.totals.totalTokens, "number");
 
       // Replay safety: the same task id resolves to the same child and the
       // same settled submission — the queued response is never consumed.
@@ -162,13 +165,6 @@ test("runDurableTask answers, reuses the child on rerun, steers, and aborts", ()
 
 test("SIGKILL mid-tool: the next process resumes and delivers exactly once", () => {
   const root = mkdtempSync(join(tmpdir(), "pi-task-durable-crash-"));
-  const makeModels = (steps: string[]) => () => {
-    const models = createModels();
-    const faux = fauxProvider();
-    models.setProvider(faux.provider);
-    faux.setResponses(steps.map((text) => fauxAssistantMessage(text)));
-    return models;
-  };
   const piDir = join(root, ".pi");
   const databasePath = join(piDir, "durable", "tasks.sqlite");
   const scriptPath = fileURLToPath(import.meta.url);
@@ -218,6 +214,7 @@ test("SIGKILL mid-tool: the next process resumes and delivers exactly once", () 
     assert.equal(sent[0]!.details?.task_id, "t-crash");
     assert.equal(sent[0]!.details?.backend, "durable");
     assert.equal(sent[0]!.details?.resumed, true);
+    assert.ok(sent[0]!.details?.usage, "resumed receipt carries the usage ledger");
 
     // 3. Running the resume pass again delivers nothing: the submission is
     // settled, so chaos retries cannot duplicate the delivery.

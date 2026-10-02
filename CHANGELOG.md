@@ -13,8 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   so a parent crash no longer loses in-flight children — the next session
   resumes the interrupted submission and delivers the result. Replay-safe by
   construction (find-before-create keyed by the task id, exactly-once
-  `requestId`), steerable and cancellable from the panel and `/task cancel`.
-  Requires the optional packages `@earendil-works/pi-durable` and
+  `requestId`), steerable and cancellable from the panel and `/task cancel`,
+  with the child's spend surfaced as `usage` in delivered results. Requires
+  the optional packages `@earendil-works/pi-durable` and
   `@earendil-works/chord` plus env-credential model providers; durable
   conversations (`conversation_id`), compare mode, and the Claude runtime are
   not supported on this backend yet. See `spike-pi-durable-backend.md`.

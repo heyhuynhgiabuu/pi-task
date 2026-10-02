@@ -150,3 +150,27 @@ function `session_start` runs) finishes the submission and delivers.
 - Test seam additions: `runDurableTask` gained `onSubmitted` (durably-admitted
   marker for crash tests) and `resumeDurableAfterRestart` gained
   `databasePath`/`models` passthroughs for faux injection.
+
+## pi-durable spike M4 — 2026-10-02
+
+### Decision
+
+**Promoted.** The durable backend ships as an experimental, explicit-only
+backend; the user is dogfooding it (`PI_TASK_BACKEND=durable`). Archiving is
+off the table; the spike doc records the decision and the tracked gaps.
+
+### Shipped in M4
+
+- Usage surfacing: `runDurableTask` reads the child conversation's `pi.usage`
+  ledger (`UsageDoc`) inside one commit and returns plain totals per
+  provider/model and per tool plus whole-child totals; foreground results,
+  background task-complete receipts, and resumed deliveries all carry
+  `usage` in `details`. `resumeDurableTasks` hooks now pass the ledger too.
+- Tests assert the ledger shape (faux models report nothing, so totals are
+  zeros — the assertion pins the plumbing, not provider data).
+
+### Remaining gaps (tracked in the spike doc)
+
+- Credential bridge (env-key providers only) — blocks wider promotion.
+- Usage is not read on failure paths (failed runs report no ledger).
+- Steer/abort racing the mapping-doc commit window remains untested.

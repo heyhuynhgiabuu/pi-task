@@ -1,6 +1,6 @@
 # Spike plan: pi-durable backend for SDK tasks
 
-Status: **M0 + M1 + M2 + M3 done (2026-10-02) — M4 go/no-go pending.** Decision owner: repo owner.
+Status: **M0–M3 done; M4 decided 2026-10-02 (see below).**
 Reference: <https://earendil.com/posts/pi-durable/>, `packages/durable/test/examples/22-subagent-foreground.ts`.
 
 > **M0 result.** `@earendil-works/pi-durable@1.0.0` aligns exactly with pi
@@ -80,6 +80,21 @@ the result is delivered exactly once.
   in task details from `docs["pi.usage"]`.
 - **M4 — go/no-go.** Promote to a documented backend, or archive the spike and
   keep the pattern-level adoption.
+
+## M4 decision (2026-10-02)
+
+**Promoted: the durable backend ships as an experimental, explicit-only
+backend (`PI_TASK_BACKEND=durable`), dogfooded locally.** The pattern-level
+adoption (replay-safe fresh starts) stays for every backend.
+
+Remaining gaps, tracked and unscheduled:
+- **Credential bridge**: durable children run on env-key providers only
+  (`createModels()`); OAuth-backed models need a bridge from pi's runtime
+  auth. Blocks wider promotion.
+- Usage on failure paths: recovered/finished runs surface the child's
+  `pi.usage` ledger in receipts; failed runs do not read it yet.
+- Multi-surface (remote clients steering the same durable conversation) is
+  future work, not started.
 
 ## Non-goals
 

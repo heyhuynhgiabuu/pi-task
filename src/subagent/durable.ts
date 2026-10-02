@@ -32,6 +32,10 @@ export interface DurableHarnessHandle {
   children: import("@earendil-works/pi-durable").SessionDocToken<{
     byOwner: Record<string, { conversationId: ConversationId }>;
   }>;
+  /** The built-in per-conversation spend ledger (`pi.usage`). */
+  usageDoc: import("@earendil-works/pi-durable").ConversationDocToken<
+    import("@earendil-works/pi-durable").UsageState
+  >;
 }
 
 const harnessCache = new Map<string, Promise<DurableHarnessHandle>>();
@@ -95,6 +99,7 @@ export async function openDurableHarness(
       context: chordContext.BACKGROUND_CONTEXT as ChordContext,
       models,
       children,
+      usageDoc: durable.UsageDoc,
     };
   })();
   harnessCache.set(databasePath, promise);
@@ -171,9 +176,81 @@ function defaultModelRef(handle: DurableHarnessHandle): {
   return first ? { provider: first.provider, modelId: first.id } : undefined;
 }
 
+/** Spend of one durable child conversation, summed from its `pi.usage` ledger. */
+export interface DurableUsageTotals {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  /** Provider-computed cost when known; 0 otherwise. */
+  costTotal: number;
+}
+
+export interface DurableUsage {
+  /** Per `provider/modelId`. */
+  models: Record<string, DurableUsageTotals>;
+  /** Per tool name. */
+  tools: Record<string, DurableUsageTotals>;
+  /** The child conversation's whole spend. */
+  totals: DurableUsageTotals;
+}
+
 export interface DurableRunResult {
   conversationId: string;
   answer: string;
+  usage: DurableUsage;
+}
+
+/** Sum one `pi.usage` bucket into plain totals, inside the commit. */
+function bucketTotals(
+  bucket: Record<string, import("@earendil-works/pi-ai").Usage>,
+): Record<string, DurableUsageTotals> {
+  const totals: Record<string, DurableUsageTotals> = {};
+  for (const [key, usage] of Object.entries(bucket)) {
+    totals[key] = {
+      inputTokens: usage.input,
+      outputTokens: usage.output,
+      totalTokens: usage.totalTokens,
+      costTotal: usage.cost?.total ?? 0,
+    };
+  }
+  return totals;
+}
+
+function sumTotals(entries: DurableUsageTotals[]): DurableUsageTotals {
+  return entries.reduce(
+    (sum, entry) => ({
+      inputTokens: sum.inputTokens + entry.inputTokens,
+      outputTokens: sum.outputTokens + entry.outputTokens,
+      totalTokens: sum.totalTokens + entry.totalTokens,
+      costTotal: sum.costTotal + entry.costTotal,
+    }),
+    { inputTokens: 0, outputTokens: 0, totalTokens: 0, costTotal: 0 },
+  );
+}
+
+/**
+ * The child conversation's spend ledger, read as plain data inside one commit
+ * (drafts are transaction overlays and die after settle).
+ */
+async function readConversationUsage(
+  handle: DurableHarnessHandle,
+  conversationId: ConversationId,
+): Promise<DurableUsage> {
+  const root = await handle.harness.root(handle.context);
+  const usage = await root.commit(async (tx) => {
+    const state = await tx.doc(handle.usageDoc, conversationId);
+    return {
+      models: bucketTotals(state.models as Record<string, import("@earendil-works/pi-ai").Usage>),
+      tools: bucketTotals(state.tools as Record<string, import("@earendil-works/pi-ai").Usage>),
+    };
+  }, handle.context);
+  return {
+    ...usage,
+    totals: sumTotals([
+      ...Object.values(usage.models),
+      ...Object.values(usage.tools),
+    ]),
+  };
 }
 
 /** Run a durable subagent: find-before-create, exactly-once by task id. */
@@ -215,7 +292,8 @@ export async function runDurableTask(input: {
     throw new Error(`durable subagent failed: ${reason}`);
   }
   const answer = await settledAnswerText(handle, conversation, settled.answer);
-  return { conversationId: String(childId), answer };
+  const usage = await readConversationUsage(handle, childId);
+  return { conversationId: String(childId), answer, usage };
 }
 
 /** Read the assistant text out of a settled submission's answer entry. */
@@ -274,7 +352,11 @@ export async function abortDurableTask(
 export async function resumeDurableTasks(
   piDir: string,
   hooks: {
-    onRecovered?: (taskId: string, output: string) => void;
+    onRecovered?: (
+      taskId: string,
+      output: string,
+      usage: DurableUsage,
+    ) => void;
     onFailed?: (taskId: string, reason: string) => void;
   } = {},
   options: { databasePath?: string; models?: DurableModelsFactory } = {},
@@ -305,7 +387,11 @@ export async function resumeDurableTasks(
           hooks.onFailed?.(taskId, "child conversation missing after resume");
           return;
         }
-        hooks.onRecovered?.(taskId, await settledAnswerText(handle, conversation, settled.answer));
+        hooks.onRecovered?.(
+          taskId,
+          await settledAnswerText(handle, conversation, settled.answer),
+          await readConversationUsage(handle, conversation.id),
+        );
       })
       .catch((error: unknown) => {
         hooks.onFailed?.(taskId, error instanceof Error ? error.message : String(error));

@@ -194,3 +194,4 @@ test("panel stop awaits async cleanup and suppresses duplicate requests", async 
   await Promise.resolve();
   controller.dispose();
 });
+

@@ -20,6 +20,7 @@ import {
   type TranscriptItem,
 } from "../panel/transcript.js";
 import { TaskPanelEditor, type TaskPanelHost } from "../panel/task-editor.js";
+import { TaskOverlay } from "../panel/task-overlay.js";
 import {
   createTaskTranscriptPane,
   type TaskTranscriptPane,
@@ -38,6 +39,13 @@ export interface TaskWidgetController {
   ensureTaskWidget(targetCtx: ExtensionContext): void;
   /** Install the panel editor wrapper without registering the task widget. */
   ensurePanelEditor(targetCtx: ExtensionContext): void;
+  /**
+   * Open the centered /task overlay: a ctx.ui.custom modal that browses the
+   * session's tasks (↑↓ select, enter opens the live view, x stops,
+   * esc closes). Returns false when the TUI is unavailable, so the caller can
+   * fall back to a text listing.
+   */
+  openOverlay(targetCtx: ExtensionContext): Promise<boolean>;
   requestRender(): void;
   clearTaskWidgetIfIdle(): void;
   /** Latest extension context the widget was registered with (may be null). */
@@ -172,8 +180,9 @@ export function createTaskWidgetController(
   function pruneFinished(): void {
     // The focused panel lists all retained finished rows (aging is a display
     // behavior of the idle widget, per panelRows' focused contract), so only
-    // expire from the backing store when the panel is not focused.
-    if (isPanelFocused(panelState)) return;
+    // expire from the backing store when the panel is not focused. The /task
+    // overlay browses the same rows, so browsing must not expire them either.
+    if (isPanelFocused(panelState) || overlayOpen) return;
     const retained = pruneFinishedEntries(
       [...finishedTasks.entries()].map(([id, f]) => ({
         id,
@@ -397,6 +406,44 @@ export function createTaskWidgetController(
     requestRender();
   }
 
+  let overlayOpen = false;
+
+  async function openOverlay(targetCtx: ExtensionContext): Promise<boolean> {
+    if (targetCtx.mode !== "tui" || !targetCtx.hasUI) return false;
+    // The overlay is the browser; the below-editor panel returns to its idle
+    // display while the modal owns the keyboard.
+    if (panelState.viewTaskId !== null) closeView();
+    panelState = { selection: null, viewTaskId: null };
+    overlayOpen = true;
+    try {
+      await targetCtx.ui.custom(
+        (_tui, theme, _keybindings, done) =>
+          new TaskOverlay(
+            {
+              getRows: () => panelRows(),
+              now,
+              onStop: (taskId) => stopTaskRow(taskId),
+              onOpen: (taskId) => {
+                done(undefined);
+                openView(taskId);
+              },
+              onClose: () => done(undefined),
+              requestRender,
+            },
+            theme,
+          ),
+        {
+          overlay: true,
+          overlayOptions: { anchor: "center", width: "70%", maxHeight: "60%" },
+        },
+      );
+    } finally {
+      overlayOpen = false;
+      clearTaskWidgetIfIdle();
+    }
+    return true;
+  }
+
   function clearTaskWidgetIfIdle(): void {
     pruneFinished();
     if (
@@ -431,6 +478,7 @@ export function createTaskWidgetController(
   return {
     ensureTaskWidget,
     ensurePanelEditor: installEditor,
+    openOverlay,
     requestRender,
     clearTaskWidgetIfIdle,
     getContext,

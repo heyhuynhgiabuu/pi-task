@@ -283,6 +283,8 @@ export function renderTaskPanel(params: {
   now: number;
   width: number;
   theme?: ThemeLike | null;
+  /** Override the status hint line (the /task overlay words its own keys). */
+  hint?: string;
 }): string[] {
   const { rows, selection, viewTaskId, now, width, theme } = params;
   const maxWidth = Math.min(width, MAX_WIDTH);
@@ -291,9 +293,11 @@ export function renderTaskPanel(params: {
       ? rows.findIndex((r) => r.id === selection.taskId)
       : -1;
   const inView = viewTaskId !== null;
-  const hint = inView
-    ? `viewing @${viewTaskId} — typing goes to the task · ↓ switch · esc back to main`
-    : `tasks (${rows.length}) — ↓ to select · enter to view · x to stop/dismiss · esc back`;
+  const hint =
+    params.hint ??
+    (inView
+      ? `viewing @${viewTaskId} — typing goes to the task · ↓ switch · esc back to main`
+      : `tasks (${rows.length}) — ↓ to select · enter to view · x to stop/dismiss · esc back`);
 
   const lines = [truncateToWidth(color(theme, "dim", hint), maxWidth, "…")];
   lines.push(

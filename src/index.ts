@@ -104,6 +104,10 @@ import {
   renderResult,
   taskParametersSchema,
 } from "./tool/index.js";
+import {
+  taskResultOutputSchema,
+  withTaskStructuredContent,
+} from "./tool/structured.js";
 import type { BackgroundTask } from "./types.js";
 import { ignoreStaleExtensionCtx } from "./stale-ctx.js";
 import { resolveTaskCwd } from "./task-cwd.js";
@@ -394,9 +398,19 @@ export default function (pi: ExtensionAPI) {
     label: taskToolName,
     description: buildTaskToolDescription(discoverAgents(process.cwd(), BUNDLED_AGENT_DIR).agents),
     promptSnippet: "Delegate work to a specialist agent",
+    // Permission extensions read these hints (docs/extensions.md, "Tool
+    // exposure"): a task spawns external agent processes (open world) and
+    // writes through its child (not read-only). destructiveHint and
+    // idempotentHint stay at their MCP defaults — a child may delete data, and
+    // re-calling starts another task — which is the conservative truth.
+    annotations: { readOnlyHint: false, openWorldHint: true },
+    // Codemode scripts resolve a call to structuredContent instead of the
+    // text; the schema names the fields execute already builds onto details.
+    outputSchema: taskResultOutputSchema(),
         parameters: taskParametersSchema(),
 
-        async execute(toolCallId, params, signal, onUpdate, ctx) {
+        execute: withTaskStructuredContent(
+          async function execute(toolCallId, params, signal, onUpdate, ctx) {
       try {
       // Control requests (status/cancel) are a user action and live on the
       // `/task` command, so every tool call here starts or resumes work.
@@ -925,7 +939,8 @@ export default function (pi: ExtensionAPI) {
           isError: true,
         };
       }
-    },
+      },
+        ),
 
         renderCall,
         renderResult,
@@ -963,10 +978,14 @@ export default function (pi: ExtensionAPI) {
    * so they belong on a command.
    */
   pi.registerCommand("task", {
-    description: "List tasks, or inspect or cancel one: /task [list | status <id> | cancel <id>]",
+    description:
+      "Open the navigable task panel; /task [list | status <id> | cancel <id>]",
     handler: async (args, ctx) => {
       const [subcommand, id] = args.trim().split(/\s+/).filter(Boolean);
       if (subcommand !== "status" && subcommand !== "cancel") {
+        // A bare /task opens the centered overlay (TUI only); `list` and
+        // headless contexts keep the text listing of durable conversations.
+        if (!subcommand && (await taskWidget.openOverlay(ctx))) return;
         const listing = taskSessionListing(ctx.sessionManager?.getCwd?.() ?? process.cwd());
         ctx.ui.notify(listing.text, listing.level);
         return;

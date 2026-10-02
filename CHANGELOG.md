@@ -4,6 +4,30 @@ All notable changes to `@heyhuynhgiabuu/pi-task` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+
+- A bare `/task` in a TUI session now opens a centered overlay for browsing
+  the session's tasks (`↑↓` select, `enter` opens the live transcript view,
+  `x` stops/dismisses, `esc` closes; shows an empty `tasks (0)` state when
+  nothing has run yet). The overlay paints a solid theme background so it
+  stays readable over the conversation behind it. The below-editor panel
+  stays as the always-on live monitor and remains the place where typing
+  steers a viewed task. Headless and ACP sessions and an explicit `/task
+  list` still print the durable conversation listing.
+
+### Added
+
+- The `task` tool now declares pi 1.0.0 tool metadata: `annotations`
+  (`readOnlyHint: false`, `openWorldHint: true`) so permission extensions can
+  classify task calls truthfully, and an `outputSchema` whose
+  `structuredContent` mirrors the result `details`. Codemode scripts calling
+  `tools.task(...)` now receive structured data (phase, task ids, status,
+  report sections, failure diagnostics) instead of having to parse the text
+  content; error results carry the same data. The model-facing text result,
+  `details`, rendering, and delivery are unchanged.
+
 ## [0.9.0] - 2026-09-25
 
 ### Added

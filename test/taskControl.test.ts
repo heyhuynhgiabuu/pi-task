@@ -473,7 +473,7 @@ test("legacy registry records infer tmux from a pane id", () => {
   assert.equal(record.backend, "tmux");
 });
 
-test("status control reads durable history without touching backend resources", () => {
+test("status control reads durable history without touching backend resources", async () => {
   const piDir = mkdtempSync(join(tmpdir(), "pi-task-control-status-"));
   const artifactsDir = join(piDir, "artifacts");
   const sessionDir = join(artifactsDir, "sessions", "task-history");
@@ -521,7 +521,7 @@ test("status control reads durable history without touching backend resources", 
     background: true,
   });
 
-  const result = handleTaskControl(
+  const result = await handleTaskControl(
     { operation: "status", taskId: "architecture" },
     {
       pi: {} as never,
@@ -549,11 +549,11 @@ test("status control reads durable history without touching backend resources", 
   assert.equal(result.details.exit_code, 0);
 });
 
-test("status reports unreadable durable state instead of treating it as empty", () => {
+test("status reports unreadable durable state instead of treating it as empty", async () => {
   const piDir = mkdtempSync(join(tmpdir(), "pi-task-control-corrupt-"));
   writeFileSync(join(piDir, "task-registry.json"), "{not-json", "utf-8");
 
-  const result = handleTaskControl(
+  const result = await handleTaskControl(
     { operation: "status", taskId: "task-corrupt" },
     {
       pi: {} as never,
@@ -569,7 +569,7 @@ test("status reports unreadable durable state instead of treating it as empty", 
   assert.match(result.content[0].text, /unreadable durable state/i);
 });
 
-test("cancel control refuses an active SDK task explicitly", () => {
+test("cancel control refuses an active SDK task explicitly", async () => {
   const piDir = mkdtempSync(join(tmpdir(), "pi-task-control-sdk-"));
   const backgroundTasks = new Map([
     ["task-sdk", {
@@ -586,7 +586,7 @@ test("cancel control refuses an active SDK task explicitly", () => {
     }],
   ]);
 
-  const result = handleTaskControl(
+  const result = await handleTaskControl(
     { operation: "cancel", taskId: "task-sdk" },
     {
       pi: {} as never,
@@ -602,7 +602,7 @@ test("cancel control refuses an active SDK task explicitly", () => {
   assert.equal(backgroundTasks.has("task-sdk"), true);
 });
 
-test("cancel retires the active task even when the panel notification throws", () => {
+test("cancel retires the active task even when the panel notification throws", async () => {
   const piDir = mkdtempSync(join(tmpdir(), "pi-task-control-zombie-"));
   writeRegistry(piDir, [{
     id: "task-zombie",
@@ -630,7 +630,7 @@ test("cancel retires the active task even when the panel notification throws", (
     }],
   ]);
 
-  const result = handleTaskControl(
+  const result = await handleTaskControl(
     { operation: "cancel", taskId: "task-zombie" },
     {
       pi: { sendMessage: () => {} } as never,
@@ -653,7 +653,7 @@ test("cancel retires the active task even when the panel notification throws", (
   );
 });
 
-test("cancel control delegates owned terminal cleanup and removes the active task", () => {
+test("cancel control delegates owned terminal cleanup and removes the active task", async () => {
   const piDir = mkdtempSync(join(tmpdir(), "pi-task-control-cancel-"));
   writeRegistry(piDir, [{
     id: "task-tmux",
@@ -683,7 +683,7 @@ test("cancel control delegates owned terminal cleanup and removes the active tas
   let cleanupPhase: string | undefined;
   let widgetCleared = false;
 
-  const result = handleTaskControl(
+  const result = await handleTaskControl(
     { operation: "cancel", taskId: "task-tmux" },
     {
       pi: {} as never,
@@ -707,7 +707,7 @@ test("cancel control delegates owned terminal cleanup and removes the active tas
   assert.equal(backgroundTasks.has("task-tmux"), false);
 });
 
-test("cancel control reports cleanup pending and preserves the durable receipt", () => {
+test("cancel control reports cleanup pending and preserves the durable receipt", async () => {
   const piDir = mkdtempSync(join(tmpdir(), "pi-task-control-cleanup-"));
   writeRegistry(piDir, [{
     id: "task-tmux-cleanup",
@@ -735,7 +735,7 @@ test("cancel control reports cleanup pending and preserves the durable receipt",
     }],
   ]);
 
-  const result = handleTaskControl(
+  const result = await handleTaskControl(
     { operation: "cancel", taskId: "task-tmux-cleanup" },
     {
       pi: { sendMessage: () => {} } as never,
@@ -759,7 +759,7 @@ test("cancel control reports cleanup pending and preserves the durable receipt",
   assert.equal(readRegistry(piDir)[0]?.cleanupPending, true);
   assert.equal(backgroundTasks.has("task-tmux-cleanup"), false);
 
-  const status = handleTaskControl(
+  const status = await handleTaskControl(
     { operation: "status", taskId: "task-tmux-cleanup" },
     {
       pi: {} as never,

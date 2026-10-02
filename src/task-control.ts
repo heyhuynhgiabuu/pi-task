@@ -67,7 +67,7 @@ export interface TaskControlRecord {
 }
 
 export type CancellationDecision =
-  | { kind: "allowed"; backend: "tmux" | "herdr" }
+  | { kind: "allowed"; backend: "tmux" | "herdr" | "durable" }
   | { kind: "unsupported"; reason: "sdk_backend" }
   | { kind: "terminal"; status: Exclude<TaskLifecycleStatus, "running"> };
 

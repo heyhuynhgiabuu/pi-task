@@ -28,9 +28,13 @@ import {
 
 export interface TaskWidgetControllerDeps {
   /** Steer a running task; returns an error message or null on success. */
-  steerTask: (task: BackgroundTask, text: string) => string | null;
+  steerTask: (
+    task: BackgroundTask,
+    taskId: string,
+    text: string,
+  ) => string | null | Promise<string | null>;
   /** Stop a running task's terminal resource; error message or null on success. */
-  stopTask: (task: BackgroundTask) => string | null | Promise<string | null>;
+  stopTask: (taskId: string, task: BackgroundTask) => string | null | Promise<string | null>;
   /** Clock for linger/ordering logic (test seam; defaults to Date.now). */
   now?: () => number;
 }
@@ -248,10 +252,18 @@ export function createTaskWidgetController(
       widgetCtx?.ui.notify("No task is open in the transcript view", "error");
       return;
     }
-    const error = deps?.steerTask(task, text);
-    if (error) {
-      widgetCtx?.ui.notify(`Could not steer task: ${error}`, "error");
-    }
+    void Promise.resolve(deps?.steerTask(task, taskId, text))
+      .then((error) => {
+        if (error) {
+          widgetCtx?.ui.notify(`Could not steer task: ${error}`, "error");
+        }
+      })
+      .catch((error: unknown) => {
+        widgetCtx?.ui.notify(
+          `Could not steer task: ${error instanceof Error ? error.message : String(error)}`,
+          "error",
+        );
+      });
   }
 
   function stopTaskRow(taskId: string): void {
@@ -265,7 +277,7 @@ export function createTaskWidgetController(
     if (!task || stoppingTaskIds.has(taskId)) return;
     stoppingTaskIds.add(taskId);
     Promise.resolve()
-      .then(() => deps?.stopTask(task))
+      .then(() => deps?.stopTask(taskId, task))
       .then((error) => {
         if (error) widgetCtx?.ui.notify(error, "error");
       })

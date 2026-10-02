@@ -19,3 +19,104 @@
 - HerdR mutation commands can succeed with empty stdout. Only JSON-producing inspection commands should be decoded.
 - An autonomous child-side JSONL watcher was removed after live testing showed it could close the HerdR pane before the parent task runner consumed completion, leaving an orphaned in-memory widget entry. Normal cleanup is parent-owned: the wrapper records child exit, while pi-task polling records completion and then closes the pane. Restart restoration handles parent termination.
 - The existing code treats all five terminal stop reasons (`stop`, `endTurn`, `length`, `error`, `aborted`) as completed. This integration preserves that behavior.
+
+## pi-durable spike M0 — 2026-10-02
+
+### Scope
+
+M0 of `spike-pi-durable-backend.md`: open a SQLite harness with the faux
+provider (no network), prove persistence across reopen, exactly-once
+resubmission, and crash-mid-tool resume. Script:
+`spikes/pi-durable/m0-hello-harness.ts` (`npx tsx ...`).
+
+### Results (M0 PASS)
+
+- Version alignment holds: `@earendil-works/pi-durable@1.0.0` depends on
+  `@earendil-works/pi-ai ^1.0.0`, `@earendil-works/chord ^1.0.0`, and
+  `typebox 1.3.27` — exactly the versions pi 1.0.0 and pi-task already pin.
+  One copy of pi-ai in the tree, no version fork needed.
+- Durability: transcript entries survive harness close/reopen on SQLite.
+- Exactly-once: resubmitting the same `requestId` after reopen returns the
+  original settled submission verbatim and appends nothing.
+- Crash resume: a child process SIGKILLed mid-tool-call leaves the
+  submission interrupted; a new process opens the same storage, calls
+  `harness.resume()`, the `replay: "safe"` tool reruns, and the submission
+  completes with the new process's answer.
+
+### Discoveries
+
+- `Submission.wait()` resolves before the harness closes; reading entry
+  content must happen before `harness.close()` — after close, even reads via
+  `conversation.commit()` throw "Session is closed".
+- The resumed run consumes the *new* process's model responses: the interrupted
+  generation is re-issued, not replayed from storage. For M1 this means the
+  durable backend's child keeps its own model registry (the credential-bridge
+  question in the spike plan is real, not theoretical).
+- `replay: "safe"` is load-bearing for resume: without it the interrupted tool
+  would be reported to the model instead of rerun — M1 should mark pi-task's
+  delegation tool replay-safe only insofar as find-before-create makes it so
+  (the pattern `78227db` already implements for the registry backends).
+
+## pi-durable spike M1 — 2026-10-02
+
+### Scope
+
+`runDurableSubagent()` in `spikes/pi-durable/m1-subagent-replay.ts`: the
+subagent pattern of example 22 adapted to a caller outside any durable
+conversation. Script proves rerun-after-done reuse and SIGKILL-mid-tool
+recovery with no twin child.
+
+### Results (M1 PASS)
+
+- Find-before-create via a session-scoped document
+  (`defineDoc({ scope: "session" })`): rerun of the same owner key reuses the
+  child conversation and the same answer; exactly one child in storage.
+- Exactly-once by `requestId: subagent:<ownerKey>`: after a SIGKILL mid-tool,
+  the rerun reacquires the interrupted submission, the `replay: "safe"` tool
+  reruns, and the submission completes with the new process's answer.
+
+### Discoveries
+
+- Raw `tx.createConversation({ ownership })` accepts only ownership — no
+  `agent`. An ownerless child resolves with NO model (`unanswered`,
+  `reason: "no_model"`); the fix is `configure(tx, id, { model })` in the same
+  commit (what M2 gets for free: a task-owned child copies its owner's agent).
+- `ConversationOwnership` is only `ownerless | task` at creation — M2's
+  native find-before-create should key the mapping off `ownerTaskId` inside a
+  durable tool call instead of the session document used here.
+- Reading a document draft outside its commit throws "Cannot use a settled
+  overlay": extract plain data inside the transaction callback.
+- `settled` records carry a machine-readable `reason` (e.g. `no_model`) —
+  surface it, not just `status`, in M2 receipts.
+
+## pi-durable spike M2 — 2026-10-02
+
+### Scope
+
+`PI_TASK_BACKEND=durable` wired into the extension (M2 of
+`spike-pi-durable-backend.md`): backend selection, `executeDurableTask`
+(foreground + background), panel steering and stop, `/task cancel` via the
+control API, and resume-on-session_start for submissions a previous process
+left running. Controller: `src/subagent/durable.ts`; executor:
+`src/lifecycle/durable-execution.ts`. Receipts, history rows, widget rows, and
+delivery reuse the SDK machinery.
+
+### Discoveries
+
+- pi-durable must stay a dynamic import: static imports would load it in every
+  session. Availability is probed once via `import()` and cached.
+- `ConversationId` is a branded number per storage; two databases can hand out
+  the same numeric id, so ids crossing the backend boundary are stringified
+  and mappings keep the native type.
+- createModels() lives in `@earendil-works/pi-ai/models`, not the durable root;
+  the durable backend uses env-key providers, so OAuth-backed models are
+  gated out until the credential bridge exists (documented in README).
+- A document draft is a transaction overlay: only plain data extracted inside
+  the commit survives (shallow spreads keep tracked nested objects that throw
+  "Cannot use a settled overlay" after settle).
+- `handleTaskControl` became async (durable cancel awaits the conversation
+  abort); tests that called it synchronously were updated.
+- Known M2 gaps, deliberately deferred to M3: no SIGKILL chaos matrix against
+  the integrated backend, no usage/cost surfacing, steer/abort during the
+  window before the mapping doc commit is untested, and completion receipt
+  usage totals are zero for durable children.

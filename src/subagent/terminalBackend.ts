@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { chooseTmuxSplitDirection } from "../helpers.js";
 
 export type TerminalBackendKind = "tmux" | "herdr";
-export type ExecutionBackendKind = "sdk" | TerminalBackendKind;
+export type ExecutionBackendKind = "sdk" | "durable" | TerminalBackendKind;
 export type RequestedBackendKind = "auto" | ExecutionBackendKind;
 /** Which agent flavor a terminal pane hosts (pi by default, or claude). */
 export type AgentRuntimeKind = "pi" | "claude";
@@ -169,6 +169,7 @@ export function selectTerminalBackend(input: {
   isAcp?: boolean;
 }): ExecutionBackendKind | null {
   if (input.requested === "sdk") return "sdk";
+  if (input.requested === "durable") return "durable";
   if (input.requested === "herdr") return input.hasHerdr ? "herdr" : null;
   if (input.requested === "tmux") return input.hasTmux ? "tmux" : null;
   // A pane the user can watch beats an in-process run, so herdr wins over ACP.

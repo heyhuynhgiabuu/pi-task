@@ -110,6 +110,14 @@ import {
 } from "./tool/structured.js";
 import type { BackgroundTask } from "./types.js";
 import { startIntentHash } from "./task-intent.js";
+import {
+  executeDurableTask,
+  resumeDurableAfterRestart,
+} from "./lifecycle/durable-execution.js";
+import {
+  abortDurableTask,
+  steerDurableTask,
+} from "./subagent/durable.js";
 import { ignoreStaleExtensionCtx } from "./stale-ctx.js";
 import { resolveTaskCwd } from "./task-cwd.js";
 import { serializeTaskAdmission } from "./task-admission.js";
@@ -157,11 +165,17 @@ export default function (pi: ExtensionAPI) {
   const foregroundTasks = new Map<string, BackgroundTask>();
   const asyncHerdr = createDefaultHerdrTerminalBackend();
   const taskWidget = createTaskWidgetController(foregroundTasks, backgroundTasks, {
-    steerTask: (task, text) => {
+    steerTask: (task, taskId, text) => {
+      if (task.backend === "durable") {
+        return steerDurableTask(extensionPiDir, taskId, text);
+      }
       const result = steerRunningBackgroundTask(task.paneId, text, task.handle);
       return result.ok ? null : result.reason;
     },
-    stopTask: async (task) => {
+    stopTask: async (taskId, task) => {
+      if (task.backend === "durable") {
+        return abortDurableTask(extensionPiDir, taskId);
+      }
       if (task.backend === "sdk") {
         return "SDK tasks cannot be stopped from the panel yet.";
       }
@@ -332,6 +346,13 @@ export default function (pi: ExtensionAPI) {
         // Retry on next restart via durable history.
       }
     }
+
+    // Durable backend: finish submissions a previous process left running.
+    resumeDurableAfterRestart({ pi, piDir, sessionId }).catch((error) => {
+      console.error(
+        `[pi-task] durable resume skipped: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    });
   });
 
   const stopBackgroundPolling = startBackgroundPolling(
@@ -372,6 +393,7 @@ export default function (pi: ExtensionAPI) {
       completeTask: completeTaskWithDelivery,
       onComparisonSettled: comparisonSettledHandler,
       noteTaskFinished: (id, task) => taskWidget.noteTaskFinished(id, task),
+      abortDurable: (taskId) => abortDurableTask(piDir, taskId),
     });
 
   // ── Panel ready at session start ───────────────────────────────────────
@@ -784,6 +806,60 @@ export default function (pi: ExtensionAPI) {
           },
           isError: true,
         };
+      }
+      if (selectedBackend === "durable") {
+        if (claudeRuntime) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Agent "${agent.name}" uses the Claude Code runtime, which the durable backend does not host. Use the herdr or tmux backend for claude tasks.`,
+              },
+            ],
+            details: {
+              phase: "failed" as const,
+              error: "claude unsupported on durable backend",
+            },
+            isError: true,
+          };
+        }
+        if (conversationId || taskParams.compare) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: "The durable backend does not support durable conversations (conversation_id) or comparison mode. Omit both, or use a terminal backend.",
+              },
+            ],
+            details: {
+              phase: "failed" as const,
+              error: "unsupported on durable backend",
+            },
+            isError: true,
+          };
+        }
+        return executeDurableTask({
+          id,
+          agent,
+          description: descText,
+          sessionName,
+          prompt: promptContent,
+          cwd: taskCwd,
+          ctx,
+          pi,
+          piDir,
+          artifactsDir,
+          signal,
+          isBackground,
+          backgroundTasks,
+          foregroundTasks,
+          deliveryGuard,
+          taskWidget,
+          clearTaskWidgetIfIdle,
+          ensureTaskWidget: () =>
+            ignoreStaleExtensionCtx(() => ensureTaskWidget(ctx)),
+          enqueueDelivery: (delivery) => completionDeliveryQueue.enqueue(delivery),
+        });
       }
       await materializeTaskExecution({
         piDir,

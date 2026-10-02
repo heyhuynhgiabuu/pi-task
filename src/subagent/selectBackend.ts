@@ -7,6 +7,16 @@ import {
   type TerminalBackend,
 } from "./terminalBackend.js";
 
+let durableAvailability: Promise<boolean> | undefined;
+
+/** Probe (once) whether the optional pi-durable packages are importable. */
+function isDurableBackendAvailable(): Promise<boolean> {
+  durableAvailability ??= import("@earendil-works/pi-durable")
+    .then(() => true)
+    .catch(() => false);
+  return durableAvailability;
+}
+
 export type TaskBackendResolution =
   | {
       ok: true;
@@ -32,12 +42,23 @@ export async function resolveTaskBackend(
   const requestedBackend = (
     legacyRequestedBackend ?? process.env.PI_TASK_BACKEND ?? "auto"
   ).trim().toLowerCase();
-  if (!["auto", "sdk", "tmux", "herdr"].includes(requestedBackend)) {
+  if (!["auto", "sdk", "durable", "tmux", "herdr"].includes(requestedBackend)) {
     return {
       ok: false,
       kind: "invalid",
       requestedBackend,
-      error: `Invalid PI_TASK_BACKEND=${requestedBackend}. Expected auto, sdk, tmux, or herdr.`,
+      error: `Invalid PI_TASK_BACKEND=${requestedBackend}. Expected auto, sdk, durable, tmux, or herdr.`,
+    };
+  }
+  // The durable backend needs its optional framework packages at runtime;
+  // they are dev-only for the spike, so probe before committing to it.
+  if (requestedBackend === "durable" && !(await isDurableBackendAvailable())) {
+    return {
+      ok: false,
+      kind: "unavailable",
+      requestedBackend,
+      error:
+        "Durable backend requires the optional pi-durable packages. Install them with: npm install @earendil-works/pi-durable @earendil-works/chord",
     };
   }
 

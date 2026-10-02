@@ -1,8 +1,12 @@
 import type { TaskReportedStatus, ToolCallRecord } from "./helpers.js";
-import type { TerminalHandle, TerminalBackendKind } from "./subagent/terminalBackend.js";
+import type {
+  ExecutionBackendKind,
+  TerminalHandle,
+  TerminalBackendKind,
+} from "./subagent/terminalBackend.js";
 export type { TerminalHandle, HerdrTerminalHandle } from "./subagent/terminalBackend.js";
 
-export type ExecutionBackend = "sdk" | TerminalBackendKind;
+export type ExecutionBackend = ExecutionBackendKind;
 
 export interface BackgroundTask {
   /** Session artifact root used for completion polling. */

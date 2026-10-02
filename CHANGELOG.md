@@ -6,6 +6,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- Experimental **durable backend** (`PI_TASK_BACKEND=durable`): subagent work
+  runs as pi-durable conversations over SQLite (`<piDir>/durable/tasks.sqlite`)
+  so a parent crash no longer loses in-flight children — the next session
+  resumes the interrupted submission and delivers the result. Replay-safe by
+  construction (find-before-create keyed by the task id, exactly-once
+  `requestId`), steerable and cancellable from the panel and `/task cancel`.
+  Requires the optional packages `@earendil-works/pi-durable` and
+  `@earendil-works/chord` plus env-credential model providers; durable
+  conversations (`conversation_id`), compare mode, and the Claude runtime are
+  not supported on this backend yet. See `spike-pi-durable-backend.md`.
+
 ### Changed
 
 - A bare `/task` in a TUI session now opens a centered overlay for browsing

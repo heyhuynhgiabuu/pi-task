@@ -1,7 +1,22 @@
 # Spike plan: pi-durable backend for SDK tasks
 
-Status: **proposed, not started.** Decision owner: repo owner.
+Status: **M0 + M1 + M2 done (2026-10-02) — M3 chaos tests pending.** Decision owner: repo owner.
 Reference: <https://earendil.com/posts/pi-durable/>, `packages/durable/test/examples/22-subagent-foreground.ts`.
+
+> **M0 result.** `@earendil-works/pi-durable@1.0.0` aligns exactly with pi
+> 1.0.0 (pi-ai ^1.0.0, chord ^1.0.0, typebox 1.3.27 — no version fork).
+> `spikes/pi-durable/m0-hello-harness.ts` proves SQLite persistence across
+> reopen, exactly-once resubmission by `requestId`, and SIGKILL-mid-tool
+> resume via `harness.resume()` with a `replay: "safe"` tool. Findings in
+> `implementation-notes.md`.
+>
+> **M1 result.** `spikes/pi-durable/m1-subagent-replay.ts` runs
+> `runDurableSubagent()` — find-before-create keyed by the caller's owner key
+> (session doc; M2 upgrades to the native `ownerTaskId` index), exactly-once
+> `requestId`, SIGKILL-mid-tool rerun completes in the same child with no
+> twin. Gotchas: raw `tx.createConversation` copies no agent (children need
+> `configure(tx, id, { model })`), drafts must be read inside their commit,
+> and settled records carry machine-readable `reason`.
 
 ## Why
 

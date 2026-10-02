@@ -42,6 +42,8 @@ export interface TaskControlDependencies {
   onComparisonSettled?: ComparisonSettledHook;
   /** Keep the cancelled task's row visible in the panel for its linger. */
   noteTaskFinished?: (id: string, task: BackgroundTask) => void;
+  /** Durable backend: abort the child conversation of a task id. */
+  abortDurable?: (taskId: string) => Promise<string | null>;
 }
 
 function taskControlRecords(deps: TaskControlDependencies): TaskControlRecord[] {
@@ -185,10 +187,10 @@ function taskStatusDetails(record: TaskControlRecord): Record<string, unknown> {
   };
 }
 
-export function handleTaskControl(
+export async function handleTaskControl(
   request: TaskControlRequest,
   deps: TaskControlDependencies,
-): TaskControlToolResult {
+): Promise<TaskControlToolResult> {
   let record: TaskControlRecord | undefined;
   try {
     record = findTaskRecord(request.taskId, taskControlRecords(deps));
@@ -232,31 +234,72 @@ export function handleTaskControl(
     if (error instanceof DurableStateError) return durableStateErrorResult(request, error);
     throw error;
   }
-  if (!entry) {
-    return errorResult(
-      request,
-      `Task "${record.id}" has no durable live resource to cancel.`,
-      "live_resource_missing",
-      { backend: decision.backend },
-    );
+
+  // The durable backend has no pane resource: cancellation is an abort of the
+  // child conversation, and the registry entry is optional (the durable
+  // source of truth is the harness storage, not task-registry.json).
+  let durableAbortError: string | null = null;
+  if (decision.backend === "durable") {
+    if (!deps.abortDurable) {
+      return errorResult(
+        request,
+        `Task "${record.id}" cannot be cancelled because the durable abort hook is unavailable.`,
+        "durable_cancel_unavailable",
+        { backend: decision.backend },
+      );
+    }
+    durableAbortError = await deps.abortDurable(record.id);
+    if (durableAbortError) {
+      return errorResult(
+        request,
+        `Task "${record.id}" could not be cancelled: ${durableAbortError}`,
+        "durable_abort_failed",
+        { backend: decision.backend },
+      );
+    }
+  } else {
+    if (!entry) {
+      return errorResult(
+        request,
+        `Task "${record.id}" has no durable live resource to cancel.`,
+        "live_resource_missing",
+        { backend: decision.backend },
+      );
+    }
+    let resourceStatus: TaskResourceStatus;
+    try {
+      resourceStatus = deps.registryEntryStatus(entry);
+    } catch {
+      resourceStatus = "unavailable";
+    }
+    if (resourceStatus !== "alive") {
+      return errorResult(
+        request,
+        `Task "${record.id}" could not be cancelled because its ${decision.backend} resource is ${resourceStatus}.`,
+        `resource_${resourceStatus}`,
+        { backend: decision.backend },
+      );
+    }
   }
 
-  let resourceStatus: TaskResourceStatus;
-  try {
-    resourceStatus = deps.registryEntryStatus(entry);
-  } catch {
-    resourceStatus = "unavailable";
-  }
-  if (resourceStatus !== "alive") {
-    return errorResult(
-      request,
-      `Task "${record.id}" could not be cancelled because its ${decision.backend} resource is ${resourceStatus}.`,
-      `resource_${resourceStatus}`,
-      { backend: decision.backend },
-    );
-  }
-
-  const task = deps.backgroundTasks.get(record.id) ?? backgroundTaskFromRegistry(entry);
+  const task = deps.backgroundTasks.get(record.id)
+    ?? (entry
+      ? backgroundTaskFromRegistry(entry)
+      : {
+          // A durable task may exist only in harness storage; the record
+          // carries everything completion needs.
+          dir: typeof record.dir === "string" ? record.dir : deps.piDir,
+          cwd: typeof record.cwd === "string" ? record.cwd : undefined,
+          agentType: record.agentType,
+          sessionName: record.sessionName,
+          backend: "durable" as const,
+          originalPane: null,
+          description: record.description,
+          startedAt: record.startedAt,
+          toolUses: 0,
+          turns: 0,
+          recentCalls: [],
+        });
   const completion = (deps.completeTask ?? persistCompletedTask)({
     pi: deps.pi,
     id: record.id,

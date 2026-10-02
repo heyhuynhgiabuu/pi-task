@@ -120,3 +120,33 @@ delivery reuse the SDK machinery.
   the integrated backend, no usage/cost surfacing, steer/abort during the
   window before the mapping doc commit is untested, and completion receipt
   usage totals are zero for durable children.
+
+## pi-durable spike M3 — 2026-10-02
+
+### Scope
+
+Crash matrix through the integrated delivery path
+(`test/durableBackend.test.ts`, "SIGKILL mid-tool" case): a child process
+starts a durable task whose faux model calls the real `bash` tool with a long
+sleep; the parent SIGKILLs it mid-tool; `resumeDurableAfterRestart` (the same
+function `session_start` runs) finishes the submission and delivers.
+
+### Results (M3 PASS)
+
+- Exactly one `task-complete` delivery with `resumed: true`, the recovered
+  answer, and the durable backend/task id in `details`.
+- A second resume pass delivers nothing: settled submissions leave
+  `harness.inspect()`, so chaos retries cannot duplicate delivery.
+
+### Discoveries
+
+- `resumeDurableAfterRestart` registers hooks and returns before the resumed
+  generations settle — delivery lands on later event-loop turns. Callers that
+  assert or report on it must poll or subscribe; production session_start
+  wants exactly this fire-and-forget shape.
+- Interrupted `bash` is not replay-safe, so the resuming process re-prompts
+  the model instead of rerunning the sleep — no stall, and the recovery answer
+  comes from the resuming process's own model registry.
+- Test seam additions: `runDurableTask` gained `onSubmitted` (durably-admitted
+  marker for crash tests) and `resumeDurableAfterRestart` gained
+  `databasePath`/`models` passthroughs for faux injection.

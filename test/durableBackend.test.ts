@@ -7,9 +7,11 @@
  */
 
 import { strict as assert } from "node:assert";
+import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 
 import { createModels } from "@earendil-works/pi-ai/models";
@@ -20,6 +22,7 @@ import {
   runDurableTask,
   steerDurableTask,
 } from "../src/subagent/durable.js";
+import { resumeDurableAfterRestart } from "../src/lifecycle/durable-execution.js";
 import { resolveTaskBackend } from "../src/subagent/selectBackend.js";
 import { selectTerminalBackend } from "../src/subagent/terminalBackend.js";
 import { decideCancellation } from "../src/task-control.js";
@@ -153,4 +156,80 @@ test("runDurableTask answers, reuses the child on rerun, steers, and aborts", ()
     rmSync(dir, { recursive: true, force: true });
     throw error;
   }
+});
+
+// ── Crash matrix through the integrated delivery path ──────────────────────
+
+test("SIGKILL mid-tool: the next process resumes and delivers exactly once", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-durable-crash-"));
+  const makeModels = (steps: string[]) => () => {
+    const models = createModels();
+    const faux = fauxProvider();
+    models.setProvider(faux.provider);
+    faux.setResponses(steps.map((text) => fauxAssistantMessage(text)));
+    return models;
+  };
+  const piDir = join(root, ".pi");
+  const databasePath = join(piDir, "durable", "tasks.sqlite");
+  const scriptPath = fileURLToPath(import.meta.url);
+  const childScript = join(dirname(scriptPath), "durable-crash-child.ts");
+
+  return (async () => {
+    // 1. The child starts a durable task and gets stuck inside `bash sleep 30`.
+    const child = spawn(
+      process.execPath,
+      ["--import", "tsx", childScript, databasePath, piDir, "t-crash"],
+      { env: process.env, stdio: ["ignore", "pipe", "inherit"] },
+    );
+    await new Promise<void>((resolve, reject) => {
+      let out = "";
+      child.stdout!.on("data", (chunk: Buffer) => {
+        out += chunk.toString();
+        if (out.includes("M2 child: submitted")) resolve();
+      });
+      child.on("exit", (code) => reject(new Error(`child exited early: ${code}`)));
+      setTimeout(() => reject(new Error("child never submitted")), 20_000).unref();
+    });
+    await new Promise((resolve) => setTimeout(resolve, 1_500)); // land mid-tool
+    child.kill("SIGKILL");
+    await new Promise<void>((resolve) => child.on("exit", () => resolve()));
+
+    // 2. The next process resumes and delivers exactly one task-complete.
+    const sent: { content?: string; details?: Record<string, unknown> }[] = [];
+    const pi = { sendMessage: (message: { content?: string; details?: Record<string, unknown> }) => { sent.push(message); } };
+    const recovered = makeModels(["Recovered after crash."]);
+    // Delivery is asynchronous: the resumed generation settles on the event
+    // loop after the pass registers its hooks, so poll for it.
+    const waitForDelivery = async (): Promise<void> => {
+      for (let waited = 0; waited < 10_000 && sent.length === 0; waited += 50) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    };
+    resumeDurableAfterRestart({
+      pi: pi as never,
+      piDir,
+      sessionId: "sess-1",
+      databasePath,
+      models: recovered,
+    }).catch(() => {});
+    await waitForDelivery();
+    assert.equal(sent.length, 1, `exactly one delivery, got ${sent.length}`);
+    assert.match(sent[0]!.content ?? "", /resumed after restart and finished/);
+    assert.equal(sent[0]!.details?.task_id, "t-crash");
+    assert.equal(sent[0]!.details?.backend, "durable");
+    assert.equal(sent[0]!.details?.resumed, true);
+
+    // 3. Running the resume pass again delivers nothing: the submission is
+    // settled, so chaos retries cannot duplicate the delivery.
+    await resumeDurableAfterRestart({
+      pi: pi as never,
+      piDir,
+      sessionId: "sess-1",
+      databasePath,
+      models: recovered,
+    });
+    assert.equal(sent.length, 1, "no duplicate delivery on the second pass");
+  })().finally(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
 });

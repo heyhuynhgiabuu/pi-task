@@ -79,6 +79,9 @@ export async function resumeDurableAfterRestart(deps: {
   piDir: string;
   /** Current session id; another session's tasks are left to that session. */
   sessionId?: string;
+  /** Test seams, mirroring the controller's open options. */
+  databasePath?: string;
+  models?: import("../subagent/durable.js").DurableModelsFactory;
 }): Promise<void> {
   const { pi, piDir, sessionId } = deps;
   if (!existsSync(durableDatabasePath(piDir))) return;
@@ -101,85 +104,92 @@ export async function resumeDurableAfterRestart(deps: {
     return history;
   };
 
-  await resumeDurableTasks(piDir, {
-    onRecovered: (taskId, output) => {
-      const history = owned(taskId);
-      if (history === "other-session") return;
-      const parsed = parseResultXml(output);
-      const assessment = assessTaskResult(parsed);
-      if (history) {
-        try {
-          upsertTaskSessionHistory(piDir, {
-            ...history,
-            status: "done",
-            reportedStatus: assessment.reportedStatus,
-            rawStatus: assessment.rawStatus,
-            resultValid: assessment.valid,
-            completedAt: Date.now(),
-          });
-        } catch {
-          // History is best-effort; delivery below still runs.
+  await resumeDurableTasks(
+    piDir,
+    {
+      onRecovered: (taskId, output) => {
+        const history = owned(taskId);
+        if (history === "other-session") return;
+        const parsed = parseResultXml(output);
+        const assessment = assessTaskResult(parsed);
+        if (history) {
+          try {
+            upsertTaskSessionHistory(piDir, {
+              ...history,
+              status: "done",
+              reportedStatus: assessment.reportedStatus,
+              rawStatus: assessment.rawStatus,
+              resultValid: assessment.valid,
+              completedAt: Date.now(),
+            });
+          } catch {
+            // History is best-effort; delivery below still runs.
+          }
         }
-      }
-      const summary = taskResultContentText(parsed, assessment) || output.trim();
-      void notify(
-        `Background task ${taskId} (durable) resumed after restart and finished.\n\n${summary}`,
-        {
-          agent_type: history?.agentType ?? "task",
-          description: history?.description ?? "",
-          phase: "done",
-          execution_phase: "done",
-          status: assessment.reportedStatus,
-          reported_status: assessment.reportedStatus,
-          raw_status: assessment.rawStatus,
-          result_valid: assessment.valid,
-          result: output,
-          summary: parsed.summary,
-          findings: parsed.findings,
-          evidence: parsed.evidence,
-          files: parsed.files,
-          caveats: parsed.caveats,
-          next_steps: parsed.next_steps,
-          background: true,
-          backend: "durable",
-          task_id: taskId,
-          resumed: true,
-          structured_result: structuredResultPayload(assessment),
-          full_output: parsed.raw.trim() || output.trim(),
-        },
-      );
-    },
-    onFailed: (taskId, reason) => {
-      const history = owned(taskId);
-      if (history === "other-session") return;
-      if (history) {
-        try {
-          upsertTaskSessionHistory(piDir, {
-            ...history,
-            status: "failed",
-            completedAt: Date.now(),
-          });
-        } catch {
-          // History is best-effort.
+        const summary = taskResultContentText(parsed, assessment) || output.trim();
+        void notify(
+          `Background task ${taskId} (durable) resumed after restart and finished.\n\n${summary}`,
+          {
+            agent_type: history?.agentType ?? "task",
+            description: history?.description ?? "",
+            phase: "done",
+            execution_phase: "done",
+            status: assessment.reportedStatus,
+            reported_status: assessment.reportedStatus,
+            raw_status: assessment.rawStatus,
+            result_valid: assessment.valid,
+            result: output,
+            summary: parsed.summary,
+            findings: parsed.findings,
+            evidence: parsed.evidence,
+            files: parsed.files,
+            caveats: parsed.caveats,
+            next_steps: parsed.next_steps,
+            background: true,
+            backend: "durable",
+            task_id: taskId,
+            resumed: true,
+            structured_result: structuredResultPayload(assessment),
+            full_output: parsed.raw.trim() || output.trim(),
+          },
+        );
+      },
+      onFailed: (taskId, reason) => {
+        const history = owned(taskId);
+        if (history === "other-session") return;
+        if (history) {
+          try {
+            upsertTaskSessionHistory(piDir, {
+              ...history,
+              status: "failed",
+              completedAt: Date.now(),
+            });
+          } catch {
+            // History is best-effort.
+          }
         }
-      }
-      void notify(
-        `Background task ${taskId} (durable) did not survive the restart.\n\n${reason}`,
-        {
-          agent_type: history?.agentType ?? "task",
-          description: history?.description ?? "",
-          phase: "failed",
-          status: "unknown",
-          result_valid: false,
-          background: true,
-          backend: "durable",
-          task_id: taskId,
-          resumed: true,
-          error: reason,
-        },
-      );
+        void notify(
+          `Background task ${taskId} (durable) did not survive the restart.\n\n${reason}`,
+          {
+            agent_type: history?.agentType ?? "task",
+            description: history?.description ?? "",
+            phase: "failed",
+            status: "unknown",
+            result_valid: false,
+            background: true,
+            backend: "durable",
+            task_id: taskId,
+            resumed: true,
+            error: reason,
+          },
+        );
+      },
     },
-  });
+    {
+      databasePath: deps.databasePath,
+      models: deps.models,
+    },
+  );
 }
 
 export async function executeDurableTask({

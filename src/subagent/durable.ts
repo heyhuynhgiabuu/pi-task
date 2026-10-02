@@ -186,6 +186,8 @@ export async function runDurableTask(input: {
   model?: string;
   databasePath?: string;
   models?: DurableModelsFactory;
+  /** Called once the submission is durably admitted, before it settles. */
+  onSubmitted?: (conversationId: string) => void;
 }): Promise<DurableRunResult> {
   const handle = await openDurableHarness(input.piDir, {
     databasePath: input.databasePath,
@@ -205,9 +207,9 @@ export async function runDurableTask(input: {
     content: input.task,
     requestId: durableOwnerKey(input.taskId),
   } as const;
-  const settled = await (await conversation.submit(request, handle.context)).wait(
-    handle.context,
-  );
+  const submission = await conversation.submit(request, handle.context);
+  input.onSubmitted?.(String(childId));
+  const settled = await submission.wait(handle.context);
   if (settled.status !== "done" || settled.type !== "input") {
     const reason = "reason" in settled ? String(settled.reason) : settled.status;
     throw new Error(`durable subagent failed: ${reason}`);

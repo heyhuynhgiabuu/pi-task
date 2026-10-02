@@ -1,6 +1,6 @@
 # Spike plan: pi-durable backend for SDK tasks
 
-Status: **M0 + M1 + M2 done (2026-10-02) — M3 chaos tests pending.** Decision owner: repo owner.
+Status: **M0 + M1 + M2 + M3 done (2026-10-02) — M4 go/no-go pending.** Decision owner: repo owner.
 Reference: <https://earendil.com/posts/pi-durable/>, `packages/durable/test/examples/22-subagent-foreground.ts`.
 
 > **M0 result.** `@earendil-works/pi-durable@1.0.0` aligns exactly with pi

@@ -265,6 +265,69 @@ test("SDK foreground failure carries the task id without promising resume", asyn
     assert.ok(record, "SDK foreground run persists a durable history row");
     assert.equal(record.status, "failed");
     assert.equal(record.background, false);
+    assert.equal(record.backend, "sdk", "SDK history is explicitly classified for restart reconciliation");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("SDK background launch persists backend identity for stale-task reconciliation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-sync-sdk-background-"));
+  try {
+    const piDir = join(root, ".pi");
+    const artifactsDir = join(piDir, "artifacts", "tasks");
+    mkdirSync(artifactsDir, { recursive: true });
+    const id = "sync-sdk-background-1";
+
+    await executeSdkTask({
+      ...sdkTaskOptions(root, piDir, artifactsDir, id),
+      isBackground: true,
+      foregroundTask: undefined,
+    } as never);
+
+    const record = readTaskSessionHistory(piDir).find((entry) => entry.id === id);
+    assert.ok(record, "SDK background launch persists a durable history row");
+    assert.equal(record.background, true);
+    assert.equal(record.backend, "sdk");
+    assert.equal(record.ownerPid, process.pid, "SDK history records the process that owns the runner");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("SDK background completion queue id matches its persisted message", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-sync-sdk-delivery-id-"));
+  try {
+    const piDir = join(root, ".pi");
+    const artifactsDir = join(piDir, "artifacts", "tasks");
+    mkdirSync(artifactsDir, { recursive: true });
+    const id = "sync-sdk-delivery-id";
+    const sent: { customType?: string; details?: Record<string, unknown> }[] = [];
+    let queuedDeliveryId: string | undefined;
+
+    await executeSdkTask({
+      ...sdkTaskOptions(root, piDir, artifactsDir, id),
+      isBackground: true,
+      foregroundTask: undefined,
+      pi: {
+        sendMessage: (message: { customType?: string; details?: Record<string, unknown> }) => {
+          sent.push(message);
+        },
+        getFlag: () => undefined,
+      } as never,
+      enqueueDelivery: (delivery, deliveryId) => {
+        queuedDeliveryId = deliveryId;
+        delivery();
+      },
+    } as never);
+
+    for (let waited = 0; waited < 2_000 && sent.length === 0; waited += 10) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(sent.length, 1, "the failed background run still reports its completion");
+    assert.equal(sent[0]?.customType, "task-complete");
+    assert.equal(sent[0]?.details?.task_id, id);
+    assert.equal(sent[0]?.details?.completion_delivery_id, queuedDeliveryId);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -1,12 +1,12 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { upsertTaskSessionHistory } from "./conversation.js";
-import {
-  formatComparisonReport,
-  type ComparisonRunResult,
-  completionDeliveryOptions,
-} from "./helpers.js";
-import { ignoreStaleExtensionCtx } from "./stale-ctx.js";
-import type { BackgroundTask, TaskSessionHistoryEntry } from "./types.js";
+import { formatComparisonReport, type ComparisonRunResult } from "./helpers.js";
+import { sendCompletionNotice } from "./lifecycle/completion.js";
+import type {
+  BackgroundTask,
+  CompletionDeliveryOutcome,
+  TaskSessionHistoryEntry,
+} from "./types.js";
 
 export const DEFAULT_COMPARISON_JOIN_WINDOW_MS = 30_000;
 const DEFAULT_PARTIAL_GROUP_RETENTION_MS = 5 * 60_000;
@@ -16,6 +16,12 @@ export interface ComparisonCoordinatorOptions {
   joinWindowMs?: number;
   /** How long to consume a late sibling after a partial report. */
   partialRetentionMs?: number;
+  /** Keep reports guarded until Pi persists their custom message. */
+  enqueueDelivery?: (
+    deliveryId: string,
+    delivery: () => CompletionDeliveryOutcome | void,
+    onPersisted?: () => void,
+  ) => void;
 }
 
 export interface ComparisonGroup {
@@ -51,6 +57,7 @@ export class ComparisonCoordinator {
   private readonly taskToGroup = new Map<string, string>();
   private readonly joinWindowMs: number;
   private readonly partialRetentionMs: number;
+  private readonly enqueueDelivery?: ComparisonCoordinatorOptions["enqueueDelivery"];
 
   constructor(options: ComparisonCoordinatorOptions = {}) {
     this.joinWindowMs = positiveDuration(
@@ -61,6 +68,7 @@ export class ComparisonCoordinator {
       options.partialRetentionMs,
       DEFAULT_PARTIAL_GROUP_RETENTION_MS,
     );
+    this.enqueueDelivery = options.enqueueDelivery;
   }
 
   registerGroup(
@@ -113,6 +121,8 @@ export class ComparisonCoordinator {
     deliveryGuardAllowed: boolean,
     onDelivered: ((taskIds: [string, string]) => void) | undefined,
     partial: boolean,
+    onPartialDelivered?: (taskIds: [string, string]) => void,
+    deliveryGuardCheck?: DeliveryGuardCheck,
   ): boolean {
     if (!deliveryGuardAllowed) return false;
     const report = formatComparisonReport({
@@ -120,34 +130,42 @@ export class ComparisonCoordinator {
       description: group.description,
       runs,
     });
-    const deliveryOptions = completionDeliveryOptions(
-      process.env.PI_TASK_COMPLETION_DELIVERY,
-    );
-    let delivered = false;
-    ignoreStaleExtensionCtx(() => {
-      pi.sendMessage(
-        {
-          customType: "task-complete",
-          content: report,
-          display: true,
-          details: {
-            compare: true,
-            partial,
-            agent_type: group.agentType,
-            description: group.description,
-            phase: partial ? "partial" : "done",
-            execution_phase: partial ? "partial" : "done",
-            models: group.models,
-            task_ids: group.taskIds,
-            runs,
-          },
+    // groupId is persisted with both siblings and survives restore; startedAt
+    // is recreated when the group is reconstructed and cannot identify replay.
+    const deliveryId = `comparison:${group.groupId}:${partial ? "partial" : "full"}`;
+    const deliver = (): CompletionDeliveryOutcome | void => {
+      if (deliveryGuardCheck && !group.taskIds.every(deliveryGuardCheck)) {
+        return "suppressed";
+      }
+      return sendCompletionNotice(pi, {
+        customType: "task-complete",
+        content: report,
+        display: true,
+        details: {
+          compare: true,
+          partial,
+          agent_type: group.agentType,
+          description: group.description,
+          phase: partial ? "partial" : "done",
+          execution_phase: partial ? "partial" : "done",
+          models: group.models,
+          task_ids: group.taskIds,
+          runs,
+          completion_delivery_id: deliveryId,
         },
-        deliveryOptions,
-      );
-      delivered = true;
-    });
-    if (delivered && !partial) onDelivered?.(group.taskIds);
-    return delivered;
+      });
+    };
+    const onPersisted = () => {
+      if (partial) onPartialDelivered?.(group.taskIds);
+      else onDelivered?.(group.taskIds);
+    };
+    if (this.enqueueDelivery) {
+      this.enqueueDelivery(deliveryId, deliver, onPersisted);
+      return true;
+    }
+    const sent = deliver() !== "suppressed";
+    if (sent) onPersisted();
+    return sent;
   }
 
   private expireGroup(
@@ -198,6 +216,8 @@ export class ComparisonCoordinator {
       deliveryAllowed,
       onDelivered,
       true,
+      onPartialDelivered,
+      deliveryGuardCheck,
     );
     if (!delivered) {
       group.results.delete(missingId);
@@ -206,11 +226,6 @@ export class ComparisonCoordinator {
       return;
     }
     group.partialDelivered = true;
-    try {
-      onPartialDelivered?.(group.taskIds);
-    } catch {
-      // The partial report is already delivered; persistence retries on restart.
-    }
     group.cleanupTimer = setTimeout(() => this.clearGroup(groupId), this.partialRetentionMs);
     unrefTimer(group.cleanupTimer);
   }
@@ -270,7 +285,16 @@ export class ComparisonCoordinator {
         const deliveryAllowed = deliveryGuardCheck
           ? group.taskIds.every((groupTaskId) => deliveryGuardCheck(groupTaskId))
           : deliveryGuardAllowed;
-        this.deliverReport(group, [run0, run1], pi, deliveryAllowed, onDelivered, false);
+        this.deliverReport(
+          group,
+          [run0, run1],
+          pi,
+          deliveryAllowed,
+          onDelivered,
+          false,
+          onPartialDelivered,
+          deliveryGuardCheck,
+        );
       }
     } else {
       this.armDeadline(

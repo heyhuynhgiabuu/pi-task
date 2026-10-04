@@ -9,7 +9,12 @@ import {
 } from "../conversation.js";
 import { buildTaskFollowUpPrompt } from "../tool/index.js";
 import type { TaskStartRequest } from "../task-control.js";
-import type { BackgroundTask, RegistryEntry } from "../types.js";
+import type {
+  BackgroundTask,
+  ExecutionBackend,
+  RegistryEntry,
+  TaskSessionHistoryEntry,
+} from "../types.js";
 import { sessionViewOf } from "../panel/delivery.js";
 import type { DeliveryGuard } from "../panel/delivery.js";
 import { durableParentOf, transferTaskOwnership } from "./ownership.js";
@@ -21,6 +26,12 @@ export interface TaskResumeResult {
   isError?: boolean;
 }
 
+function isDurableTaskHistoryEntry(
+  entry: RegistryEntry | TaskSessionHistoryEntry | null | undefined,
+): entry is TaskSessionHistoryEntry {
+  return entry?.backend === "durable" && "status" in entry;
+}
+
 export type TaskResumeResolution =
   | {
       kind: "continue";
@@ -28,6 +39,7 @@ export type TaskResumeResolution =
       id: string;
       sessionName: string;
       resume: boolean;
+      backend?: ExecutionBackend;
       resumeSessionRef?: string;
       persistedTaskCwd?: string;
     }
@@ -68,6 +80,38 @@ export function resolveTaskResume({
     registryEntry ??
     findTaskSessionHistory(piDir, requestedTaskId) ??
     findJsonlSessionByName(piDir, requestedTaskId, agentName);
+
+  if (isDurableTaskHistoryEntry(entry)) {
+    if (entry.cleanupPending) {
+      return {
+        kind: "handled",
+        result: {
+          content: [{ type: "text", text: `Task "${requestedTaskId}" is cancelled but backend cleanup is still pending; retry after cleanup completes.` }],
+          details: { phase: "failed", error: "cleanup_pending", task_id: entry.id },
+          isError: true,
+        },
+      };
+    }
+    if (entry.status === "running") {
+      return {
+        kind: "handled",
+        result: {
+          content: [{ type: "text", text: `Task "${requestedTaskId}" is already running on the durable backend; do not start an overlapping resume. Use /task status or /task cancel.` }],
+          details: { phase: "failed", error: "durable_task_still_running", task_id: entry.id, backend: "durable" },
+          isError: true,
+        },
+      };
+    }
+    return {
+      kind: "continue",
+      taskParams,
+      id: entry.id,
+      sessionName: entry.sessionName,
+      resume: true,
+      backend: "durable",
+      ...(entry.cwd !== undefined ? { persistedTaskCwd: entry.cwd } : {}),
+    };
+  }
 
   // Older history entries can lack the JSONL path needed by `pi --session`, or
   // hold a stale one. Repair it (and the durable record) before the spawn

@@ -1,6 +1,9 @@
 export {
+  acknowledgePersistedCompletionDeliveries,
   completeTask,
+  completionDeliveryId,
   createCompletionDeliveryQueue,
+  createPersistedCompletionDeliveryScanner,
   type CompleteTaskOptions,
   type CompletionDeliveryQueue,
   type CompletionPhase,

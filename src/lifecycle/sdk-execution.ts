@@ -8,7 +8,6 @@ import {
   assessTaskResult,
   buildAcpTaskSessionData,
   buildTaskEnvelope,
-  completionDeliveryOptions,
   envHardTimeoutMs,
   formatTaskIdPointer,
   parseResultXml,
@@ -17,7 +16,7 @@ import {
   taskResultContentText,
   type AgentConfig,
 } from "../helpers.js";
-import type { BackgroundTask } from "../types.js";
+import type { BackgroundTask, CompletionDeliveryOutcome } from "../types.js";
 import { sessionViewOf } from "../panel/delivery.js";
 import type { DeliveryGuard } from "../panel/delivery.js";
 import { durableParentOf } from "./ownership.js";
@@ -31,6 +30,7 @@ import {
   startSdkBackgroundTask,
 } from "../subagent/sdkBackground.js";
 import { ignoreStaleExtensionCtx } from "../stale-ctx.js";
+import { completionDeliveryId, sendCompletionNotice } from "./completion.js";
 import {
   sendAcpTaskSessionLink,
   watchChildSessionReady,
@@ -65,15 +65,23 @@ export interface SdkTaskExecutionOptions {
   taskWidget: Pick<TaskWidgetController, "requestRender" | "noteTaskFinished">;
   ensureTaskWidget: () => void;
   clearTaskWidgetIfIdle: () => void;
-  enqueueDelivery: (delivery: () => void) => void;
+  enqueueDelivery: (
+    delivery: () => CompletionDeliveryOutcome | void,
+    deliveryId: string,
+  ) => void;
 }
 
 /**
  * A child session is only linkable once its transcript exists on disk, because the
  * client loads it by file. A run that failed before writing one reports no session.
  */
-function linkableSessionId(sessionId?: string, sessionPath?: string | null): string | undefined {
-  return sessionId && sessionPath && existsSync(sessionPath) ? sessionId : undefined;
+function linkableSessionId(
+  sessionId?: string,
+  sessionPath?: string | null,
+): string | undefined {
+  return sessionId && sessionPath && existsSync(sessionPath)
+    ? sessionId
+    : undefined;
 }
 
 export async function executeSdkTask({
@@ -105,47 +113,78 @@ export async function executeSdkTask({
 }: SdkTaskExecutionOptions) {
   let sdkSessionId: string | undefined;
   let sdkSessionPath: string | undefined;
-  const runSdkFallback = async (
-    task?: BackgroundTask,
-    onSession?: (session: any) => () => void,
-  ) =>
-    runSdkSubagent({
-      onSession: (session) => {
-        const sessionId = typeof session?.sessionId === "string" ? session.sessionId : undefined;
-        const sessionPath = typeof session?.sessionFile === "string" ? session.sessionFile : undefined;
-        sdkSessionId = sessionId;
-        sdkSessionPath = sessionPath;
+  const runSdkFallback = async (task?: BackgroundTask) => {
+    try {
+      return await runSdkSubagent({
+        onSession: (session) => {
+          const sessionId =
+            typeof session?.sessionId === "string"
+              ? session.sessionId
+              : undefined;
+          const sessionPath =
+            typeof session?.sessionFile === "string"
+              ? session.sessionFile
+              : undefined;
+          sdkSessionId = sessionId;
+          sdkSessionPath = sessionPath;
+          if (task) {
+            if (sessionPath) task.sessionPath = sessionPath;
+            // Live steering: queue the text into the running child session
+            // (delivered after its current tool calls finish). Process-local:
+            // the callback dies with the task.
+            task.sdkSteer = (text: string): Promise<string | null> =>
+              session.steer(text).then(
+                () => null,
+                (error: unknown) =>
+                  error instanceof Error ? error.message : String(error),
+              );
+          }
 
-        let unsubscribeSessionReady: (() => void) | undefined;
-        if (process.env.PI_ACP === "1" && sessionId && sessionPath) {
-          unsubscribeSessionReady = watchChildSessionReady(session, sessionPath, () =>
-            sendAcpTaskSessionLink(pi, { taskId: id, sessionId, piToolCallId }),
-          );
-        }
+          let unsubscribeSessionReady: (() => void) | undefined;
+          if (process.env.PI_ACP === "1" && sessionId && sessionPath) {
+            unsubscribeSessionReady = watchChildSessionReady(
+              session,
+              sessionPath,
+              () =>
+                sendAcpTaskSessionLink(pi, {
+                  taskId: id,
+                  sessionId,
+                  piToolCallId,
+                }),
+            );
+          }
 
-        const unsubscribeTaskTools = task
-          ? subscribeToolEvents(session, task, 10, taskWidget.requestRender)
-          : onSession?.(session);
-        return () => {
-          unsubscribeSessionReady?.();
-          unsubscribeTaskTools?.();
-        };
-      },
-      sessionName: task?.sessionName ?? sessionName,
-      prompt,
-      agent,
-      cwd,
-      ctx,
-      model: agent.model,
-      thinkingLevel: agent.thinking,
-      tools: toolSelection.tools,
-      excludeTools: toolSelection.excludeTools,
-      systemPrompt: agent.body,
-      skillPaths,
-      fast,
-      signal: task ? signal : undefined,
-      timeoutMs: envHardTimeoutMs(),
-    });
+          const unsubscribeTaskTools = task
+            ? subscribeToolEvents(session, task, 10, taskWidget.requestRender)
+            : undefined;
+          return () => {
+            unsubscribeSessionReady?.();
+            unsubscribeTaskTools?.();
+          };
+        },
+        sessionName: task?.sessionName ?? sessionName,
+        prompt,
+        agent,
+        cwd,
+        ctx,
+        model: agent.model,
+        thinkingLevel: agent.thinking,
+        tools: toolSelection.tools,
+        excludeTools: toolSelection.excludeTools,
+        systemPrompt: agent.body,
+        skillPaths,
+        fast,
+        // Background tasks outlive the parent run's turn: they must NOT be
+        // aborted by the parent's signal just because they are tracked.
+        signal: isBackground ? undefined : signal,
+        timeoutMs: envHardTimeoutMs(),
+      });
+    } finally {
+      // The child session is disposed once the run settles; drop the steering
+      // callback so the disposed session is not retained by the task row.
+      if (task) task.sdkSteer = undefined;
+    }
+  };
 
   if (isBackground) {
     const backgroundTask: BackgroundTask = {
@@ -166,8 +205,6 @@ export async function executeSdkTask({
     backgroundTasks.set(id, backgroundTask);
     deliveryGuard.track(id, sessionViewOf(ctx));
     ensureTaskWidget();
-    const bgOnSession = (session: any) =>
-      subscribeToolEvents(session, backgroundTask, 10, taskWidget.requestRender);
 
     startSdkBackgroundTask({
       id,
@@ -179,102 +216,105 @@ export async function executeSdkTask({
       artifactsDir,
       cwd,
       conversationId,
+      backend: "sdk",
       ...durableParentOf(sessionViewOf(ctx)),
-      run: async () => runSdkFallback(undefined, bgOnSession),
-      deliver: enqueueDelivery,
+      // Pass the task so onSession captures sessionPath + sdkSteer on it;
+      // with `undefined` the background task never gets a steering callback
+      // and steering fails with "SDK steering is unavailable".
+      run: async () => runSdkFallback(backgroundTask),
+      deliver: (delivery) =>
+        enqueueDelivery(delivery, completionDeliveryId(id, backgroundTask.startedAt)),
       onComplete: (result) => {
-        if (!deliveryGuard.allows(sessionViewOf(ctx), id)) return;
+        if (!deliveryGuard.allows(sessionViewOf(ctx), id)) return "suppressed";
         backgroundTask.status = "done";
         const parsed = parseResultXml(result.output);
         const assessment = assessTaskResult(parsed);
         const summary =
           taskResultContentText(parsed, assessment) ||
           "SDK subagent completed without assistant text.";
-        ignoreStaleExtensionCtx(() =>
-          pi.sendMessage(
-            {
-              customType: "task-complete",
-              content: `Background task ${id} (${agent.name}) done.\n\n${summary}`,
-              display: true,
-              details: {
-                ...buildAcpTaskSessionData(
-                  id,
-                  linkableSessionId(result.sessionId, result.sessionPath),
-                  piToolCallId,
-                ),
-                agent_type: agent.name,
-                description,
-                phase: "done",
-                execution_phase: "done",
-                status: assessment.reportedStatus,
-                reported_status: assessment.reportedStatus,
-                raw_status: assessment.rawStatus,
-                result_valid: assessment.valid,
-                result: result.output,
-                summary: parsed.summary,
-                findings: parsed.findings,
-                evidence: parsed.evidence,
-                files: parsed.files,
-                caveats: parsed.caveats,
-                next_steps: parsed.next_steps,
-                confidence: parsed.confidence,
-                duration_ms: Date.now() - backgroundTask.startedAt,
-                tool_uses: backgroundTask.toolUses,
-                turn_count: backgroundTask.turns,
-                background: true,
-                structured_result: structuredResultPayload(assessment),
-                full_output: parsed.raw.trim() || result.output.trim(),
-              },
-            },
-            completionDeliveryOptions(process.env.PI_TASK_COMPLETION_DELIVERY),
-          ),
-        );
+        return sendCompletionNotice(pi, {
+          customType: "task-complete",
+          content: `Background task ${id} (${agent.name}) done.\n\n${summary}`,
+          display: true,
+          details: {
+            ...buildAcpTaskSessionData(
+              id,
+              linkableSessionId(result.sessionId, result.sessionPath),
+              piToolCallId,
+            ),
+            agent_type: agent.name,
+            description,
+            phase: "done",
+            execution_phase: "done",
+            status: assessment.reportedStatus,
+            reported_status: assessment.reportedStatus,
+            raw_status: assessment.rawStatus,
+            result_valid: assessment.valid,
+            result: result.output,
+            summary: parsed.summary,
+            findings: parsed.findings,
+            evidence: parsed.evidence,
+            files: parsed.files,
+            caveats: parsed.caveats,
+            next_steps: parsed.next_steps,
+            confidence: parsed.confidence,
+            duration_ms: Date.now() - backgroundTask.startedAt,
+            tool_uses: backgroundTask.toolUses,
+            turn_count: backgroundTask.turns,
+            background: true,
+            structured_result: structuredResultPayload(assessment),
+            full_output: parsed.raw.trim() || result.output.trim(),
+            completion_delivery_id: completionDeliveryId(id, backgroundTask.startedAt),
+          },
+        });
       },
       onFailed: (error) => {
-        if (!deliveryGuard.allows(sessionViewOf(ctx), id)) return;
+        if (!deliveryGuard.allows(sessionViewOf(ctx), id)) return "suppressed";
         const interrupted = error instanceof SdkSubagentInterruptedError;
-        const phase = interrupted && error.kind === "timeout" ? "timeout" : "failed";
+        const phase =
+          interrupted && error.kind === "timeout" ? "timeout" : "failed";
         backgroundTask.status = phase;
         const message = error instanceof Error ? error.message : String(error);
-        ignoreStaleExtensionCtx(() =>
-          pi.sendMessage(
-            {
-              customType: "task-complete",
-              content: `Background task ${id} (${agent.name}) ${phase}.\n\n${message}`,
-              display: true,
-              details: {
-                ...buildAcpTaskSessionData(
-                  id,
-                  linkableSessionId(sdkSessionId, sdkSessionPath),
-                  piToolCallId,
-                ),
-                agent_type: agent.name,
-                description,
-                phase,
-                execution_phase: phase,
-                status: "unknown",
-                reported_status: "unknown",
-                result_valid: false,
-                summary: message,
-                duration_ms: Date.now() - backgroundTask.startedAt,
-                tool_uses: backgroundTask.toolUses,
-                turn_count: backgroundTask.turns,
-                background: true,
-              },
-            },
-            completionDeliveryOptions(process.env.PI_TASK_COMPLETION_DELIVERY),
-          ),
-        );
+        return sendCompletionNotice(pi, {
+          customType: "task-complete",
+          content: `Background task ${id} (${agent.name}) ${phase}.\n\n${message}`,
+          display: true,
+          details: {
+            ...buildAcpTaskSessionData(
+              id,
+              linkableSessionId(sdkSessionId, sdkSessionPath),
+              piToolCallId,
+            ),
+            agent_type: agent.name,
+            description,
+            phase,
+            execution_phase: phase,
+            status: "unknown",
+            reported_status: "unknown",
+            result_valid: false,
+            summary: message,
+            duration_ms: Date.now() - backgroundTask.startedAt,
+            tool_uses: backgroundTask.toolUses,
+            turn_count: backgroundTask.turns,
+            background: true,
+            completion_delivery_id: completionDeliveryId(id, backgroundTask.startedAt),
+          },
+        });
       },
       onSettled: () => {
-        taskWidget.noteTaskFinished(id, backgroundTasks.get(id) ?? backgroundTask);
+        taskWidget.noteTaskFinished(
+          id,
+          backgroundTasks.get(id) ?? backgroundTask,
+        );
         backgroundTasks.delete(id);
         ignoreStaleExtensionCtx(() => clearTaskWidgetIfIdle());
       },
     });
 
     return {
-      content: [{ type: "text" as const, text: formatSdkBackgroundReceipt(id) }],
+      content: [
+        { type: "text" as const, text: formatSdkBackgroundReceipt(id) },
+      ],
       details: {
         phase: "running" as const,
         backend: "sdk" as const,
@@ -301,6 +341,7 @@ export async function executeSdkTask({
     cwd,
     conversationId,
     background: false,
+    backend: "sdk" as const,
     ...durableParentOf(sessionViewOf(ctx)),
     ownerPid: process.pid,
   };
@@ -324,11 +365,12 @@ export async function executeSdkTask({
     ({ output, sessionId, sessionPath } = await runSdkFallback(foregroundTask));
   } catch (error) {
     const interrupted = error instanceof SdkSubagentInterruptedError;
-    const phase = interrupted && error.kind === "cancelled"
-      ? "cancelled"
-      : interrupted && error.kind === "timeout"
-        ? "timeout"
-        : "failed";
+    const phase =
+      interrupted && error.kind === "cancelled"
+        ? "cancelled"
+        : interrupted && error.kind === "timeout"
+          ? "timeout"
+          : "failed";
     const message = error instanceof Error ? error.message : String(error);
     const failedSessionId = linkableSessionId(sdkSessionId, sdkSessionPath);
     upsertTaskSessionHistory(piDir, {
@@ -337,10 +379,12 @@ export async function executeSdkTask({
       completedAt: Date.now(),
     });
     return {
-      content: [{
-        type: "text" as const,
-        text: `SDK task ${phase}: ${message}\n\n${formatTaskIdPointer({ id, resumable: false })}`,
-      }],
+      content: [
+        {
+          type: "text" as const,
+          text: `SDK task ${phase}: ${message}\n\n${formatTaskIdPointer({ id, resumable: false })}`,
+        },
+      ],
       details: {
         task_id: id,
         background: false,
@@ -359,7 +403,8 @@ export async function executeSdkTask({
     clearForegroundRow();
   }
 
-  const finalOutput = output || "SDK subagent completed without assistant text.";
+  const finalOutput =
+    output || "SDK subagent completed without assistant text.";
   const completedSessionId = linkableSessionId(sessionId, sessionPath);
   const parsed = parseResultXml(finalOutput);
   const assessment = assessTaskResult(parsed);

@@ -5,7 +5,11 @@ import {
 } from "../conversation.js";
 import { assessTaskResult, parseResultXml } from "../helpers.js";
 import { TASK_BACKGROUND_RECEIPT_GUIDANCE } from "../constants.js";
-import type { TaskSessionHistoryEntry } from "../types.js";
+import { isProcessAliveOrUnknown } from "../process.js";
+import type {
+  CompletionDeliveryOutcome,
+  TaskSessionHistoryEntry,
+} from "../types.js";
 
 export interface SdkBackgroundResult {
   output: string;
@@ -13,7 +17,9 @@ export interface SdkBackgroundResult {
   sessionPath?: string | null;
 }
 
-export interface SdkBackgroundTaskInput {
+export interface SdkBackgroundTaskInput<
+  TResult extends SdkBackgroundResult = SdkBackgroundResult,
+> {
   id: string;
   agentType: string;
   description: string;
@@ -25,15 +31,17 @@ export interface SdkBackgroundTaskInput {
   conversationId?: string;
   ownerSessionId?: string;
   ownerLeafId?: string | null;
+  backend?: TaskSessionHistoryEntry["backend"];
+  durableRequestId?: string;
   comparisonGroupId?: string;
   comparisonModel?: string;
   comparisonDescription?: string;
   comparisonIndex?: 0 | 1;
-  run: () => Promise<SdkBackgroundResult>;
+  run: () => Promise<TResult>;
   /** Optional debounce hook for parent notifications. */
-  deliver?: (delivery: () => void) => void;
-  onComplete?: (result: SdkBackgroundResult) => void;
-  onFailed?: (error: unknown) => void;
+  deliver?: (delivery: () => CompletionDeliveryOutcome | void) => void;
+  onComplete?: (result: TResult) => CompletionDeliveryOutcome | void;
+  onFailed?: (error: unknown) => CompletionDeliveryOutcome | void;
   onSettled?: () => void;
   now?: () => number;
 }
@@ -52,8 +60,20 @@ function reportDurableRecordFailure(error: unknown, phase: string): void {
   }
 }
 
-export function startSdkBackgroundTask(input: SdkBackgroundTaskInput): void {
+export function startSdkBackgroundTask<TResult extends SdkBackgroundResult>(
+  input: SdkBackgroundTaskInput<TResult>,
+): void {
   const now = input.now ?? Date.now;
+  const dispatchNotification = (
+    notify: () => CompletionDeliveryOutcome | void,
+  ) => {
+    try {
+      if (input.deliver) input.deliver(notify);
+      else notify();
+    } catch {
+      // Dispatch failures must not rewrite an already-settled task status.
+    }
+  };
 
   // Shared durable-record shape; `extra` keys are spread so absent keys keep
   // upsert's merge semantics (no accidental field clobbering).
@@ -71,8 +91,13 @@ export function startSdkBackgroundTask(input: SdkBackgroundTaskInput): void {
       dir: input.artifactsDir,
       cwd: input.cwd,
       conversationId: input.conversationId,
+      backend: input.backend ?? "sdk",
+      ...(input.durableRequestId !== undefined
+        ? { durableRequestId: input.durableRequestId }
+        : {}),
       ownerSessionId: input.ownerSessionId,
       ownerLeafId: input.ownerLeafId,
+      ownerPid: process.pid,
       status,
       background: true,
       comparisonGroupId: input.comparisonGroupId,
@@ -112,37 +137,24 @@ export function startSdkBackgroundTask(input: SdkBackgroundTaskInput): void {
         reportDurableRecordFailure(error, "completion");
         // See the step-guard note above.
       }
-      const notify = () => {
-        try {
-          input.onComplete?.(result);
-        } catch {
-          // Parent notification failure must not rewrite a completed task as failed.
-        }
-      };
-      if (input.deliver) input.deliver(notify);
-      else notify();
+      const notify = () => input.onComplete?.(result);
+      dispatchNotification(notify);
     })
     .catch((error: unknown) => {
-      const timeout =
-        error !== null &&
-        typeof error === "object" &&
-        (error as { kind?: unknown }).kind === "timeout";
-      const status: TaskSessionHistoryEntry["status"] = timeout ? "timeout" : "failed";
+      const kind =
+        error !== null && typeof error === "object"
+          ? (error as { kind?: unknown }).kind
+          : undefined;
+      const status: TaskSessionHistoryEntry["status"] =
+        kind === "timeout" ? "timeout" : kind === "cancelled" ? "cancelled" : "failed";
       try {
         record(status, { completedAt: now() });
       } catch (error) {
         reportDurableRecordFailure(error, "failure");
         // Best-effort durable record of the failure.
       }
-      const notify = () => {
-        try {
-          input.onFailed?.(error);
-        } catch {
-          // Notification failure does not change the durable task failure.
-        }
-      };
-      if (input.deliver) input.deliver(notify);
-      else notify();
+      const notify = () => input.onFailed?.(error);
+      dispatchNotification(notify);
     })
     .finally(() => {
       try {
@@ -161,17 +173,35 @@ export function startSdkBackgroundTask(input: SdkBackgroundTaskInput): void {
  * Reconcile its running history rows before normal restore/replay so a dead
  * host never leaves an indefinitely-running task behind.
  */
-export function reconcileStaleSdkBackgroundTasks(piDir: string): string[] {
+export function reconcileStaleSdkBackgroundTasks(
+  piDir: string,
+  durableTaskIds: ReadonlySet<string> = new Set(),
+  options: {
+    sessionId?: string;
+    isProcessAlive?: (pid: number) => boolean;
+  } = {},
+): string[] {
   const staleIds: string[] = [];
+  const isProcessAlive = options.isProcessAlive ?? isProcessAliveOrUnknown;
   for (const entry of readTaskSessionHistory(piDir)) {
     if (
       entry.status !== "running" ||
       !entry.background ||
       entry.handle ||
-      entry.paneId
+      entry.paneId ||
+      durableTaskIds.has(entry.id) ||
+      (entry.backend === undefined && entry.comparisonGroupId === undefined) ||
+      (entry.backend !== undefined && entry.backend !== "sdk")
     ) {
       continue;
     }
+    const foreignOwner =
+      entry.ownerSessionId !== undefined &&
+      (options.sessionId === undefined ||
+        options.sessionId === "" ||
+        entry.ownerSessionId !== options.sessionId);
+    if (entry.ownerPid !== undefined && isProcessAlive(entry.ownerPid)) continue;
+    if (foreignOwner && entry.ownerPid === undefined) continue;
     staleIds.push(entry.id);
     upsertTaskSessionHistory(piDir, {
       ...entry,

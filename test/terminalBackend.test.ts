@@ -310,3 +310,91 @@ test("CLI_TIMEOUT_MS pins the default kill bound at 30 seconds", () => {
   // pins the default value the polling latch relies on.
   assert.equal(CLI_TIMEOUT_MS, 30_000);
 });
+
+test("settings taskBackend selects durable without the env var", async () => {
+  const keys = ["PI_TASK_BACKEND", "PI_TASK_USE_TMUX_BACKEND", "PI_TASK_USE_SDK_BACKEND"];
+  const previous = new Map(keys.map((k) => [k, process.env[k]]));
+  delete process.env.PI_TASK_BACKEND;
+  delete process.env.PI_TASK_USE_TMUX_BACKEND;
+  delete process.env.PI_TASK_USE_SDK_BACKEND;
+
+  try {
+    const result = await resolveTaskBackend({ settingsBackend: "durable" });
+    assert.equal(result.ok, true);
+    if (!result.ok) assert.fail(result.error);
+    assert.equal(result.requestedBackend, "durable");
+    assert.equal(result.selectedBackend, "durable");
+  } finally {
+    for (const key of keys) {
+      const value = previous.get(key);
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("env PI_TASK_BACKEND overrides the settings taskBackend", async () => {
+  const keys = ["PI_TASK_BACKEND", "PI_TASK_USE_TMUX_BACKEND", "PI_TASK_USE_SDK_BACKEND"];
+  const previous = new Map(keys.map((k) => [k, process.env[k]]));
+  process.env.PI_TASK_BACKEND = "sdk";
+  delete process.env.PI_TASK_USE_TMUX_BACKEND;
+  delete process.env.PI_TASK_USE_SDK_BACKEND;
+
+  try {
+    const result = await resolveTaskBackend({ settingsBackend: "durable" });
+    assert.equal(result.ok, true);
+    if (!result.ok) assert.fail(result.error);
+    assert.equal(result.requestedBackend, "sdk");
+    assert.equal(result.selectedBackend, "sdk");
+  } finally {
+    for (const key of keys) {
+      const value = previous.get(key);
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("invalid settings taskBackend is rejected with an explicit error", async () => {
+  const keys = ["PI_TASK_BACKEND", "PI_TASK_USE_TMUX_BACKEND", "PI_TASK_USE_SDK_BACKEND"];
+  const previous = new Map(keys.map((k) => [k, process.env[k]]));
+  delete process.env.PI_TASK_BACKEND;
+  delete process.env.PI_TASK_USE_TMUX_BACKEND;
+  delete process.env.PI_TASK_USE_SDK_BACKEND;
+
+  try {
+    const result = await resolveTaskBackend({ settingsBackend: "warp" });
+    assert.equal(result.ok, false);
+    if (result.ok) assert.fail(result.error);
+    assert.equal(result.kind, "invalid");
+    assert.match(result.error, /taskBackend=warp/);
+  } finally {
+    for (const key of keys) {
+      const value = previous.get(key);
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test("blank PI_TASK_BACKEND is treated as unset (settings wins)", async () => {
+  const keys = ["PI_TASK_BACKEND", "PI_TASK_USE_TMUX_BACKEND", "PI_TASK_USE_SDK_BACKEND"];
+  const previous = new Map(keys.map((k) => [k, process.env[k]]));
+  process.env.PI_TASK_BACKEND = "";
+  delete process.env.PI_TASK_USE_TMUX_BACKEND;
+  delete process.env.PI_TASK_USE_SDK_BACKEND;
+
+  try {
+    const result = await resolveTaskBackend({ settingsBackend: "durable" });
+    assert.equal(result.ok, true);
+    if (!result.ok) assert.fail(result.error);
+    assert.equal(result.requestedBackend, "durable", "blank env must not shadow settings");
+    assert.equal(result.selectedBackend, "durable");
+  } finally {
+    for (const key of keys) {
+      const value = previous.get(key);
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});

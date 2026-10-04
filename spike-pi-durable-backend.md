@@ -87,10 +87,15 @@ the result is delivered exactly once.
 backend (`PI_TASK_BACKEND=durable`), dogfooded locally.** The pattern-level
 adoption (replay-safe fresh starts) stays for every backend.
 
+Durable generation now resolves models through the current Pi
+`ExtensionContext.modelRegistry` and delegates requests to its `streamSimple`
+method, so Pi applies request-time auth (including OAuth) without copying
+credentials into durable storage. The current session model is the default;
+agent frontmatter can still select a specific provider/model.
+
 Remaining gaps, tracked and unscheduled:
-- **Credential bridge**: durable children run on env-key providers only
-  (`createModels()`); OAuth-backed models need a bridge from pi's runtime
-  auth. Blocks wider promotion.
+- Deferred provider responses: Pi's public extension `ModelRegistry` does not
+  expose deferred fetch/cancel, so the durable bridge rejects that capability.
 - Usage on failure paths: recovered/finished runs surface the child's
   `pi.usage` ledger in receipts; failed runs do not read it yet.
 - Multi-surface (remote clients steering the same durable conversation) is

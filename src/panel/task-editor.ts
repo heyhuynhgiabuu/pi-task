@@ -30,6 +30,8 @@ import {
 export interface TaskPanelHost {
   /** Current panel state (selection + open view). */
   panelState(): PanelViewState;
+  /** Whether task rows are visible and safe to navigate from the editor. */
+  taskMonitorVisible(): boolean;
   /** Rows in focused order (running first, then finished). */
   panelRows(): TaskPanelRow[];
   /** Apply a selection move. */
@@ -44,6 +46,8 @@ export interface TaskPanelHost {
   onScrollView(delta: number): void;
   /** Close the transcript view back to the conversation. */
   onExitView(): void;
+  /** Cancel the /agents picker and restore the transcript it interrupted. */
+  onCancelSwitcher?(): void;
   requestRender(): void;
 }
 
@@ -65,9 +69,19 @@ export class TaskPanelEditor extends CustomEditor {
     const state = host.panelState();
     const rows = host.panelRows();
     const viewOpen = state.viewTaskId !== null;
+    const taskMonitorVisible = host.taskMonitorVisible();
+
+    if (!taskMonitorVisible && state.selection !== null) {
+      host.onSelect(null);
+      host.requestRender();
+    }
+    if (!viewOpen && !taskMonitorVisible) {
+      super.handleInput(data);
+      return;
+    }
 
     if (viewOpen) {
-      if (state.selection !== null) {
+      if (state.selection !== null && taskMonitorVisible) {
         // Navigation keys move the selection; anything else returns focus to
         // the editor so typing (and Enter-to-steer) targets the viewed task.
         const action = dispatchPanelKey(data, state.selection, rows, "view");
@@ -81,7 +95,6 @@ export class TaskPanelEditor extends CustomEditor {
           return;
         }
         if (action.kind === "enter") {
-          host.onSelect(null);
           host.onEnter(action.taskId);
           return;
         }
@@ -99,17 +112,19 @@ export class TaskPanelEditor extends CustomEditor {
         return;
       }
       if (matchesKey(data, "pageUp")) {
-        host.onScrollView(-10);
+        // Pane semantics: positive delta scrolls back toward older lines.
+        host.onScrollView(10);
         return;
       }
       if (matchesKey(data, "pageDown")) {
-        host.onScrollView(10);
+        host.onScrollView(-10);
         return;
       }
       if (
         matchesKey(data, "down") &&
         this.getText() === "" &&
-        rows.length > 0
+        rows.length > 0 &&
+        taskMonitorVisible
       ) {
         // Enter navigation at the top (main); one more down + enter returns
         // to the conversation.
@@ -153,11 +168,19 @@ export class TaskPanelEditor extends CustomEditor {
         host.onSelect(action.selection);
         return;
       case "clear":
+        // Cancel while the /agents picker interrupted a transcript: the
+        // controller restores it (the picker contract is "preserves the
+        // current view on cancel"). Must run before the selection is cleared,
+        // since the controller reads the interrupted task id from here.
+        if (state.switcherMode && host.onCancelSwitcher) {
+          host.onCancelSwitcher();
+          host.requestRender();
+          return;
+        }
         host.onSelect(null);
         host.requestRender();
         return;
       case "enter":
-        host.onSelect(null);
         host.onEnter(action.taskId);
         return;
       case "stop":

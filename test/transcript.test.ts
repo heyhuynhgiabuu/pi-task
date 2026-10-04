@@ -1,12 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
   MAX_TRANSCRIPT_ITEMS,
   findTaskSessionFile,
+  readTaskSessionFile,
   readTaskTranscript,
   transcriptActivity,
 } from "../src/panel/transcript.js";
@@ -121,6 +122,7 @@ test("readTaskTranscript parses user/assistant/tool rows and pairs tool calls wi
     assert.deepEqual(tool.args, { command: "git status" });
     assert.equal(tool.result, "M src/index.ts");
     assert.equal(tool.isError, false);
+    assert.equal(tool.inProgress, false);
   }
   if (final.type === "assistant") {
     assert.equal(final.text, "Cleanup verified.");
@@ -229,4 +231,59 @@ test("transcriptSignature changes when the session file grows and is empty for m
   const sig2 = transcriptSignature(dir);
   assert.notEqual(sig2, sig1, "growing the file must change the signature");
   assert.equal(transcriptSignature("/nonexistent/dir"), "");
+});
+
+test("parser strips ANSI from tool results and keeps literal text intact", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-task-transcript-ansi-"));
+  try {
+    const file = join(dir, "session.jsonl");
+    writeFileSync(
+      file,
+      [
+        JSON.stringify({
+          type: "session",
+          version: 3,
+          id: "s1",
+          timestamp: "2026-08-19T00:00:00.000Z",
+        }),
+        JSON.stringify({
+          type: "message",
+          timestamp: "2026-08-19T00:00:01.000Z",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "text", text: "The array literal [1, 2] is fine and so is a literal \\x1b[34m escape." },
+            ],
+          },
+        }),
+        JSON.stringify({
+          type: "message",
+          timestamp: "2026-08-19T00:00:02.000Z",
+          message: {
+            role: "toolResult",
+            toolCallId: "call-1",
+            content: [
+              {
+                type: "text",
+                text: "\x1b[34m fail 0\x1b[39m\n\x1b[32m pass 12\x1b[39m\narrays [34m look like [39m text",
+              },
+            ],
+          },
+        }),
+      ].join("\n") + "\n",
+    );
+
+    const { items, found } = readTaskSessionFile(file);
+    assert.equal(found, true);
+    const tool = items.find((i) => i.type === "tool");
+    assert.ok(tool, "tool item parsed");
+    if (tool.type !== "tool") return;
+    assert.equal(tool.result?.includes("\x1b"), false, "SGR escapes stripped");
+    assert.match(tool.result ?? "", /fail 0/, "text content preserved");
+    assert.match(tool.result ?? "", /\[34m look like \[39m text/, "literal bracket text (no ESC) survives");
+    const assistant = items.find((i) => i.type === "assistant");
+    assert.match(assistant && assistant.type === "assistant" ? assistant.text : "", /\\x1b\[34m escape/, "literal backslash-escape text survives");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -1,4 +1,5 @@
-import type { ExtensionContext, SettingsManager } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, ModelRuntime, SettingsManager } from "@earendil-works/pi-coding-agent";
+import { join } from "node:path";
 import { createTaskFastModeInlineExtension } from "../fast-mode.js";
 import type { AgentConfig } from "../helpers.js";
 
@@ -74,6 +75,50 @@ export async function resolveSdkModel(
     return undefined;
   }
   return available[0];
+}
+
+/**
+ * Build the model runtime for an isolated SDK subagent session.
+ *
+ * Child sessions deliberately load no extensions (`noExtensions: true`), but
+ * providers registered by parent-session packages/extensions via
+ * `pi.registerProvider` (for example OAuth providers like `antigravity`)
+ * would then be unknown to the child's default runtime, so auth resolution
+ * fails with "No API key found for <provider>" even though credentials exist.
+ * Re-register those providers into a fresh runtime, through the public
+ * registry facade, so auth resolves exactly as it does for the parent.
+ * Returns undefined when the parent has no extension-registered providers;
+ * the child then uses the SDK's default runtime.
+ */
+export async function createSdkChildModelRuntime(
+  ctx: Pick<ExtensionContext, "modelRegistry">,
+  agentDir: string,
+): Promise<ModelRuntime | undefined> {
+  const registry = ctx.modelRegistry as any;
+  const registeredIds: readonly string[] = registry?.getRegisteredProviderIds?.() ?? [];
+  if (registeredIds.length === 0) return undefined;
+  const { ModelRuntime: ModelRuntimeClass } = await import("@earendil-works/pi-coding-agent");
+  const runtime = await ModelRuntimeClass.create({
+    authPath: join(agentDir, "auth.json"),
+    modelsPath: join(agentDir, "models.json"),
+  });
+  for (const id of registeredIds) {
+    // A provider whose stored config fails re-validation must not kill the
+    // whole subagent run — skip it (the child loses that provider; other
+    // tools and providers keep working) instead of aborting.
+    try {
+      const config = registry.getRegisteredProviderConfig?.(id);
+      if (config) {
+        runtime.registerProvider(id, config);
+        continue;
+      }
+      const native = registry.getRegisteredNativeProvider?.(id);
+      if (native) runtime.registerNativeProvider(native);
+    } catch {
+      // Skip the broken provider; keep the rest of the run alive.
+    }
+  }
+  return runtime;
 }
 
 let activeSdkRuns = 0;
@@ -193,6 +238,7 @@ export async function runSdkSubagent(options: RunSdkSubagentOptions): Promise<{
   let unsubSession: (() => void) | undefined;
   try {
     const agentDir = getAgentDir();
+    const modelRuntime = await createSdkChildModelRuntime(options.ctx, agentDir);
     const settingsManager = SettingsManager.create(options.cwd, agentDir, {
       projectTrusted: options.ctx.isProjectTrusted(),
     });
@@ -212,6 +258,7 @@ export async function runSdkSubagent(options: RunSdkSubagentOptions): Promise<{
     ({ session } = await createAgentSession({
       cwd: options.cwd,
       agentDir,
+      modelRuntime: modelRuntime ?? undefined,
       model,
       thinkingLevel: options.thinkingLevel as any,
       tools: options.tools,

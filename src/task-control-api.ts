@@ -36,6 +36,7 @@ export interface TaskControlDependencies {
   pi: ExtensionAPI;
   piDir: string;
   backgroundTasks: Map<string, BackgroundTask>;
+  foregroundTasks?: Map<string, BackgroundTask>;
   registryEntryStatus(entry: RegistryEntry): TaskResourceStatus;
   clearTaskWidgetIfIdle(): void;
   completeTask?: typeof persistCompletedTask;
@@ -49,6 +50,7 @@ export interface TaskControlDependencies {
 function taskControlRecords(deps: TaskControlDependencies): TaskControlRecord[] {
   return [
     ...[...deps.backgroundTasks.entries()].map(([id, task]) => fromBackgroundTask(id, task)),
+    ...[...(deps.foregroundTasks?.entries() ?? [])].map(([id, task]) => fromBackgroundTask(id, task)),
     ...readRegistry(deps.piDir).map(fromRegistryEntry),
     ...readTaskSessionHistory(deps.piDir).map(fromHistoryEntry),
   ];
@@ -236,26 +238,33 @@ export async function handleTaskControl(
   }
 
   // The durable backend has no pane resource: cancellation is an abort of the
-  // child conversation, and the registry entry is optional (the durable
-  // source of truth is the harness storage, not task-registry.json).
-  let durableAbortError: string | null = null;
+  // active runner or, after restart, its child conversation. The registry entry
+  // is optional because harness storage is authoritative. A live runner owns
+  // its terminal history, panel cleanup, and background receipt.
+  const activeTask = deps.backgroundTasks.get(record.id)
+    ?? deps.foregroundTasks?.get(record.id);
+  const hasActiveDurableRunner = decision.backend === "durable" && activeTask !== undefined;
   if (decision.backend === "durable") {
-    if (!deps.abortDurable) {
-      return errorResult(
-        request,
-        `Task "${record.id}" cannot be cancelled because the durable abort hook is unavailable.`,
-        "durable_cancel_unavailable",
-        { backend: decision.backend },
-      );
-    }
-    durableAbortError = await deps.abortDurable(record.id);
-    if (durableAbortError) {
-      return errorResult(
-        request,
-        `Task "${record.id}" could not be cancelled: ${durableAbortError}`,
-        "durable_abort_failed",
-        { backend: decision.backend },
-      );
+    if (activeTask?.durableAbortController) {
+      activeTask.durableAbortController.abort();
+    } else {
+      if (!deps.abortDurable) {
+        return errorResult(
+          request,
+          `Task "${record.id}" cannot be cancelled because the durable abort hook is unavailable.`,
+          "durable_cancel_unavailable",
+          { backend: decision.backend },
+        );
+      }
+      const durableAbortError = await deps.abortDurable(record.id);
+      if (durableAbortError) {
+        return errorResult(
+          request,
+          `Task "${record.id}" could not be cancelled: ${durableAbortError}`,
+          "durable_abort_failed",
+          { backend: decision.backend },
+        );
+      }
     }
   } else {
     if (!entry) {
@@ -282,7 +291,21 @@ export async function handleTaskControl(
     }
   }
 
-  const task = deps.backgroundTasks.get(record.id)
+  if (hasActiveDurableRunner) {
+    return {
+      content: [{ type: "text", text: `Cancelled task ${record.id} (${record.agentType}) via durable.` }],
+      details: {
+        operation: "cancel",
+        task_id: record.id,
+        agent_type: record.agentType,
+        backend: "durable",
+        status: "cancelled",
+        phase: "done",
+      },
+    };
+  }
+
+  const task = activeTask
     ?? (entry
       ? backgroundTaskFromRegistry(entry)
       : {
@@ -318,6 +341,7 @@ export async function handleTaskControl(
     // Panel notification is best-effort.
   }
   deps.backgroundTasks.delete(record.id);
+  deps.foregroundTasks?.delete(record.id);
   try {
     deps.clearTaskWidgetIfIdle();
   } catch {

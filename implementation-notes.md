@@ -169,8 +169,20 @@ off the table; the spike doc records the decision and the tracked gaps.
 - Tests assert the ledger shape (faux models report nothing, so totals are
   zeros — the assertion pins the plumbing, not provider data).
 
+### M4 follow-up — Pi runtime model/auth bridge (2026-10-02)
+
+- Durable runs now use the current `ExtensionContext.modelRegistry` for model
+  lookup and request-time `streamSimple`, including OAuth-backed Pi providers.
+  The selected session model is the fallback when agent frontmatter has no
+  `model`; resume receives the new session's registry. Credentials remain in
+  Pi's auth runtime and are not copied to the durable database.
+- RED/GREEN integration tests use a faux provider: before the bridge the
+  durable child settles with `no_model`; after it, both fresh and resumed
+  submissions resolve through the supplied runtime registry.
+- `ExtensionContext.modelRegistry` exposes no deferred fetch/cancel methods;
+  the durable bridge rejects deferred provider responses explicitly.
+
 ### Remaining gaps (tracked in the spike doc)
 
-- Credential bridge (env-key providers only) — blocks wider promotion.
 - Usage is not read on failure paths (failed runs report no ledger).
 - Steer/abort racing the mapping-doc commit window remains untested.

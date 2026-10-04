@@ -38,3 +38,39 @@ test("tmux polling ignores SDK-managed background tasks", async () => {
   stop();
   assert.equal(completionChecks, 0);
 });
+
+test("filesystem polling ignores durable tasks managed by pi-durable", async () => {
+  const task = {
+    backend: "durable",
+    dir: "/tmp/pi-task-durable-artifacts",
+    sessionName: "durable-session",
+    originalPane: null,
+    startedAt: Date.now(),
+  };
+  const backgroundTasks = new Map([["durable-1", task]]);
+  let completionChecks = 0;
+  const stop = startBackgroundPolling(
+    {
+      backgroundTasks,
+      checkTaskCompletion: async () => {
+        completionChecks += 1;
+        return { status: "completed", content: "filesystem must not settle this task" };
+      },
+      clearTaskWidgetIfIdle: () => {},
+      completeTask: () => {},
+      hardTimeoutMs: 10_000,
+      MAX_POLL_ERRORS: 3,
+      piDir: "/tmp",
+      pi: {},
+    },
+    5,
+  );
+
+  try {
+    await sleep(30);
+  } finally {
+    stop();
+  }
+  assert.equal(completionChecks, 0);
+  assert.equal(backgroundTasks.get("durable-1"), task, "the durable monitor retains its row");
+});

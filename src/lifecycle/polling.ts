@@ -112,7 +112,9 @@ export function startBackgroundPolling(
     return true;
   };
   const pollTask = async (id: string, task: BackgroundTask): Promise<void> => {
-    if (task.backend === "sdk") return;
+    // SDK and durable tasks own their completion/progress stream; neither is
+    // settled from the terminal-session artifact layout below.
+    if (task.backend === "sdk" || task.backend === "durable") return;
     try {
       const sessionDir = join(task.dir, "sessions", id);
       const elapsed = Date.now() - task.startedAt;
@@ -239,7 +241,7 @@ export function startBackgroundPolling(
 
     try {
       const pendingTasks = Array.from(deps.backgroundTasks.entries())
-        .filter(([, task]) => task.backend !== "sdk");
+        .filter(([, task]) => task.backend !== "sdk" && task.backend !== "durable");
       if (pendingTasks.length === 0) return;
 
       // Poll tasks independently so one slow pane cannot hold up all siblings,

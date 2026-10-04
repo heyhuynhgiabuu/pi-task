@@ -13,7 +13,7 @@ import {
   fauxProvider,
   fauxToolCall,
 } from "@earendil-works/pi-ai/providers/faux";
-import { runDurableTask } from "../src/subagent/durable.js";
+import { durableRequestId, runDurableTask } from "../src/subagent/durable.js";
 
 const [databasePath, piDir, taskId] = process.argv.slice(2);
 if (!databasePath || !piDir || !taskId) {
@@ -38,6 +38,7 @@ void runDurableTask({
   piDir,
   taskId,
   task: "Run the long sleep.",
+  requestId: durableRequestId(taskId, "call:crash"),
   databasePath,
   models: () => models,
   onSubmitted: (conversationId) => {

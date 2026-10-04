@@ -19,6 +19,10 @@ import type { ComparisonRunResult } from "../src/helpers.js";
 import { restoreComparisonGroups } from "../src/index.js";
 import { executeComparisonTerminalForeground } from "../src/lifecycle/comparison-terminal-foreground.js";
 import { executeSdkComparison } from "../src/lifecycle/comparison-sdk-execution.js";
+import {
+  acknowledgePersistedCompletionDeliveries,
+  createCompletionDeliveryQueue,
+} from "../src/lifecycle/completion.js";
 import { DeliveryGuard } from "../src/panel/delivery.js";
 import type { SdkBackgroundTaskInput } from "../src/subagent/sdkBackground.js";
 import type { TerminalBackend } from "../src/subagent/terminalBackend.js";
@@ -113,6 +117,237 @@ test("ComparisonCoordinator waits for both sibling tasks before delivering repor
   // Group cleaned up
   assert.equal(coordinator.isComparisonTask("task-1-m0"), false);
   assert.equal(coordinator.isComparisonTask("task-1-m1"), false);
+});
+
+test("comparison reports remain guarded until Pi persists the full report", async () => {
+  const queue = createCompletionDeliveryQueue(0);
+  try {
+    const coordinator = new ComparisonCoordinator({
+      enqueueDelivery: (deliveryId, delivery, onPersisted) =>
+        queue.enqueue(deliveryId, delivery, onPersisted),
+    });
+    coordinator.registerGroup(
+      "queued-full-group",
+      "queued-full-base",
+      "reviewer",
+      "Queued full report",
+      ["queued-full-a", "queued-full-b"],
+      ["model-a", "model-b"],
+    );
+    const sentMessages: any[] = [];
+    const fakePi: any = { sendMessage: (message: any) => sentMessages.push(message) };
+    const deliveredGroups: string[][] = [];
+    const run = (taskId: string, model: string): ComparisonRunResult => ({
+      model,
+      taskId,
+      status: "success",
+      rawStatus: "done",
+      summary: `Completed ${model}`,
+      findings: "",
+      evidence: "",
+      files: "",
+      caveats: "",
+      nextSteps: "",
+      toolUses: 1,
+      durationMs: 10,
+    });
+
+    coordinator.recordTaskSettled("queued-full-a", run("queued-full-a", "model-a"), fakePi);
+    coordinator.recordTaskSettled(
+      "queued-full-b",
+      run("queued-full-b", "model-b"),
+      fakePi,
+      true,
+      (taskIds) => deliveredGroups.push(taskIds),
+    );
+    assert.equal(queue.hasPending(), true);
+    assert.equal(sentMessages.length, 0);
+    await sleep(0);
+    assert.equal(sentMessages.length, 1);
+    assert.equal(queue.hasPending(), true, "queue flush is not native persistence");
+    assert.equal(deliveredGroups.length, 0, "history remains replayable until persistence");
+
+    acknowledgePersistedCompletionDeliveries(queue, [{
+      type: "custom_message",
+      customType: "task-complete",
+      details: sentMessages[0].details,
+    }]);
+    assert.equal(queue.hasPending(), false);
+    assert.deepEqual(deliveredGroups, [["queued-full-a", "queued-full-b"]]);
+  } finally {
+    queue.dispose();
+  }
+});
+
+test("comparison report rechecks its owner guard when queued delivery flushes", () => {
+  const coordinator = new ComparisonCoordinator({
+    enqueueDelivery: (_deliveryId, delivery) => { queuedDelivery = delivery; },
+  });
+  coordinator.registerGroup(
+    "guard-change-group",
+    "guard-change-base",
+    "reviewer",
+    "Guard changes before dispatch",
+    ["guard-change-a", "guard-change-b"],
+    ["model-a", "model-b"],
+  );
+  const makeRun = (taskId: string, model: string): ComparisonRunResult => ({
+    model,
+    taskId,
+    status: "success",
+    rawStatus: "done",
+    summary: "completed",
+    findings: "",
+    evidence: "",
+    files: "",
+    caveats: "",
+    nextSteps: "",
+    toolUses: 0,
+    durationMs: 1,
+  });
+  const fakePi: any = { sendMessage: () => { sent += 1; } };
+  let allowed = true;
+  let sent = 0;
+  let queuedDelivery: (() => unknown) | undefined;
+  coordinator.recordTaskSettled(
+    "guard-change-a",
+    makeRun("guard-change-a", "model-a"),
+    fakePi,
+    true,
+    undefined,
+    () => allowed,
+  );
+  coordinator.recordTaskSettled(
+    "guard-change-b",
+    makeRun("guard-change-b", "model-b"),
+    fakePi,
+    true,
+    undefined,
+    () => allowed,
+  );
+
+  assert.ok(queuedDelivery, "the report is enqueued while the owner guard allows it");
+  allowed = false;
+  assert.equal(queuedDelivery(), "suppressed");
+  assert.equal(sent, 0, "a result is not sent into a replacement branch");
+});
+
+test("comparison replay recognizes its already-persisted report after restore", async () => {
+  const persistedDeliveryIds = new Set<string>();
+  const taskIds: [string, string] = ["restored-a", "restored-b"];
+  const models: [string, string] = ["model-a", "model-b"];
+  const makeRun = (taskId: string, model: string): ComparisonRunResult => ({
+    model,
+    taskId,
+    status: "success",
+    rawStatus: "done",
+    summary: `Completed ${model}`,
+    findings: "",
+    evidence: "",
+    files: "",
+    caveats: "",
+    nextSteps: "",
+    toolUses: 1,
+    durationMs: 10,
+  });
+
+  const firstQueue = createCompletionDeliveryQueue(0);
+  const firstCoordinator = new ComparisonCoordinator({
+    enqueueDelivery: (deliveryId, delivery, onPersisted) =>
+      firstQueue.enqueue(deliveryId, delivery, onPersisted),
+  });
+  firstCoordinator.registerGroup("stable-group", "stable-base", "reviewer", "Stable report", taskIds, models);
+  const firstMessages: any[] = [];
+  const fakePi: any = { sendMessage: (message: any) => firstMessages.push(message) };
+  firstCoordinator.recordTaskSettled(taskIds[0], makeRun(taskIds[0], models[0]), fakePi);
+  firstCoordinator.recordTaskSettled(taskIds[1], makeRun(taskIds[1], models[1]), fakePi);
+  await sleep(0);
+  assert.equal(firstMessages.length, 1);
+  const persistedId = firstMessages[0].details.completion_delivery_id as string;
+  persistedDeliveryIds.add(persistedId);
+  firstQueue.dispose();
+
+  const replayQueue = createCompletionDeliveryQueue(0);
+  const replayCoordinator = new ComparisonCoordinator({
+    enqueueDelivery: (deliveryId, delivery, onPersisted) =>
+      replayQueue.enqueue(deliveryId, delivery, onPersisted),
+  });
+  replayQueue.setPersistedDeliveryIdsReader(() => persistedDeliveryIds);
+  replayCoordinator.registerGroup("stable-group", "stable-base", "reviewer", "Stable report", taskIds, models);
+  const replayMessages: any[] = [];
+  const replayPi: any = { sendMessage: (message: any) => replayMessages.push(message) };
+  let replayMarkerCount = 0;
+  replayCoordinator.recordTaskSettled(taskIds[0], makeRun(taskIds[0], models[0]), replayPi);
+  replayCoordinator.recordTaskSettled(
+    taskIds[1],
+    makeRun(taskIds[1], models[1]),
+    replayPi,
+    true,
+    () => { replayMarkerCount += 1; },
+  );
+  await sleep(0);
+  assert.equal(replayMessages.length, 0, "restored group IDs match the persisted report ID");
+  assert.equal(replayQueue.hasPending(), false);
+  assert.equal(replayMarkerCount, 1, "the persisted report repairs its history marker");
+  replayQueue.dispose();
+});
+
+test("comparison partial markers wait until Pi persists the partial report", async () => {
+  const queue = createCompletionDeliveryQueue(0);
+  try {
+    const coordinator = new ComparisonCoordinator({
+      joinWindowMs: 5,
+      enqueueDelivery: (deliveryId, delivery, onPersisted) =>
+        queue.enqueue(deliveryId, delivery, onPersisted),
+    });
+    coordinator.registerGroup(
+      "queued-partial-group",
+      "queued-partial-base",
+      "reviewer",
+      "Queued partial report",
+      ["queued-partial-a", "queued-partial-b"],
+      ["model-a", "model-b"],
+    );
+    const sentMessages: any[] = [];
+    const fakePi: any = { sendMessage: (message: any) => sentMessages.push(message) };
+    let partialMarkers = 0;
+    coordinator.recordTaskSettled(
+      "queued-partial-a",
+      {
+        model: "model-a",
+        taskId: "queued-partial-a",
+        status: "success",
+        rawStatus: "done",
+        summary: "Completed model A",
+        findings: "",
+        evidence: "",
+        files: "",
+        caveats: "",
+        nextSteps: "",
+        toolUses: 1,
+        durationMs: 10,
+      },
+      fakePi,
+      true,
+      undefined,
+      undefined,
+      () => { partialMarkers += 1; },
+    );
+    await sleep(20);
+    assert.equal(sentMessages.length, 1);
+    assert.equal(queue.hasPending(), true);
+    assert.equal(partialMarkers, 0, "partial history is not marked before native persistence");
+
+    acknowledgePersistedCompletionDeliveries(queue, [{
+      type: "custom_message",
+      customType: "task-complete",
+      details: sentMessages[0].details,
+    }]);
+    assert.equal(queue.hasPending(), false);
+    assert.equal(partialMarkers, 1);
+  } finally {
+    queue.dispose();
+  }
 });
 
 test("ComparisonCoordinator delivers a bounded partial report for a straggler", async () => {

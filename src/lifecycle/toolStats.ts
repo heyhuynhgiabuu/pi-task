@@ -20,7 +20,8 @@ export function startToolStatsPolling(
     let changed = false;
 
     for (const [id, task] of trackedTasks) {
-      if (task.backend === "sdk") continue;
+      // SDK events and durable conversation events own their live counters.
+      if (task.backend === "sdk" || task.backend === "durable") continue;
       const sessionDir = join(task.dir, "sessions", id);
       // Claude transcripts have no pi tool-call records; count tool uses and
       // completed assistant turns from the Claude JSONL transcript instead of

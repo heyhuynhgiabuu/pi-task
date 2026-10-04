@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import {
+  appendFileSync,
+  fstatSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,8 +17,10 @@ import {
   writeRegistry,
 } from "../src/conversation.js";
 import {
+  acknowledgePersistedCompletionDeliveries,
   completeTask,
   createCompletionDeliveryQueue,
+  createPersistedCompletionDeliveryScanner,
 } from "../src/lifecycle/completion.js";
 import type { BackgroundTask } from "../src/types.js";
 
@@ -228,10 +238,13 @@ test("completion notification defaults to follow-up delivery", () => {
   assert.deepEqual(options, { triggerTurn: true, deliverAs: "followUp" });
 });
 
-test("completion delivery queue batches notifications within its debounce window", async () => {
+test("completion delivery stays guarded until Pi appends the queued notification", async () => {
   const piDir = mkdtempSync(join(tmpdir(), "pi-task-completion-queue-"));
   let deliveries = 0;
+  let sentMessage: unknown;
+  const persistedDeliveryIds = new Set<string>();
   const queue = createCompletionDeliveryQueue(5);
+  queue.setPersistedDeliveryIdsReader(() => persistedDeliveryIds);
   const task: BackgroundTask = {
     dir: join(piDir, "artifacts", "tasks", "queue-task"),
     agentType: "general",
@@ -244,7 +257,12 @@ test("completion delivery queue batches notifications within its debounce window
     recentCalls: [],
   };
   completeTask({
-    pi: { sendMessage: () => { deliveries += 1; } } as never,
+    pi: {
+      sendMessage: (message: unknown) => {
+        deliveries += 1;
+        sentMessage = message;
+      },
+    } as never,
     id: "queue-task",
     task: task,
     content: "queued result",
@@ -254,9 +272,268 @@ test("completion delivery queue batches notifications within its debounce window
     deliveryQueue: queue,
   });
   assert.equal(deliveries, 0);
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(queue.hasPending(), true);
+  await new Promise((resolve) => setTimeout(resolve, 35));
   assert.equal(deliveries, 1);
+  assert.equal(queue.hasPending(), true, "message_end before append is not persistence acknowledgement");
+  assert.ok(sentMessage);
+  const queuedMessage = sentMessage as {
+    customType?: string;
+    details?: Record<string, unknown>;
+  };
+  acknowledgePersistedCompletionDeliveries(queue, [{
+    role: "custom",
+    customType: queuedMessage.customType,
+    details: queuedMessage.details,
+  }]);
+  assert.equal(queue.hasPending(), true, "pre-append message_end data cannot acknowledge persistence");
+  const deliveryId = queuedMessage.details?.completion_delivery_id;
+  assert.equal(typeof deliveryId, "string");
+  persistedDeliveryIds.add(deliveryId as string);
+  for (let waited = 0; waited < 500 && queue.hasPending(); waited += 10) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(queue.hasPending(), false, "the appended session entry releases the guard");
   queue.dispose();
+});
+
+test("completion queue clears a delivery that is intentionally suppressed", async () => {
+  const queue = createCompletionDeliveryQueue(0);
+  try {
+    queue.enqueue("suppressed", () => "suppressed");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(queue.hasPending(), false, "a suppressed send cannot strand the session guard");
+  } finally {
+    queue.dispose();
+  }
+});
+
+test("completion queue exposes and cancels a user-discarded pending notice", async () => {
+  const queue = createCompletionDeliveryQueue(0);
+  try {
+    queue.enqueue("discard-me", () => {});
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.deepEqual(queue.pendingDeliveryIds(), ["discard-me"]);
+    assert.equal(queue.cancelPending("discard-me"), true);
+    assert.equal(queue.hasPending(), false);
+  } finally {
+    queue.dispose();
+  }
+});
+
+test("completion queue retries a synchronous send failure after checking persistence", async () => {
+  const queue = createCompletionDeliveryQueue(0);
+  let attempts = 0;
+  try {
+    queue.setPersistedDeliveryIdsReader(() => new Set());
+    queue.enqueue("retry-after-throw", () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("temporary dispatch failure");
+    });
+    for (let waited = 0; waited < 500 && attempts < 2; waited += 10) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(attempts, 2, "the failed dispatch is retried instead of being forgotten");
+    assert.equal(queue.hasPending(), true, "a retried send remains guarded until persistence");
+  } finally {
+    queue.dispose();
+  }
+});
+
+test("persisted completion scanner acknowledges only appended JSONL entries", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-completion-jsonl-"));
+  try {
+    const sessionPath = join(root, "session.jsonl");
+    const scanner = createPersistedCompletionDeliveryScanner();
+    writeFileSync(sessionPath, '{"type":"session","version":3,"id":"session-1"}\n');
+    assert.equal(scanner(sessionPath).has("delivery-1"), false);
+
+    const entry = JSON.stringify({
+      type: "custom_message",
+      customType: "task-complete",
+      id: "entry-1",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      content: "finished",
+      display: true,
+      details: { completion_delivery_id: "delivery-1" },
+    });
+    appendFileSync(sessionPath, entry.slice(0, entry.length - 2));
+    assert.equal(scanner(sessionPath).has("delivery-1"), false, "an incomplete JSONL line is not persisted evidence");
+    appendFileSync(sessionPath, `${entry.slice(entry.length - 2)}\n`);
+    assert.equal(scanner(sessionPath).has("delivery-1"), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("persisted completion scanner does not reuse cached IDs when the session file disappears", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-completion-jsonl-missing-"));
+  try {
+    const sessionPath = join(root, "session.jsonl");
+    const scanner = createPersistedCompletionDeliveryScanner();
+    writeFileSync(sessionPath, [
+      JSON.stringify({ type: "session", version: 3, id: "session-1" }),
+      JSON.stringify({
+        type: "custom_message",
+        customType: "task-complete",
+        id: "entry-1",
+        parentId: null,
+        timestamp: new Date().toISOString(),
+        content: "finished",
+        display: true,
+        details: { completion_delivery_id: "cached-delivery" },
+      }),
+      "",
+    ].join("\n"));
+    assert.equal(scanner(sessionPath).has("cached-delivery"), true);
+
+    unlinkSync(sessionPath);
+    assert.equal(scanner(sessionPath).has("cached-delivery"), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("persisted completion scanner invalidates IDs after a same-inode rewrite", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-completion-jsonl-rewrite-"));
+  try {
+    const sessionPath = join(root, "session.jsonl");
+    const scanner = createPersistedCompletionDeliveryScanner();
+    const makeEntry = (deliveryId: string) => JSON.stringify({
+      type: "custom_message",
+      customType: "task-complete",
+      id: "entry-1",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      content: "finished",
+      display: true,
+      details: { completion_delivery_id: deliveryId },
+    });
+    const original = `{"type":"session","version":3,"id":"session-1"}\n${makeEntry("delivery-old")}\n`;
+    const rewritten = `{"type":"session","version":3,"id":"session-1"}\n${makeEntry("delivery-new")}\n`;
+    assert.equal(Buffer.byteLength(original), Buffer.byteLength(rewritten));
+    writeFileSync(sessionPath, original);
+    assert.equal(scanner(sessionPath).has("delivery-old"), true);
+
+    writeFileSync(sessionPath, rewritten);
+    const afterRewrite = scanner(sessionPath);
+    assert.equal(afterRewrite.has("delivery-old"), false, "removed IDs must not remain cached");
+    assert.equal(afterRewrite.has("delivery-new"), true, "the rewritten entry must be discoverable");
+
+    const grownRewrite = `{"type":"session","version":3,"id":"session-1"}\n${makeEntry("delivery-grown")}\n${JSON.stringify({
+      type: "message",
+      id: "extra-entry",
+      parentId: "entry-1",
+      timestamp: new Date().toISOString(),
+      message: { role: "user", content: "x".repeat(2048), timestamp: Date.now() },
+    })}\n`;
+    assert.ok(Buffer.byteLength(grownRewrite) > Buffer.byteLength(rewritten));
+    writeFileSync(sessionPath, grownRewrite);
+    const afterTruncateAndRegrow = scanner(sessionPath);
+    assert.equal(afterTruncateAndRegrow.has("delivery-new"), false, "a larger truncate-and-regrow rewrite removes old IDs");
+    assert.equal(afterTruncateAndRegrow.has("delivery-grown"), true, "IDs from the new contents are found");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("persisted completion scanner invalidates IDs when JSONL line boundaries change", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-completion-jsonl-boundary-"));
+  try {
+    const sessionPath = join(root, "session.jsonl");
+    const headerLine = JSON.stringify({ type: "session", version: 3, id: "session-boundary" });
+    const completionLine = JSON.stringify({
+      type: "custom_message",
+      customType: "task-complete",
+      id: "entry-boundary",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      content: "finished",
+      display: true,
+      details: { completion_delivery_id: "boundary-delivery" },
+    });
+    const trailingLine = JSON.stringify({ type: "message", content: "x".repeat(512) });
+    const original = `${headerLine}\n${completionLine}\n${trailingLine}\n`;
+    const corruptedBoundaries = [
+      `${headerLine} ${completionLine}\n${trailingLine}\n`,
+      `${headerLine}\n${completionLine} ${trailingLine}\n`,
+    ];
+
+    for (const [index, corruptedBoundary] of corruptedBoundaries.entries()) {
+      assert.equal(Buffer.byteLength(original), Buffer.byteLength(corruptedBoundary));
+      const scanner = createPersistedCompletionDeliveryScanner();
+      writeFileSync(sessionPath, original);
+      assert.equal(scanner(sessionPath).has("boundary-delivery"), true);
+
+      writeFileSync(sessionPath, corruptedBoundary);
+      assert.equal(
+        scanner(sessionPath).has("boundary-delivery"),
+        false,
+        `a delivery on a line with a corrupted ${index === 0 ? "preceding" : "following"} delimiter is not persisted evidence`,
+      );
+      assert.equal(
+        createPersistedCompletionDeliveryScanner()(sessionPath).has("boundary-delivery"),
+        false,
+        "incremental and fresh scans agree after the rewrite",
+      );
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("persisted completion scanner re-reads pending IDs when the file version looks unchanged", () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-completion-jsonl-same-tick-"));
+  try {
+    const sessionPath = join(root, "session.jsonl");
+    const headerLine = JSON.stringify({ type: "session", version: 3, id: "session-same-tick" });
+    const completionLine = JSON.stringify({
+      type: "custom_message",
+      customType: "task-complete",
+      id: "entry-same-tick",
+      parentId: null,
+      timestamp: new Date().toISOString(),
+      content: "finished",
+      display: true,
+      details: { completion_delivery_id: "same-tick-delivery" },
+    });
+    const trailingLine = JSON.stringify({ type: "message", content: "x".repeat(512) });
+    const original = `${headerLine}\n${completionLine}\n${trailingLine}\n`;
+    const corruptedBoundary = `${headerLine} ${completionLine}\n${trailingLine}\n`;
+    assert.equal(Buffer.byteLength(original), Buffer.byteLength(corruptedBoundary));
+    // Fixed stat timestamps simulate a coarse-granularity filesystem where an
+    // in-place rewrite does not move mtime/ctime.
+    const scanner = createPersistedCompletionDeliveryScanner({
+      fstat: (fd) => {
+        const real = fstatSync(fd, { bigint: true });
+        return {
+          isFile: () => real.isFile(),
+          size: real.size,
+          dev: real.dev,
+          ino: real.ino,
+          mtimeNs: 1n,
+          ctimeNs: 1n,
+        };
+      },
+    });
+    writeFileSync(sessionPath, original);
+    assert.equal(scanner(sessionPath).has("same-tick-delivery"), true);
+
+    writeFileSync(sessionPath, corruptedBoundary);
+    assert.equal(
+      scanner(sessionPath, new Set(["same-tick-delivery"])).has("same-tick-delivery"),
+      false,
+      "a pending ID is re-read even when mtime/ctime did not change",
+    );
+    assert.equal(
+      scanner(sessionPath, new Set(["same-tick-delivery"])).has("same-tick-delivery"),
+      false,
+      "the invalidated cache stays invalid on the next scan",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("completion notification defers to the next user turn when configured", () => {

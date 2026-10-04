@@ -2,11 +2,13 @@ import type { TaskReportedStatus, ToolCallRecord } from "./helpers.js";
 import type {
   ExecutionBackendKind,
   TerminalHandle,
-  TerminalBackendKind,
 } from "./subagent/terminalBackend.js";
 export type { TerminalHandle, HerdrTerminalHandle } from "./subagent/terminalBackend.js";
 
 export type ExecutionBackend = ExecutionBackendKind;
+
+/** A completion callback may suppress delivery when its owning conversation is no longer active. */
+export type CompletionDeliveryOutcome = "suppressed";
 
 export interface BackgroundTask {
   /** Session artifact root used for completion polling. */
@@ -28,6 +30,8 @@ export interface BackgroundTask {
   handle?: TerminalHandle;
   exitSentinelPath?: string;
   backend?: ExecutionBackend;
+  /** Process-local abort latch for an active durable runner; never persisted. */
+  durableAbortController?: AbortController;
   originalPane: string | null;
   description: string;
   startedAt: number;
@@ -48,6 +52,13 @@ export interface BackgroundTask {
   ownerLeafId?: string | null;
   /** Most recent tool calls (capped), updated every COUNT_POLL_MS. */
   recentCalls: ToolCallRecord[];
+  /** SDK child live session JSONL; captured when the session opens. The
+   * transcript view reads this exact file so streaming tracks the real
+   * session instead of the artifacts dir or the recentCalls fallback. */
+  sessionPath?: string;
+  /** SDK child steering: queues `text` into the live child session
+   * (process-local, never persisted). Returns an error message or null. */
+  sdkSteer?: (text: string) => string | null | Promise<string | null>;
   status?: "running" | "done" | "cancelled" | "aborted" | "failed" | "timeout";
   phase?: string;
   result?: string;
@@ -77,7 +88,7 @@ export interface RegistryEntry {
   handle?: TerminalHandle;
   /** Legacy persisted field accepted by migration only. */
   paneId?: string;
-  backend?: TerminalBackendKind;
+  backend?: ExecutionBackend;
   piDir: string;
   /** Session artifact root, distinct from the child working directory. */
   dir: string;
@@ -122,6 +133,8 @@ export interface TaskSessionHistoryEntry extends RegistryEntry {
   /** The child's literal status word before normalization ("stalled", ...). */
   rawStatus?: string;
   resultValid?: boolean;
+  /** Exact durable submission identity written before child admission. */
+  durableRequestId?: string;
   completedAt?: number;
   background: boolean;
 }

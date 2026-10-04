@@ -12,19 +12,32 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { existsSync } from "node:fs";
 import {
   type DurableModelsFactory,
+  type DurableRuntimeModelRegistry,
   durableDatabasePath,
+  durableRequestId,
+  inspectDurableDatabasePath,
+  DurableTaskCancelledError,
+  inspectDurableTaskAdmission,
+  releaseUnadmittedDurableRun,
   resumeDurableTasks,
   runDurableTask,
 } from "../subagent/durable.js";
-import { upsertTaskSessionHistory, findTaskSessionHistory } from "../conversation.js";
-import type { TaskSessionHistoryEntry, BackgroundTask } from "../types.js";
+import {
+  failUnadmittedTaskSessionHistory,
+  findTaskSessionHistory,
+  readTaskSessionHistory,
+  upsertTaskSessionHistory,
+} from "../conversation.js";
+import type {
+  TaskSessionHistoryEntry,
+  BackgroundTask,
+  CompletionDeliveryOutcome,
+} from "../types.js";
 import {
   assessTaskResult,
   buildTaskEnvelope,
-  completionDeliveryOptions,
   formatTaskIdPointer,
   parseResultXml,
   structuredResultPayload,
@@ -34,8 +47,12 @@ import {
 import { sessionViewOf, type DeliveryGuard } from "../panel/delivery.js";
 import { durableParentOf } from "./ownership.js";
 import type { TaskWidgetController } from "./widget.js";
+import { DurableTranscript } from "../panel/durable-transcript.js";
+import { isProcessAliveOrUnknown } from "../process.js";
+import type { TranscriptItem } from "../panel/transcript.js";
 import { startSdkBackgroundTask } from "../subagent/sdkBackground.js";
 import { ignoreStaleExtensionCtx } from "../stale-ctx.js";
+import { completionDeliveryId, sendCompletionNotice } from "./completion.js";
 
 export interface DurableTaskExecutionOptions {
   id: string;
@@ -49,6 +66,7 @@ export interface DurableTaskExecutionOptions {
   piDir: string;
   artifactsDir: string;
   conversationId?: string;
+  toolCallId?: string;
   signal?: AbortSignal;
   isBackground: boolean;
   backgroundTasks: Map<string, BackgroundTask>;
@@ -57,7 +75,12 @@ export interface DurableTaskExecutionOptions {
   taskWidget: TaskWidgetController;
   clearTaskWidgetIfIdle: () => void;
   ensureTaskWidget: () => void;
-  enqueueDelivery: (delivery: () => void) => void;
+  enqueueDelivery: (
+    delivery: () => CompletionDeliveryOutcome | void,
+    deliveryId: string,
+  ) => void;
+  /** Runner injection for lifecycle tests; production uses runDurableTask. */
+  runTask?: typeof runDurableTask;
 }
 
 export function formatDurableBackgroundReceipt(id: string): string {
@@ -82,19 +105,55 @@ export async function resumeDurableAfterRestart(deps: {
   /** Test seams, mirroring the controller's open options. */
   databasePath?: string;
   models?: DurableModelsFactory;
-}): Promise<void> {
+  modelRegistry?: DurableRuntimeModelRegistry;
+  /** Restore the non-focusing task row before attaching its live transcript. */
+  onTaskResumed?: (
+    taskId: string,
+    history: TaskSessionHistoryEntry | undefined,
+    conversationId: string,
+  ) => void;
+  onTaskProgress?: (
+    taskId: string,
+    items: readonly TranscriptItem[],
+    toolUses: number,
+  ) => void;
+  onTaskWatchError?: (
+    taskId: string,
+    items: readonly TranscriptItem[],
+    toolUses: number,
+    error: unknown,
+  ) => void;
+  onTaskSettled?: (
+    taskId: string,
+    history: TaskSessionHistoryEntry | undefined,
+    status: "done" | "failed" | "cancelled",
+  ) => void;
+  enqueueDelivery?: (
+    deliveryId: string,
+    delivery: () => CompletionDeliveryOutcome | void,
+  ) => void;
+}): Promise<ReadonlySet<string>> {
   const { pi, piDir, sessionId } = deps;
-  if (!existsSync(durableDatabasePath(piDir))) return;
+  const durableTaskIds = new Set<string>();
+  const databasePath = deps.databasePath ?? durableDatabasePath(piDir);
+  const storage = inspectDurableDatabasePath(databasePath);
+  if (storage.kind === "missing") return durableTaskIds;
+  if (storage.kind === "unreadable") throw storage.error;
   const notify = (
+    deliveryId: string,
     content: string,
     details: Record<string, unknown>,
-  ) =>
-    ignoreStaleExtensionCtx(() =>
-      pi.sendMessage(
-        { customType: "task-complete", content, display: true, details },
-        completionDeliveryOptions(process.env.PI_TASK_COMPLETION_DELIVERY),
-      ),
-  );
+  ) => {
+    const deliver = (): CompletionDeliveryOutcome | void =>
+      sendCompletionNotice(pi, {
+        customType: "task-complete",
+        content,
+        display: true,
+        details: { ...details, completion_delivery_id: deliveryId },
+      });
+    if (deps.enqueueDelivery) deps.enqueueDelivery(deliveryId, deliver);
+    else deliver();
+  };
   const owned = (taskId: string): TaskSessionHistoryEntry | "other-session" | undefined => {
     const history = findTaskSessionHistory(piDir, taskId);
     // Another session's task belongs to that session's resume pass.
@@ -104,12 +163,86 @@ export async function resumeDurableAfterRestart(deps: {
     return history;
   };
 
+  const resumedTranscripts = new Map<string, DurableTranscript>();
+  const resumedHistory = new Map<string, TaskSessionHistoryEntry | undefined>();
+  const authorizedTasks = new Set<string>();
   await resumeDurableTasks(
     piDir,
     {
+      shouldRecover: (taskId, requestId) => {
+        const history = owned(taskId);
+        if (history === "other-session") return false;
+        if (!history) return true;
+        return history.status === "running" &&
+          (history.durableRequestId === undefined || history.durableRequestId === requestId);
+      },
+      requestIdForTask: (taskId) => {
+        const history = owned(taskId);
+        return history && history !== "other-session"
+          ? history.durableRequestId
+          : undefined;
+      },
+      onActive: (taskId, conversationId) => {
+        durableTaskIds.add(taskId);
+        const history = owned(taskId);
+        if (history === "other-session") return false;
+        const durableHistory = history && history.backend !== "durable"
+          ? { ...history, backend: "durable" as const }
+          : history;
+        if (durableHistory && durableHistory !== history) {
+          try {
+            upsertTaskSessionHistory(piDir, durableHistory);
+          } catch {
+            // In-memory discovery still protects this task from stale-SDK reconciliation.
+          }
+        }
+        resumedHistory.set(taskId, durableHistory);
+        authorizedTasks.add(taskId);
+        try {
+          deps.onTaskResumed?.(taskId, durableHistory, conversationId);
+        } catch {
+          // A UI restore failure must not prevent the durable submission resuming.
+        }
+        return true;
+      },
+      onSnapshot: (taskId, snapshot) => {
+        const transcript = new DurableTranscript(snapshot);
+        resumedTranscripts.set(taskId, transcript);
+        deps.onTaskProgress?.(taskId, transcript.items(), transcript.toolCallCount());
+      },
+      onEvents: (taskId, events) => {
+        const transcript = resumedTranscripts.get(taskId);
+        if (!transcript) return;
+        deps.onTaskProgress?.(
+          taskId,
+          transcript.apply(events),
+          transcript.toolCallCount(),
+        );
+      },
+      onWatchError: (taskId, error) => {
+        if (!authorizedTasks.has(taskId)) return;
+        const transcript = resumedTranscripts.get(taskId);
+        deps.onTaskWatchError?.(
+          taskId,
+          transcript?.items() ?? [],
+          transcript?.toolCallCount() ?? 0,
+          error,
+        );
+      },
+      onSettled: (taskId, status) => {
+        if (!authorizedTasks.delete(taskId)) return;
+        const history = resumedHistory.get(taskId);
+        resumedHistory.delete(taskId);
+        resumedTranscripts.delete(taskId);
+        try {
+          deps.onTaskSettled?.(taskId, history, status);
+        } catch {
+          // A UI cleanup failure must not alter the recovered result.
+        }
+      },
       onRecovered: (taskId, output, usage) => {
         const history = owned(taskId);
-        if (history === "other-session") return;
+        if (history === "other-session" || (history && history.status !== "running")) return;
         const parsed = parseResultXml(output);
         const assessment = assessTaskResult(parsed);
         if (history) {
@@ -128,6 +261,7 @@ export async function resumeDurableAfterRestart(deps: {
         }
         const summary = taskResultContentText(parsed, assessment) || output.trim();
         notify(
+          completionDeliveryId(taskId, history?.startedAt ?? Date.now()),
           `Background task ${taskId} (durable) resumed after restart and finished.\n\n${summary}`,
           {
             usage,
@@ -155,9 +289,42 @@ export async function resumeDurableAfterRestart(deps: {
           },
         );
       },
+      onCancelled: (taskId, reason) => {
+        const history = owned(taskId);
+        if (history === "other-session" || (history && history.status !== "running")) return;
+        if (history) {
+          try {
+            upsertTaskSessionHistory(piDir, {
+              ...history,
+              status: "cancelled",
+              completedAt: Date.now(),
+            });
+          } catch {
+            // History is best-effort.
+          }
+        }
+        notify(
+          completionDeliveryId(taskId, history?.startedAt ?? Date.now()),
+          `Background task ${taskId} (durable) was cancelled.\n\n${reason}`,
+          {
+            agent_type: history?.agentType ?? "task",
+            description: history?.description ?? "",
+            phase: "cancelled",
+            execution_phase: "cancelled",
+            status: "unknown",
+            reported_status: "unknown",
+            result_valid: false,
+            background: true,
+            backend: "durable",
+            task_id: taskId,
+            resumed: true,
+            error: reason,
+          },
+        );
+      },
       onFailed: (taskId, reason) => {
         const history = owned(taskId);
-        if (history === "other-session") return;
+        if (history === "other-session" || (history && history.status !== "running")) return;
         if (history) {
           try {
             upsertTaskSessionHistory(piDir, {
@@ -170,6 +337,7 @@ export async function resumeDurableAfterRestart(deps: {
           }
         }
         notify(
+          completionDeliveryId(taskId, history?.startedAt ?? Date.now()),
           `Background task ${taskId} (durable) did not survive the restart.\n\n${reason}`,
           {
             agent_type: history?.agentType ?? "task",
@@ -189,8 +357,94 @@ export async function resumeDurableAfterRestart(deps: {
     {
       databasePath: deps.databasePath,
       models: deps.models,
+      modelRegistry: deps.modelRegistry,
     },
   );
+  return durableTaskIds;
+}
+
+/**
+ * Clear running history only when the exact durable request is known not to
+ * have been admitted. A missing store proves no child submission survived;
+ * unreadable storage and legacy records without an exact request stay intact.
+ */
+export async function reconcileUnadmittedDurableTasks(deps: {
+  piDir: string;
+  sessionId?: string;
+  recoveredTaskIds: ReadonlySet<string>;
+  activeTaskIds?: ReadonlySet<string>;
+  isProcessAlive?: (pid: number) => boolean;
+  databasePath?: string;
+  models?: DurableModelsFactory;
+  modelRegistry?: DurableRuntimeModelRegistry;
+}): Promise<string[]> {
+  const reconciled: string[] = [];
+  const isProcessAlive = deps.isProcessAlive ?? isProcessAliveOrUnknown;
+  for (const history of readTaskSessionHistory(deps.piDir)) {
+    const ownerProcessAlive = history.ownerPid === undefined
+      ? undefined
+      : isProcessAlive(history.ownerPid);
+    if (
+      history.status !== "running" ||
+      history.backend !== "durable" ||
+      deps.recoveredTaskIds.has(history.id) ||
+      deps.activeTaskIds?.has(history.id) ||
+      (history.ownerSessionId !== undefined &&
+        (deps.sessionId === undefined ||
+          deps.sessionId === "" ||
+          history.ownerSessionId !== deps.sessionId)) ||
+      ownerProcessAlive === true
+    ) {
+      continue;
+    }
+
+    const admission = await inspectDurableTaskAdmission(
+      deps.piDir,
+      history.id,
+      history.durableRequestId,
+      {
+        databasePath: deps.databasePath,
+        models: deps.models,
+        modelRegistry: deps.modelRegistry,
+      },
+    );
+    if (admission.kind !== "unadmitted") continue;
+    if (admission.reason === "submission-missing") {
+      // A reservation can still be between reserve and submit in a live owner.
+      // Only a positively dead process makes this admission-only record stale.
+      if (
+        !history.durableRequestId ||
+        history.ownerPid === undefined ||
+        ownerProcessAlive !== false
+      ) continue;
+      const released = await releaseUnadmittedDurableRun(
+        deps.piDir,
+        history.id,
+        history.durableRequestId,
+        history.ownerPid,
+        {
+          databasePath: deps.databasePath,
+          models: deps.models,
+          modelRegistry: deps.modelRegistry,
+        },
+      );
+      if (!released) continue;
+    }
+
+    if (failUnadmittedTaskSessionHistory(
+      deps.piDir,
+      {
+        id: history.id,
+        status: history.status,
+        durableRequestId: history.durableRequestId,
+        ownerPid: history.ownerPid,
+      },
+      Date.now(),
+    )) {
+      reconciled.push(history.id);
+    }
+  }
+  return reconciled;
 }
 
 export async function executeDurableTask({
@@ -205,6 +459,8 @@ export async function executeDurableTask({
   piDir,
   artifactsDir,
   conversationId,
+  toolCallId,
+  signal,
   isBackground,
   backgroundTasks,
   foregroundTasks,
@@ -213,25 +469,77 @@ export async function executeDurableTask({
   clearTaskWidgetIfIdle,
   ensureTaskWidget,
   enqueueDelivery,
+  runTask: runTaskOverride,
 }: DurableTaskExecutionOptions) {
   const startedAt = Date.now();
+  const runnerAbortController = new AbortController();
+  const forwardForegroundAbort = () => runnerAbortController.abort();
   const model = agent.model;
+  const sessionModel = ctx.model
+    ? { provider: ctx.model.provider, modelId: ctx.model.id }
+    : undefined;
   const owner = durableParentOf(sessionViewOf(ctx));
-  const notify = (content: string, details: Record<string, unknown>) =>
-    ignoreStaleExtensionCtx(() =>
-      pi.sendMessage(
-        { customType: "task-complete", content, display: true, details },
-        completionDeliveryOptions(process.env.PI_TASK_COMPLETION_DELIVERY),
-      ),
-  );
+  const requestId = durableRequestId(id, toolCallId);
+  const notify = (
+    content: string,
+    details: Record<string, unknown>,
+  ): CompletionDeliveryOutcome | void =>
+    sendCompletionNotice(pi, {
+      customType: "task-complete",
+      content,
+      display: true,
+      details: { ...details, completion_delivery_id: completionDeliveryId(id, startedAt) },
+    });
 
+  let progressTranscript: DurableTranscript | undefined;
+  let progressFailureShown = false;
+  const updateTranscript = (items: readonly TranscriptItem[], toolUses: number) => {
+    const task = backgroundTasks.get(id) ?? foregroundTasks.get(id);
+    if (task) task.toolUses = toolUses;
+    taskWidget.setLiveTranscript(id, items, toolUses);
+  };
+  const showProgressFailure = () => {
+    if (progressFailureShown) return;
+    progressFailureShown = true;
+    updateTranscript(
+      [
+        ...(progressTranscript?.items() ?? []),
+        {
+          type: "system",
+          text: "Live durable updates are unavailable; the task continues running.",
+          timestamp: "",
+        },
+      ],
+      progressTranscript?.toolCallCount() ?? 0,
+    );
+  };
   const run = () =>
-    runDurableTask({
+    (runTaskOverride ?? runDurableTask)({
       piDir,
       taskId: id,
       task: prompt,
+      requestId,
       cwd,
       model,
+      sessionModel,
+      modelRegistry: ctx.modelRegistry,
+      signal: runnerAbortController.signal,
+      onSnapshot: (snapshot) => {
+        progressTranscript = new DurableTranscript(snapshot);
+        updateTranscript(progressTranscript.items(), progressTranscript.toolCallCount());
+      },
+      onEvents: (events) => {
+        if (!progressTranscript) return;
+        updateTranscript(
+          progressTranscript.apply(events),
+          progressTranscript.toolCallCount(),
+        );
+      },
+      onWatchError: showProgressFailure,
+      onSubmitted: (childConversationId) => {
+        const task = backgroundTasks.get(id) ?? foregroundTasks.get(id);
+        if (task) task.conversationId = childConversationId;
+      },
     }).then((result) => ({ output: result.answer, usage: result.usage }));
 
   if (isBackground) {
@@ -241,6 +549,7 @@ export async function executeDurableTask({
       agentType: agent.name,
       sessionName,
       backend: "durable",
+      durableAbortController: runnerAbortController,
       originalPane: null,
       description,
       startedAt,
@@ -262,20 +571,23 @@ export async function executeDurableTask({
       startedAt,
       piDir,
       artifactsDir,
+      backend: "durable",
+      durableRequestId: requestId,
       cwd,
       conversationId,
       ...owner,
       run,
-      deliver: enqueueDelivery,
+      deliver: (delivery) =>
+        enqueueDelivery(delivery, completionDeliveryId(id, startedAt)),
       onComplete: (result) => {
-        if (!deliveryGuard.allows(sessionViewOf(ctx), id)) return;
+        if (!deliveryGuard.allows(sessionViewOf(ctx), id)) return "suppressed";
         backgroundTask.status = "done";
         const parsed = parseResultXml(result.output);
         const assessment = assessTaskResult(parsed);
         const summary =
           taskResultContentText(parsed, assessment) ||
           "Durable subagent completed without assistant text.";
-        notify(
+        return notify(
           `Background task ${id} (${agent.name}) done.\n\n${summary}`,
           {
             agent_type: agent.name,
@@ -298,22 +610,25 @@ export async function executeDurableTask({
             background: true,
             backend: "durable",
             task_id: id,
+            usage: result.usage,
             structured_result: structuredResultPayload(assessment),
             full_output: parsed.raw.trim() || result.output.trim(),
           },
         );
       },
       onFailed: (error) => {
-        if (!deliveryGuard.allows(sessionViewOf(ctx), id)) return;
-        backgroundTask.status = "failed";
+        if (!deliveryGuard.allows(sessionViewOf(ctx), id)) return "suppressed";
+        const cancelled = error instanceof DurableTaskCancelledError;
+        const phase = cancelled ? "cancelled" as const : "failed" as const;
+        backgroundTask.status = phase;
         const message = error instanceof Error ? error.message : String(error);
-        notify(
-          `Background task ${id} (${agent.name}) failed.\n\n${message}`,
+        return notify(
+          `Background task ${id} (${agent.name}) ${phase}.\n\n${message}`,
           {
             agent_type: agent.name,
             description,
-            phase: "failed",
-            execution_phase: "failed",
+            phase,
+            execution_phase: phase,
             status: "unknown",
             reported_status: "unknown",
             result_valid: false,
@@ -326,6 +641,7 @@ export async function executeDurableTask({
         );
       },
       onSettled: () => {
+        backgroundTask.durableAbortController = undefined;
         taskWidget.noteTaskFinished(id, backgroundTasks.get(id) ?? backgroundTask);
         backgroundTasks.delete(id);
         ignoreStaleExtensionCtx(() => clearTaskWidgetIfIdle());
@@ -360,12 +676,38 @@ export async function executeDurableTask({
     cwd,
     conversationId,
     background: false,
+    backend: "durable" as const,
+    durableRequestId: requestId,
     ...owner,
     ownerPid: process.pid,
   };
   upsertTaskSessionHistory(piDir, { ...historyBase, status: "running" });
+  const foregroundTask: BackgroundTask = {
+    dir: artifactsDir,
+    cwd,
+    agentType: agent.name,
+    sessionName,
+    backend: "durable",
+    durableAbortController: runnerAbortController,
+    originalPane: null,
+    description,
+    startedAt,
+    toolUses: 0,
+    turns: 0,
+    conversationId,
+    ...owner,
+    recentCalls: [],
+    status: "running",
+  };
+  foregroundTasks.set(id, foregroundTask);
+  ensureTaskWidget();
+  taskWidget.openTaskView(id);
 
   try {
+    if (signal) {
+      if (signal.aborted) forwardForegroundAbort();
+      else signal.addEventListener("abort", forwardForegroundAbort, { once: true });
+    }
     const { output, usage } = await run();
     const finalOutput = output || "Durable subagent completed without assistant text.";
     const parsed = parseResultXml(finalOutput);
@@ -373,7 +715,7 @@ export async function executeDurableTask({
     const envelope = buildTaskEnvelope(parsed, {
       agent_type: agent.name,
       description,
-      tool_uses: 0,
+      tool_uses: foregroundTask.toolUses,
       duration_ms: Date.now() - startedAt,
       background: false,
       task: { id, resumable: true },
@@ -386,6 +728,9 @@ export async function executeDurableTask({
       resultValid: assessment.valid,
       completedAt: Date.now(),
     });
+    foregroundTask.status = "done";
+    foregroundTask.result = finalOutput;
+    taskWidget.noteTaskFinished(id, foregroundTask, Date.now());
     return {
       content: envelope.content,
       details: {
@@ -402,31 +747,39 @@ export async function executeDurableTask({
       },
     };
   } catch (error) {
+    const cancelled = error instanceof DurableTaskCancelledError;
+    const phase = cancelled ? "cancelled" as const : "failed" as const;
     const message = error instanceof Error ? error.message : String(error);
     upsertTaskSessionHistory(piDir, {
       ...historyBase,
-      status: "failed",
+      status: phase,
       completedAt: Date.now(),
     });
+    foregroundTask.status = phase;
+    foregroundTask.result = message;
+    taskWidget.noteTaskFinished(id, foregroundTask, Date.now());
     return {
       content: [{
         type: "text" as const,
-        text: `Durable task failed: ${message}\n\n${formatTaskIdPointer({ id, resumable: true })}`,
+        text: `Durable task ${phase}: ${message}\n\n${formatTaskIdPointer({ id, resumable: true })}`,
       }],
       details: {
         task_id: id,
         background: false,
-        phase: "failed" as const,
-        execution_phase: "failed",
+        phase,
+        execution_phase: phase,
         status: "unknown",
         reported_status: "unknown",
         result_valid: false,
         backend: "durable" as const,
         error: message,
       },
-      isError: true,
+      ...(cancelled ? {} : { isError: true }),
     };
   } finally {
+    signal?.removeEventListener("abort", forwardForegroundAbort);
+    foregroundTask.durableAbortController = undefined;
+    taskWidget.closeTaskView(id);
     foregroundTasks.delete(id);
     clearTaskWidgetIfIdle();
   }

@@ -14,11 +14,11 @@ For the full high-quality 89s @ 56 fps version, [download the MP4](https://githu
 
 - Foreground tasks: parent waits and receives the subagent result directly.
 - Background tasks: parent continues, task widget shows progress, completion arrives as a follow-up.
-- Interactive task panel below the editor: press `↓` on an empty prompt to enter the task rows, `↑/↓` to navigate, `Enter` to open a task's live transcript view, `x` to stop or dismiss, `Esc` to return to typing. Steps aside if another extension owns a custom editor.
-- Live transcript view with steering: `Enter` on a task row replaces the main view with the task's running transcript (pi's native message/tool components); typing + `Enter` steers a running tmux/HerdR task, `PageUp`/`PageDown` scroll, `Esc` returns. SDK children show live tool activity (no session JSONL) and cannot be steered from the panel.
+- Task progress monitor below the editor: visible by default; bare `/task` toggles it without stopping or changing tracked work. The panel supports `↓` on an empty prompt, `↑/↓` navigation, `Enter` to open a task transcript, `x` to stop/dismiss, and `Esc` to return to typing. It steps aside if another extension owns a custom editor.
+- `/agents` switches from the main conversation into a Pi-native snapshot of a currently tracked subagent transcript; selecting `main` returns to the parent session. The snapshot uses Pi's normal chat renderer and is not connected to the live task. Use `/task list` to open the live, steerable transcript view; SDK, terminal, and durable tasks remain steerable there while running. Durable OpenAI Codex Responses tasks request a detailed provider reasoning summary when available (not raw reasoning signatures).
 - Delivery guards: a background result is never delivered into a different conversation or `/tree` branch; it stays recoverable in task-session history and the child session file.
 - Tmux backend for observable subagent panes.
-- HerdR and tmux terminal backends, with SDK fallback when neither is available.
+- HerdR and tmux terminal backends, with SDK fallback when neither is available; an experimental SQLite-backed durable backend can resume opted-in tasks after a parent restart.
 - Agent frontmatter support: `model`, `thinking`, `fast`, `skills`, `tools`, `disallowed_tools`.
 - Per-call thinking control: an optional task `thinking` value uses Pi's canonical levels when the agent leaves `thinking` unset; frontmatter remains authoritative when present.
 - Task-local OpenAI/OpenAI-Codex Fast Mode: apply priority service tier to configured models without changing model, thinking level, or shared configuration.
@@ -107,7 +107,7 @@ Durable specialist conversation:
 }
 ```
 
-`conversation_id` maps to a durable subagent run. Reused across calls to keep specialist memory, e.g. a reusable research assistant. Use `/task` to list known durable conversations.
+`conversation_id` maps to a durable subagent run. Reused across calls to keep specialist memory, e.g. a reusable research assistant. Use `/task list` to browse tracked task rows (or list durable conversation IDs headlessly) and `/agents` to switch among currently tracked transcripts.
 
         Stored files:
 
@@ -125,19 +125,23 @@ Durable specialist conversation:
 
     A foreground (`background: false`) task result names its durable task id in the model-visible content (`Task ID: <id> — pass as task_id to resume this session.`), so the parent can resume the same session instead of repeating discovery. Pi terminal runs reopen the saved session; SDK and Claude Code runs report that session resume is unavailable and use the id for status and transcript review. Tool-call and result rows label the mode (`sync`/`async`).
 
-If Pi restarts while background tasks are still running, pi-task restores them on startup. Treat restored tasks as still in flight: do not relaunch overlapping work unless you intentionally want a second competing run. An active background task cannot be converted into a foreground relaunch; steer it in background mode or wait for completion. Use `/task` to inspect what was restored before taking action.
+If Pi restarts while background tasks are still running, pi-task restores them on startup. Treat restored tasks as still in flight: do not relaunch overlapping work unless you intentionally want a second competing run. An active background task cannot be converted into a foreground relaunch; steer it in background mode or wait for completion. Use `/task list` to inspect restored work before taking action.
 
 ### Task control
 
-Control is a user action, so it lives on the `/task` command rather than on the model-facing tool:
+Task control stays on user-facing commands rather than the model-facing tool:
 
 ```
-/task              # list durable conversations (also /task list)
+/agents            # switch between main and currently tracked subagent transcripts
+/task              # toggle the compact task progress monitor (default: shown)
+/task list         # browse task rows in the TUI; list known durable conversations headlessly
 /task status <task-id-or-conversation-id>
 /task cancel <task-id-or-conversation-id>
 ```
 
-`status` is read-only and resolves by task id, session name, or conversation id. Its structured details include lifecycle timestamps, elapsed milliseconds, runtime/session metadata, available transcript turn/tool counts, persisted result diagnostics, and a verified terminal exit code when an exit sentinel exists. `cancel` only closes a live task-owned tmux or strongly-identified HerdR resource and persists `cancelled` before cleanup. If cleanup fails, it reports `cleanup_pending` and keeps a durable retry receipt for the next restore. SDK background cancellation is reported as unsupported because the SDK backend currently does not retain a durable cancellation handle.
+The monitor toggle only changes TUI presentation and is session-local; hiding it does not pause, cancel, or affect recovery of any task, and the editor no longer navigates invisible task rows. The `/agents` picker marks the currently shown snapshot; selecting `main` returns to its parent Pi session. Child snapshots use Pi's standard message renderers and preserve available thinking, tool calls, and results. They are separate transcript sessions: new prompts there do not steer or modify the task. Use `/task list` for live updates and steering. The roster is limited to live and briefly retained task records, not an archive of every completed subagent. Pi session switches and forks are blocked while agents are running or completion notices are pending; use `/task list` while they settle.
+
+`status` is read-only and resolves by task id, session name, or conversation id. Its structured details include lifecycle timestamps, elapsed milliseconds, runtime/session metadata, available transcript turn/tool counts, persisted result diagnostics, and a verified terminal exit code when an exit sentinel exists. `cancel` aborts a durable child conversation or closes a live task-owned tmux/strongly-identified HerdR resource; cancellation is recorded as `cancelled`. If terminal cleanup fails, it reports `cleanup_pending` and keeps a retry receipt for the next restore. SDK background cancellation is unsupported because the SDK backend currently does not retain a durable cancellation handle.
 
 A start/resume request that is missing a required field returns a targeted reason naming each one (for example `prompt must be a string; description must be a string`) instead of one generic message. A payload that still carries `operation` is rejected as an invalid start request, so a stale control call cannot launch work.
 
@@ -210,9 +214,12 @@ Keep the parent responsible for orchestration decisions and final verification. 
 | `PI_TASK_SUBAGENT_FORWARD_PREFIXES` | Optional comma-separated forwarding prefixes, defaulting to `PI_SUBAGENT_FORWARD_`. Prefixes must match `[A-Z][A-Z0-9_]*`; the longest matching prefix wins. An invalid configured prefix rejects the terminal launch. |
 | `PI_TASK_COMPLETION_DELIVERY` | Background completion delivery: `followUp` (default) queues a dedicated model turn so a completion does not interrupt the parent's current reasoning; `steer` is an explicit opt-in that injects the result into the current turn while streaming; `nextTurn` queues the completion for your next prompt. Completion notifications settling within a short window are debounced. Queued messages are in-memory only and task-session history keeps the recovery pointer. Requires Pi 0.32+ (`nextTurn`: 0.34+). |
 | `PI_TASK_HARD_TIMEOUT_MINUTES` | Wall-clock safety ceiling for every task (terminal, SDK, and comparison): default `30`, or `0` to disable it. The clock also runs while a subagent waits on a permission or approval prompt, so raise or disable the ceiling when long approvals are expected. Invalid values keep the default. |
-| `PI_TASK_BACKEND` | `auto` (default), `herdr`, `tmux`, `sdk`, or `durable`. `auto` prefers HerdR only when Pi is already running inside an active HerdR pane, then tmux, then SDK. `durable` requires the optional packages (`npm install @earendil-works/pi-durable @earendil-works/chord`) and model providers with env credentials (OAuth-backed models are not bridged yet). |
+| `PI_TASK_BACKEND` | `auto` (default), `herdr`, `tmux`, `sdk`, or `durable`. `auto` prefers HerdR only when Pi is already running inside an active HerdR pane, then tmux, then SDK; it never selects the experimental durable backend. `durable` is explicit-only, requires the optional packages (`npm install @earendil-works/pi-durable @earendil-works/chord`) and a model available in the current Pi session; model requests use Pi's runtime registry/auth and credentials are not copied into durable storage. Providers using deferred responses are not supported by Pi's extension registry bridge. |
+| `taskBackend` (settings) | Same values as `PI_TASK_BACKEND`, set in `~/.pi/agent/settings.json` (or project settings) so the choice persists across restarts — e.g. `"taskBackend": "durable"` keeps tasks alive when the parent Pi process exits; the next session resumes them. The env var overrides the setting; `auto` behavior is unchanged. |
 | `PI_TASK_TOOL_NAME` | Delegation tool name, default `task`. Set `Agent` to align with Claude Code's native subagent tool name. Use a unique valid tool name. |
 | `PI_TASK_TMUX_SPLIT` | Tmux pane orientation: `auto` (default), `horizontal` (side-by-side), or `vertical` (top/bottom). Auto uses a horizontal split when pane width is at least twice its height; otherwise it uses a vertical split. |
+
+At startup, only durable `running` records whose exact current submission is absent from storage (or whose database is missing) become retryable; unreadable storage and ambiguous legacy records are preserved. SDK/comparison cleanup runs independently of durable recovery.
 
 `max_turns` (`PI_TASK_MAX_TURNS` or the agent's `max_turns:` frontmatter) is the work-based soft limit for terminal background tasks: it is checked on every poll, steers a wrap-up when reached, and allows a grace window of further turns. `PI_TASK_HARD_TIMEOUT_MINUTES` is only a safety ceiling for stalled processes and is checked first; disabling it leaves the terminal turn limit in force. Foreground tasks and SDK runs have no turn limit, so with the ceiling disabled their only bound is the child finishing or your abort. The ceiling is read when a task starts, and background polling reads it when the session starts.
 

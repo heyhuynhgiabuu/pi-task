@@ -11,25 +11,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Experimental **durable backend** (`PI_TASK_BACKEND=durable`): subagent work
   runs as pi-durable conversations over SQLite (`<piDir>/durable/tasks.sqlite`)
   so a parent crash no longer loses in-flight children — the next session
-  resumes the interrupted submission and delivers the result. Replay-safe by
-  construction (find-before-create keyed by the task id, exactly-once
-  `requestId`), steerable and cancellable from the panel and `/task cancel`,
-  with the child's spend surfaced as `usage` in delivered results. Requires
-  the optional packages `@earendil-works/pi-durable` and
-  `@earendil-works/chord` plus env-credential model providers; durable
-  conversations (`conversation_id`), compare mode, and the Claude runtime are
-  not supported on this backend yet. See `spike-pi-durable-backend.md`.
+  resumes the interrupted submission and delivers the result. Child ownership
+  uses find-before-create keyed by task id; submissions use replay-stable
+  `requestId`s keyed by the parent tool-call id, so distinct follow-ups reuse
+  the child without collapsing into one submission. Transcript steering is
+  atomically admitted only during an active child run; accepted follow-ups
+  remain part of the task lifecycle and produce one final recovery delivery.
+  Durable tasks are steerable and cancellable from the panel and `/task cancel`;
+  foreground, live-background,
+  and recovered aborts preserve the `cancelled` phase; successful completion
+  receipts surface the child's spend as `usage`. Startup keeps stale-SDK
+  reconciliation independent from durable recovery, preserves unclassified
+  history and live or uncertain process owners, treats only ENOENT as missing
+  storage, and makes a durable task retryable only when its exact current
+  request has no persisted submission. Model requests use the
+  current Pi session's runtime registry/auth (credentials are not copied into
+  durable storage). Requires the optional packages `@earendil-works/pi-durable` and
+  `@earendil-works/chord`. Deferred
+  provider responses, durable conversations (`conversation_id`), compare mode,
+  and the Claude runtime are not supported on this backend yet. See
+  `spike-pi-durable-backend.md`.
+- Durable child conversations now stream into the existing task view: foreground
+  runs open the focused panel while the tool waits; background and recovered
+  runs keep a compact live row and open the same transcript on demand. Durable
+  snapshots restore in-flight activity after restart; cumulative tool counts are
+  independent of the bounded transcript window.
+- Added `/agents` to switch from the parent conversation into a Pi-native
+  snapshot of a currently tracked subagent transcript. The inline picker marks
+  the shown task; `main` returns to the parent session, `Esc` cancels, and the
+  picker does not stop tasks. Pi JSONL and SQLite-backed durable transcripts
+  are projected into native Pi user/assistant/tool messages. Available thinking
+  is rendered by Pi's standard assistant component. These snapshots are not live and do not
+  steer or modify the task; `/task list` remains the live, steerable full-screen
+  view. The task overlay is scrollable with ↑/↓ (±3 lines), pgup/pgdn (±10),
+  and the mouse wheel; its editor steers a running task. Panel rows render tool
+  activity through Pi's per-tool renderers (`$ command`, `read <path>`,
+  `grep /pat/ in dir`) instead of a generic name + JSON dump. SDK child
+  transcripts read the exact session file captured when the child session
+  opens, and while a transcript overlay is open a 700 ms repaint tick turns
+  session-file growth into live updates.
+- Fixed durable tasks failing on OpenCode providers with `400 MissingSessionID`
+  (`x-opencode-session`): pi-durable generation calls `streamSimple` without a
+  session id, and the OpenCode provider rejects headerless requests. The
+  durable Models bridge now injects a stable per-harness routing id
+  (`pi-task-durable-<uuid>`) as `options.sessionId` for `opencode*` providers,
+  respecting an explicit session id when present.
+- Fixed the steer input in the transcript overlay never activating the real
+  editor: the theme capability check demanded `borderColor`, which Pi's
+  general `ui.custom` theme does not carry. `createSteerEditor` now adapts
+  the host theme (borderColor from the `borderMuted` token, select list via
+  `getSelectListTheme`) and only falls back to the minimal input when the
+  theme cannot support an editor at all.
 
 ### Changed
 
-- A bare `/task` in a TUI session now opens a centered overlay for browsing
-  the session's tasks (`↑↓` select, `enter` opens the live transcript view,
-  `x` stops/dismisses, `esc` closes; shows an empty `tasks (0)` state when
-  nothing has run yet). The overlay paints a solid theme background so it
-  stays readable over the conversation behind it. The below-editor panel
-  stays as the always-on live monitor and remains the place where typing
-  steers a viewed task. Headless and ACP sessions and an explicit `/task
-  list` still print the durable conversation listing.
+- Bare `/task` now toggles the compact task progress monitor in the TUI;
+  hiding it does not pause or cancel work and disables navigation of invisible
+  task rows. The monitor remains visible by default. `/task list` opens the task
+  browser in the TUI (`↑↓` select, `enter` opens a transcript, `x` stops/dismisses,
+  `esc` closes) and prints the durable-conversation listing headlessly. The
+  monitor and agent transcript switcher are independent; `/task status` and
+  `/task cancel` retain their task-control behavior. Settled transcripts are
+  read-only so they cannot admit untracked follow-up work.
+- Durable OpenAI Codex Responses children now request a detailed provider
+  reasoning summary when reasoning is enabled and the request still uses the
+  default `auto` summary. The effort level and explicit summary choices are
+  preserved; available summary text flows into the existing transcript thinking
+  block, while opaque reasoning signatures stay hidden. Detailed summaries may
+  add output tokens.
+- The full-screen transcript overlay now budgets the transcript pane against
+  the exact rows left by the hint and steering editor. Multiline editor input
+  no longer makes the oldest transcript lines unreachable, and short terminals
+  keep the editor's cursor row visible without overflowing the screen. Overlay
+  rows also restore the surface background after nested SGR resets.
 
 ### Added
 
@@ -49,6 +103,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   report sections, failure diagnostics) instead of having to parse the text
   content; error results carry the same data. The model-facing text result,
   `details`, rendering, and delivery are unchanged.
+
+### Fixed
+
+- SDK subagent sessions now inherit extension-registered providers from the
+  parent session's model registry (for example `antigravity` registered by an
+  OAuth package). Child sessions intentionally load no extensions, so models
+  pinned to a package-registered provider previously failed auth resolution
+  with "No API key found for <provider>" even when valid credentials existed.
+  Registered providers are re-registered into an isolated child runtime via
+  the public registry facade; parents without registered providers are
+  unchanged.
 
 ## [0.9.0] - 2026-09-25
 

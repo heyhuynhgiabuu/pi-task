@@ -40,6 +40,7 @@ async function eventually(assertion: () => void): Promise<void> {
     const startedAt = Date.now() - 10_000;
     const history = [{
       id: "sdk-stale",
+      backend: "sdk",
       agentType: "general",
       description: "stale SDK task",
       sessionName: "task-sdk-stale",
@@ -48,14 +49,70 @@ async function eventually(assertion: () => void): Promise<void> {
       dir: join(piDir, "artifacts"),
       status: "running",
       background: true,
+    }, {
+      id: "durable-running",
+      agentType: "general",
+      description: "durable task",
+      sessionName: "task-durable-running",
+      startedAt,
+      piDir,
+      dir: join(piDir, "artifacts"),
+      status: "running",
+      backend: "durable",
+      background: true,
     }];
     mkdirSync(join(piDir, "artifacts"), { recursive: true });
     writeFileSync(historyPath, JSON.stringify(history));
 
     assert.deepEqual(reconcileStaleSdkBackgroundTasks(piDir), ["sdk-stale"], t);
     const updated = JSON.parse(readFileSync(historyPath, "utf8")) as Array<Record<string, unknown>>;
-    assert.equal(updated[0]?.status, "failed", t + ": status");
-    assert.equal(updated[0]?.rawStatus, "host-restarted", t + ": reason");
+    assert.equal(updated[0]?.status, "failed", t + ": SDK status");
+    assert.equal(updated[0]?.rawStatus, "host-restarted", t + ": SDK reason");
+    assert.equal(updated[1]?.status, "running", t + ": durable status is preserved");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const t = "stale reconciliation preserves ambiguous legacy history after any recovery outcome";
+  const root = mkdtempSync(join(tmpdir(), "pi-task-sdk-reconcile-classification-"));
+  try {
+    const piDir = join(root, ".pi");
+    mkdirSync(piDir, { recursive: true });
+    const historyPath = join(piDir, "task-session-history.json");
+    const startedAt = Date.now() - 10_000;
+    const entries = [
+      { id: "legacy-ambiguous", backend: undefined, comparisonGroupId: undefined },
+      { id: "sdk-classified", backend: "sdk", comparisonGroupId: undefined },
+      { id: "comparison-classified", backend: undefined, comparisonGroupId: "compare-1" },
+    ].map(({ id, backend, comparisonGroupId }) => ({
+      id,
+      ...(backend !== undefined ? { backend } : {}),
+      ...(comparisonGroupId !== undefined ? { comparisonGroupId } : {}),
+      agentType: "general",
+      description: "Interrupted task",
+      sessionName: `task-${id}`,
+      startedAt,
+      piDir,
+      dir: join(piDir, "artifacts"),
+      status: "running",
+      background: true,
+    }));
+    writeFileSync(historyPath, JSON.stringify(entries));
+
+    assert.deepEqual(
+      reconcileStaleSdkBackgroundTasks(piDir),
+      ["sdk-classified", "comparison-classified"],
+      t,
+    );
+    const updated = JSON.parse(readFileSync(historyPath, "utf8")) as Array<{
+      id: string;
+      status: string;
+    }>;
+    assert.equal(updated.find((entry) => entry.id === "legacy-ambiguous")?.status, "running", t);
+    assert.equal(updated.find((entry) => entry.id === "sdk-classified")?.status, "failed", t);
+    assert.equal(updated.find((entry) => entry.id === "comparison-classified")?.status, "failed", t);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -83,6 +140,7 @@ async function eventually(assertion: () => void): Promise<void> {
       artifactsDir,
       cwd,
       conversationId: "research",
+      backend: "durable",
       ownerSessionId: "sess-a",
       ownerLeafId: "leaf-a",
       now: () => 200,
@@ -108,11 +166,48 @@ async function eventually(assertion: () => void): Promise<void> {
       assert.equal(history[0].background, true);
       assert.equal(history[0].cwd, cwd);
       assert.equal(history[0].ownerSessionId, "sess-a");
+      assert.equal(history[0].backend, "durable");
       assert.equal(history[0].ownerLeafId, "leaf-a");
       assert.equal(history[0].sessionRef, sessionPath);
       assert.equal(history[0].completedAt, 200);
       assert.equal(completedOutput, "<status>failure</status>\n<summary>Tests failed</summary>");
       assert.equal(settled, true);
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const root = mkdtempSync(join(tmpdir(), "pi-task-sdk-bg-cancelled-"));
+  try {
+    const piDir = join(root, ".pi");
+    const artifactsDir = join(piDir, "artifacts");
+    mkdirSync(artifactsDir, { recursive: true });
+    let failedCallback = false;
+
+    startSdkBackgroundTask({
+      id: "durable-cancelled",
+      agentType: "general",
+      description: "Cancel durable work",
+      sessionName: "task-durable-cancelled",
+      startedAt: 100,
+      piDir,
+      artifactsDir,
+      backend: "durable",
+      run: async () => {
+        throw Object.assign(new Error("Durable subagent was cancelled."), { kind: "cancelled" });
+      },
+      onFailed: () => { failedCallback = true; },
+    });
+
+    await eventually(() => {
+      const history = JSON.parse(
+        readFileSync(join(piDir, "task-session-history.json"), "utf8"),
+      );
+      assert.equal(history[0].status, "cancelled");
+      assert.equal(history[0].backend, "durable");
+      assert.equal(failedCallback, true);
     });
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -180,8 +275,10 @@ async function eventually(assertion: () => void): Promise<void> {
     await eventually(() => {
       const history = JSON.parse(
         readFileSync(join(piDir, "task-session-history.json"), "utf8"),
-      ) as Array<{ status: string }>;
+      ) as Array<{ status: string; backend?: string; ownerPid?: number }>;
       assert.equal(history[0]?.status, "timeout", t);
+      assert.equal(history[0]?.backend, "sdk", t + ": SDK backend is explicit by default");
+      assert.equal(history[0]?.ownerPid, process.pid, t + ": process ownership is durable");
     });
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -300,6 +397,110 @@ async function eventually(assertion: () => void): Promise<void> {
       assert.equal(entry?.status, "done", t + ": task stays done");
       assert.equal(failedCalled, false, t + ": onFailed never runs");
     });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const t = "a throwing delivery dispatcher does not rewrite completed task state";
+  const root = mkdtempSync(join(tmpdir(), "pi-task-sdk-bg-dispatch-throw-"));
+  try {
+    const piDir = join(root, ".pi");
+    mkdirSync(join(piDir, "artifacts"), { recursive: true });
+    let failedCalled = false;
+    let settled = false;
+    startSdkBackgroundTask({
+      id: "m123abc-dispatch",
+      agentType: "general",
+      description: "dispatcher throws",
+      sessionName: "task-m123abc-dispatch",
+      startedAt: 100,
+      piDir,
+      artifactsDir: join(piDir, "artifacts"),
+      run: async () => ({ output: "<status>success</status><summary>ok</summary>" }),
+      deliver: () => { throw new Error("queue enqueue failed"); },
+      onFailed: () => { failedCalled = true; },
+      onSettled: () => { settled = true; },
+    });
+    await eventually(() => {
+      assert.equal(settled, true, t + ": lifecycle settled");
+      const history = JSON.parse(
+        readFileSync(join(piDir, "task-session-history.json"), "utf-8"),
+      ) as Array<{ id: string; status: string }>;
+      assert.equal(history.find((entry) => entry.id === "m123abc-dispatch")?.status, "done");
+      assert.equal(failedCalled, false);
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const t = "stale SDK reconciliation preserves a task with a live foreign owner";
+  const root = mkdtempSync(join(tmpdir(), "pi-task-sdk-live-owner-"));
+  try {
+    const piDir = join(root, ".pi");
+    mkdirSync(piDir, { recursive: true });
+    const historyPath = join(piDir, "task-session-history.json");
+    const startedAt = Date.now() - 10_000;
+    const entries = [
+      { id: "sdk-live-owner", ownerPid: 4242, ownerSessionId: "sess-foreign" },
+      { id: "sdk-dead-owner", ownerPid: 4343, ownerSessionId: "sess-current" },
+      { id: "sdk-current-owner", ownerPid: process.pid, ownerSessionId: "sess-current" },
+      { id: "sdk-unknown-foreign-owner", ownerSessionId: "sess-foreign" },
+    ].map(({ id, ownerPid, ownerSessionId }) => ({
+      id,
+      ...(ownerPid !== undefined ? { ownerPid } : {}),
+      ownerSessionId,
+      backend: "sdk",
+      agentType: "general",
+      description: "SDK task with process ownership",
+      sessionName: `task-${id}`,
+      startedAt,
+      piDir,
+      dir: join(piDir, "artifacts"),
+      status: "running",
+      background: true,
+    }));
+    writeFileSync(historyPath, JSON.stringify(entries));
+
+    assert.deepEqual(
+      reconcileStaleSdkBackgroundTasks(piDir, new Set(), {
+        sessionId: "sess-current",
+        isProcessAlive: (pid: number) => pid === 4242 || pid === process.pid,
+      }),
+      ["sdk-dead-owner"],
+      t,
+    );
+    const updated = JSON.parse(readFileSync(historyPath, "utf8")) as Array<{
+      id: string;
+      status: string;
+    }>;
+    assert.equal(updated.find((entry) => entry.id === "sdk-live-owner")?.status, "running", t);
+    assert.equal(updated.find((entry) => entry.id === "sdk-dead-owner")?.status, "failed", t);
+    assert.equal(updated.find((entry) => entry.id === "sdk-current-owner")?.status, "running", t);
+    assert.equal(updated.find((entry) => entry.id === "sdk-unknown-foreign-owner")?.status, "running", t);
+    writeFileSync(
+      historyPath,
+      JSON.stringify(updated.filter((entry) =>
+        entry.id === "sdk-current-owner" || entry.id === "sdk-unknown-foreign-owner",
+      )),
+    );
+    assert.deepEqual(
+      reconcileStaleSdkBackgroundTasks(piDir, new Set(), { sessionId: "sess-current" }),
+      [],
+      "the default PID probe recognizes the current process as live",
+    );
+    writeFileSync(
+      historyPath,
+      JSON.stringify(updated.filter((entry) => entry.id === "sdk-unknown-foreign-owner")),
+    );
+    assert.deepEqual(
+      reconcileStaleSdkBackgroundTasks(piDir),
+      [],
+      "without a current session id, persisted session ownership remains ambiguous",
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

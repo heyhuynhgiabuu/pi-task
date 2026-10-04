@@ -1081,3 +1081,25 @@ function claudeAssistant(stopReason: string | null): Record<string, unknown> {
     rmSync(dirname(transcript), { recursive: true, force: true });
   }
 }
+
+{
+  const t = "tool stats preserve live durable event activity";
+  const task = makeTurnTask({
+    backend: "durable",
+    toolUses: 2,
+    turns: 3,
+    recentCalls: [
+      { id: "call-durable", name: "read", detail: "README.md", status: "in_progress" },
+    ],
+  });
+  const backgroundTasks = new Map<string, any>([["t-durable", task]]);
+  const statsStop = startToolStatsPolling(new Map(), backgroundTasks, 5);
+  try {
+    await sleep(30);
+  } finally {
+    clearInterval(statsStop);
+  }
+  assert.equal(task.toolUses, 2, `${t}: durable tool count is not replaced by JSONL polling`);
+  assert.equal(task.turns, 3, `${t}: durable turn count stays event-owned`);
+  assert.equal(task.recentCalls[0]?.status, "in_progress", `${t}: active tool state remains visible`);
+}

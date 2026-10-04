@@ -1,6 +1,9 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionCommandContext,
+  ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { formatMs } from "../helpers.js";
 import { renderTaskWidget, renderTaskPanel, type ThemeLike } from "../task-widget.js";
@@ -10,21 +13,98 @@ import {
   isPanelFocused,
   panelRows as orderPanelRows,
   pruneFinishedEntries,
+  selectAt,
   type PanelSelection,
   type PanelViewState,
   type TaskPanelRow,
 } from "../panel/panel-core.js";
 import {
+  MAX_TRANSCRIPT_ITEMS,
+  readTaskSessionFile,
   readTaskTranscript,
+  sessionFileSignature,
+  transcriptActivity,
   transcriptSignature,
   type TranscriptItem,
 } from "../panel/transcript.js";
+import { CustomEditor, getSelectListTheme } from "@earendil-works/pi-coding-agent";
 import { TaskPanelEditor, type TaskPanelHost } from "../panel/task-editor.js";
 import { TaskOverlay } from "../panel/task-overlay.js";
+import {
+  TaskTranscriptOverlay,
+  type SteerEditorLike,
+} from "../panel/task-transcript-overlay.js";
 import {
   createTaskTranscriptPane,
   type TaskTranscriptPane,
 } from "../panel/task-pane.js";
+import {
+  createTaskTranscriptSessionView,
+  findTaskTranscriptViewLink,
+  hasTaskTranscriptViewMarker,
+  readPersistedPiSessionId,
+} from "../panel/task-session-view.js";
+
+/**
+ * The steer prompt: a real CustomEditor (full editing like the main input)
+ * whenever the host theme provides fg/bg, falling back to a minimal
+ * accumulating input for degraded hosts/themes. The overlay routes
+ * submit/scroll keys around whichever editor this returns.
+ */
+export function createSteerEditor(
+  tui: import("@earendil-works/pi-tui").TUI,
+  theme: unknown,
+  keybindings: unknown,
+): SteerEditorLike {
+  const t = theme as { fg?: unknown; bg?: unknown } | null | undefined;
+  if (t && typeof t.fg === "function" && typeof t.bg === "function") {
+    try {
+      // Pi's general Theme has no borderColor/selectList — those come from the
+      // editor-theme adapter (getSelectListTheme + the borderMuted token), the
+      // same split pi's own interactive mode uses for its editors.
+      const editorTheme = {
+        // "border" (not the main editor's dimmer borderMuted): the steer input
+        // floats over the overlay fill and needs the contrast.
+        borderColor: (text: string) => (t.fg as (c: string, s: string) => string)("border", text),
+        selectList: getSelectListTheme() as never,
+      };
+      return new CustomEditor(
+        tui,
+        editorTheme as never,
+        keybindings as never,
+      ) as unknown as SteerEditorLike;
+    } catch {
+      // Theme not initialized / degraded host: fall through to the minimal input.
+    }
+  }
+  return new MinimalSteerEditor();
+}
+
+class MinimalSteerEditor implements SteerEditorLike {
+  private text = "";
+
+  handleInput(data: string): void {
+    if (data === "\x7f") {
+      const chars = [...this.text];
+      chars.pop();
+      this.text = chars.join("");
+      return;
+    }
+    if (data >= " " && !data.startsWith("\x1b")) this.text += data;
+  }
+
+  render(width: number): string[] {
+    return [truncateToWidth(`❯ ${this.text}`, width, "…")];
+  }
+
+  getText(): string {
+    return this.text;
+  }
+
+  setText(text: string): void {
+    this.text = text;
+  }
+}
 
 export interface TaskWidgetControllerDeps {
   /** Steer a running task; returns an error message or null on success. */
@@ -35,6 +115,8 @@ export interface TaskWidgetControllerDeps {
   ) => string | null | Promise<string | null>;
   /** Stop a running task's terminal resource; error message or null on success. */
   stopTask: (taskId: string, task: BackgroundTask) => string | null | Promise<string | null>;
+  /** Whether a Pi session can be replaced without discarding task lifecycle state. */
+  canReplaceSession?: () => boolean;
   /** Clock for linger/ordering logic (test seam; defaults to Date.now). */
   now?: () => number;
 }
@@ -50,6 +132,20 @@ export interface TaskWidgetController {
    * fall back to a text listing.
    */
   openOverlay(targetCtx: ExtensionContext): Promise<boolean>;
+  /** Open the main/subagent transcript switcher without changing views on cancel. */
+  openAgentSwitcher(targetCtx: ExtensionCommandContext): Promise<boolean>;
+  /** Toggle the compact progress widget; undefined means no TUI is available. */
+  toggleTaskMonitor(targetCtx: ExtensionContext): boolean | undefined;
+  /** Open a task's transcript view without requiring panel navigation. */
+  openTaskView(taskId: string): void;
+  /** Close the transcript view only if it still shows this task. */
+  closeTaskView(taskId: string): void;
+  /** Replace one durable task's bounded transcript and cumulative tool-call count. */
+  setLiveTranscript(
+    taskId: string,
+    items: readonly TranscriptItem[],
+    toolUses?: number,
+  ): void;
   requestRender(): void;
   clearTaskWidgetIfIdle(): void;
   /** Latest extension context the widget was registered with (may be null). */
@@ -70,11 +166,22 @@ export function createTaskWidgetController(
   deps?: TaskWidgetControllerDeps,
 ): TaskWidgetController {
   let widgetCtx: ExtensionContext | null = null;
+  let taskWidgetInstalled = false;
   let requestWidgetRender: (() => void) | null = null;
   let widgetTheme: ThemeLike | null = null;
   let panelState: PanelViewState = { selection: null, viewTaskId: null };
+  let taskMonitorVisible = true;
+  let agentsSwitcher = false;
+  let panelEditorInstalled = false;
+  /** The transcript the picker interrupted, so its row can keep a "(shown)" marker. */
+  let switcherShownId: string | null = null;
+  let switcherRestoreOverlayId: string | null = null;
+  let agentsCommandContext: ExtensionCommandContext | undefined;
+  let agentsParentSessionPath: string | undefined;
+  let agentsParentSessionId: string | undefined;
   const now = () => deps?.now?.() ?? Date.now();
   const finishedTasks = new Map<string, FinishedTask>();
+  const liveTranscripts = new Map<string, { items: TranscriptItem[]; revision: number }>();
   const stoppingTaskIds = new Set<string>();
   let activePane: TaskTranscriptPane | undefined;
 
@@ -85,6 +192,12 @@ export function createTaskWidgetController(
     if (!latest) return undefined;
     const detail = latest.detail ? ` ${latest.detail}` : "";
     return `${latest.name}${detail}`;
+  }
+
+  function retainedFinishedRows(): Array<[string, FinishedTask]> {
+    return [...finishedTasks.entries()].filter(
+      ([id]) => !foregroundTasks.has(id) && !backgroundTasks.has(id),
+    );
   }
 
   function allRows(): TaskPanelRow[] {
@@ -106,7 +219,7 @@ export function createTaskWidgetController(
     };
     for (const [id, task] of foregroundTasks) push(id, task, undefined);
     for (const [id, task] of backgroundTasks) push(id, task, undefined);
-    for (const [id, { task, finishedAt }] of finishedTasks)
+    for (const [id, { task, finishedAt }] of retainedFinishedRows())
       push(id, task, finishedAt);
     return rows;
   }
@@ -135,6 +248,15 @@ export function createTaskWidgetController(
     try {
       const task = findTask(taskId);
       if (!task) return [];
+      const live = task.backend === "durable" ? liveTranscripts.get(taskId) : undefined;
+      if (live) return live.items;
+      // SDK children capture the exact session file when the session opens;
+      // reading it directly beats scanning a sessions dir (the parent session
+      // quotes task ids too) and beats the artifacts dir (no session there).
+      if (task.backend === "sdk" && task.sessionPath) {
+        const exact = readTaskSessionFile(task.sessionPath);
+        if (exact.found && exact.items.length > 0) return exact.items;
+      }
       const dir = transcriptDir(taskId, task);
       const result = readTaskTranscript(dir, task.sessionName);
       if (result.found && result.items.length > 0) return result.items;
@@ -159,6 +281,12 @@ export function createTaskWidgetController(
     try {
       const task = findTask(taskId);
       if (!task) return "";
+      const live = task.backend === "durable" ? liveTranscripts.get(taskId) : undefined;
+      if (live) return `durable:${live.revision}`;
+      if (task.backend === "sdk" && task.sessionPath) {
+        const fileSig = sessionFileSignature(task.sessionPath);
+        if (fileSig !== "") return fileSig;
+      }
       const fileSig = transcriptSignature(transcriptDir(taskId, task));
       if (fileSig !== "") return fileSig;
       const calls = task.recentCalls ?? [];
@@ -197,6 +325,14 @@ export function createTaskWidgetController(
       now(),
     );
     if (retained.length !== finishedTasks.size) {
+      const retainedIds = new Set(retained.map((entry) => entry.id));
+      for (const id of finishedTasks.keys()) {
+        if (
+          !retainedIds.has(id) &&
+          !foregroundTasks.has(id) &&
+          !backgroundTasks.has(id)
+        ) liveTranscripts.delete(id);
+      }
       finishedTasks.clear();
       for (const entry of retained) {
         finishedTasks.set(entry.id, {
@@ -207,40 +343,288 @@ export function createTaskWidgetController(
     }
   }
 
-  // ── View (transcript pane) ────────────────────────────────────────────────
+  // ── View (transcript overlay) ────────────────────────────────────────────
 
-  function openView(taskId: string): void {
+
+
+  // Generation guard: a stale overlay's cleanup must not clobber a newer
+  // view opened after fast close/reopen sequences.
+  let viewGeneration = 0;
+  let transcriptOverlayDone: ((result?: unknown) => void) | undefined;
+  let transcriptTicker: ReturnType<typeof setInterval> | undefined;
+
+  /** Returns false when no widget context or task is available to render. */
+  function openView(taskId: string): boolean {
     const ctx = widgetCtx;
     const task = findTask(taskId);
-    if (!ctx || !task) return;
+    if (!ctx || !task) return false;
+    if (panelState.viewTaskId === taskId) return true;
+    closeView();
     panelState = { selection: null, viewTaskId: taskId };
-    ignoreStaleExtensionCtx(() =>
-      ctx.ui.setWidget(
-        "task-transcript",
-        (tui, theme) => {
-          const pane = createTaskTranscriptPane(tui, theme, {
-            taskId,
-            cwd: task.cwd ?? ctx.cwd,
-            sig: () => transcriptSig(taskId),
-            read: () => itemsFor(taskId),
-          });
-          activePane = pane;
-          return pane;
-        },
-        { placement: "aboveEditor" },
-      ),
-    );
+    const generation = ++viewGeneration;
+    overlayOpen = true;
+    // Live streaming: the pane re-reads the session on signature change, so a
+    // steady repaint tick turns JSONL growth into live transcript updates.
+    clearInterval(transcriptTicker);
+    transcriptTicker = setInterval(() => requestRender(), 700);
+    transcriptTicker.unref?.();
+    // A synchronous `ui.custom` failure leaves `overlay` unset, so the view is
+    // honestly reported as not opened. The stale-ctx throw a replaced session
+    // raises is just another such failure here.
+    let overlay: Promise<unknown> | undefined;
+    try {
+      overlay = ctx.ui
+        .custom(
+          (tui, theme, keybindings, done) => {
+            transcriptOverlayDone = done as (result?: unknown) => void;
+            const pane = createTaskTranscriptPane(tui, theme, {
+              taskId,
+              cwd: task.cwd ?? ctx.cwd,
+              sig: () => transcriptSig(taskId),
+              read: () => itemsFor(taskId),
+            });
+            activePane = pane;
+            return new TaskTranscriptOverlay({
+              pane,
+              host: {
+                taskId,
+                onSteer: (text: string) => steerViewedTask(text),
+                onClose: () => done(undefined),
+                requestRender,
+              },
+              theme,
+              editor: createSteerEditor(tui, theme, keybindings),
+              terminalRows: () => tui.terminal.rows,
+            });
+          },
+          {
+            overlay: true,
+            overlayOptions: {
+              anchor: "top-left",
+              width: "100%",
+              maxHeight: "100%",
+              margin: 0,
+            },
+          },
+        );
+    } catch {
+      // No overlay was created.
+    }
+    if (!overlay) {
+      overlayOpen = false;
+      clearInterval(transcriptTicker);
+      transcriptTicker = undefined;
+      if (panelState.viewTaskId === taskId) {
+        panelState = { ...panelState, viewTaskId: null, selection: null };
+      }
+      requestRender();
+      return false;
+    }
+    // Attach cleanup to the real overlay promise; a void-returning guard would
+    // settle immediately and wipe the state of a view that is still up.
+    void overlay
+      .catch(() => {})
+      .finally(() => {
+        if (generation !== viewGeneration) return;
+        clearInterval(transcriptTicker);
+        transcriptTicker = undefined;
+        transcriptOverlayDone = undefined;
+        activePane = undefined;
+        if (panelState.viewTaskId === taskId) {
+          panelState = { ...panelState, viewTaskId: null, selection: null };
+        }
+        overlayOpen = false;
+        clearTaskWidgetIfIdle();
+      });
     requestRender();
+    return true;
   }
 
   function closeView(): void {
-    const ctx = widgetCtx;
     panelState = { ...panelState, viewTaskId: null, selection: null };
+    const done = transcriptOverlayDone;
+    transcriptOverlayDone = undefined;
     activePane = undefined;
-    if (ctx) {
-      ignoreStaleExtensionCtx(() => ctx.ui.setWidget("task-transcript", undefined));
-    }
+    clearInterval(transcriptTicker);
+    transcriptTicker = undefined;
+    if (done) done(undefined);
     requestRender();
+  }
+
+  function openTaskView(taskId: string): void {
+    openView(taskId);
+  }
+
+  function closeTaskView(taskId: string): void {
+    if (panelState.viewTaskId === taskId) closeView();
+  }
+
+  function clearAgentSwitcherState(): void {
+    agentsSwitcher = false;
+    switcherShownId = null;
+    switcherRestoreOverlayId = null;
+    agentsCommandContext = undefined;
+    agentsParentSessionPath = undefined;
+    agentsParentSessionId = undefined;
+  }
+
+  function notifyCommandContext(
+    ctx: ExtensionCommandContext,
+    message: string,
+    level: "info" | "warning" | "error",
+  ): void {
+    ignoreStaleExtensionCtx(() => ctx.ui.notify(message, level));
+  }
+
+  async function switchSession(
+    ctx: ExtensionCommandContext,
+    sessionPath: string,
+    message: string,
+  ): Promise<boolean> {
+    try {
+      const result = await ctx.switchSession(sessionPath, {
+        withSession: async (nextCtx) => nextCtx.ui.notify(message, "info"),
+      });
+      if (result.cancelled) {
+        notifyCommandContext(ctx, "Session switch was cancelled.", "warning");
+        return false;
+      }
+      return true;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      notifyCommandContext(ctx, `Could not switch sessions: ${detail}`, "error");
+      return false;
+    }
+  }
+
+  function switchToTaskSession(
+    taskId: string,
+    ctx: ExtensionCommandContext,
+    restoreOverlayId: string | null,
+    originalParentSessionPath?: string,
+    originalParentSessionId?: string,
+  ): void {
+    const task = findTask(taskId);
+    if (!task) {
+      notifyCommandContext(ctx, `Task ${taskId} is no longer available.`, "warning");
+      if (restoreOverlayId) openView(restoreOverlayId);
+      return;
+    }
+    if (!ctx.model) {
+      notifyCommandContext(ctx, "Select a model before opening a task transcript.", "warning");
+      if (restoreOverlayId) openView(restoreOverlayId);
+      return;
+    }
+    if (deps?.canReplaceSession && !deps.canReplaceSession()) {
+      // Replacing the Pi session now would abort a live task and discard its
+      // handles, but the transcript itself is still viewable. Degrade to the
+      // live overlay for the selected task instead of refusing outright.
+      const opened = openView(taskId);
+      notifyCommandContext(
+        ctx,
+        opened
+          ? "A Pi session snapshot is unavailable while tasks or completion notices are pending; showing the live transcript instead. Use /task list to steer running tasks."
+          : "A Pi session snapshot is unavailable while tasks or completion notices are pending, and the live task view is not available. Use /task list.",
+        opened ? "info" : "warning",
+      );
+      return;
+    }
+
+    const parentSessionPath =
+      originalParentSessionPath ?? ctx.sessionManager.getSessionFile();
+    const parentSessionId =
+      originalParentSessionId ?? ctx.sessionManager.getHeader()?.id;
+    if (!parentSessionPath || !parentSessionId) {
+      notifyCommandContext(
+        ctx,
+        "Cannot open a child snapshot from an unsaved Pi session; there is no safe return path.",
+        "warning",
+      );
+      if (restoreOverlayId) openView(restoreOverlayId);
+      return;
+    }
+
+    const items = itemsFor(taskId);
+    const result = createTaskTranscriptSessionView({
+      taskId,
+      cwd: task.cwd ?? ctx.cwd,
+      sessionDir: dirname(parentSessionPath), // Keep generated sessions in Pi's trusted store, not task.dir.
+      parentSessionPath,
+      parentSessionId,
+      model: {
+        api: ctx.model.api,
+        provider: ctx.model.provider,
+        model: ctx.model.id,
+      },
+      items,
+    });
+    if (!result.ok) {
+      const detail =
+        result.error.kind === "empty-transcript"
+          ? "The transcript contains no readable messages."
+          : result.error.message;
+      notifyCommandContext(ctx, `Could not open task transcript: ${detail}`, "error");
+      if (restoreOverlayId) openView(restoreOverlayId);
+      return;
+    }
+
+    if (panelState.viewTaskId !== null) closeView();
+    void switchSession(
+      ctx,
+      result.sessionPath,
+      `Opened a snapshot of ${taskId}; use /agents → main to return. Use /task list for the live, steerable view.`,
+    ).then((switched) => {
+      if (!switched && restoreOverlayId) openView(restoreOverlayId);
+    });
+  }
+
+  function activateAgentTarget(taskId: string | null): void {
+    const ctx = agentsCommandContext;
+    const parentSessionPath = agentsParentSessionPath;
+    const parentSessionId = agentsParentSessionId;
+    const restoreOverlayId = switcherRestoreOverlayId;
+    clearAgentSwitcherState();
+    if (!ctx) {
+      widgetCtx?.ui.notify("The /agents session context is no longer available.", "warning");
+      return;
+    }
+    if (typeof ctx.switchSession !== "function") {
+      notifyCommandContext(ctx, "/agents needs Pi's session-switch command API.", "warning");
+      if (restoreOverlayId) openView(restoreOverlayId);
+      return;
+    }
+    if (taskId) {
+      switchToTaskSession(
+        taskId,
+        ctx,
+        restoreOverlayId,
+        parentSessionPath,
+        parentSessionId,
+      );
+      return;
+    }
+    if (parentSessionPath) {
+      if (
+        !parentSessionId ||
+        readPersistedPiSessionId(parentSessionPath, parentSessionId) !== parentSessionId
+      ) {
+        notifyCommandContext(
+          ctx,
+          "The parent Pi session is missing or invalid; refusing to switch to it.",
+          "warning",
+        );
+        if (restoreOverlayId) openView(restoreOverlayId);
+        return;
+      }
+      if (panelState.viewTaskId !== null) closeView();
+      void switchSession(ctx, parentSessionPath, "Returned to the parent conversation.").then(
+        (switched) => {
+          if (!switched && restoreOverlayId) openView(restoreOverlayId);
+        },
+      );
+      return;
+    }
+    closeView();
   }
 
   // ── Panel actions ─────────────────────────────────────────────────────────
@@ -250,6 +634,14 @@ export function createTaskWidgetController(
     const task = taskId ? findTask(taskId) : undefined;
     if (!taskId || !task) {
       widgetCtx?.ui.notify("No task is open in the transcript view", "error");
+      return;
+    }
+    const activelyTracked = foregroundTasks.has(taskId) || backgroundTasks.has(taskId);
+    if (!activelyTracked || (task.status !== undefined && task.status !== "running")) {
+      widgetCtx?.ui.notify(
+        "This task is no longer running; its transcript is read-only.",
+        "warning",
+      );
       return;
     }
     void Promise.resolve(deps?.steerTask(task, taskId, text))
@@ -267,14 +659,22 @@ export function createTaskWidgetController(
   }
 
   function stopTaskRow(taskId: string): void {
-    if (finishedTasks.has(taskId)) {
+    const task = foregroundTasks.get(taskId) ?? backgroundTasks.get(taskId);
+    if (!task) {
+      if (!finishedTasks.has(taskId)) return;
       finishedTasks.delete(taskId);
+      liveTranscripts.delete(taskId);
       reconcileSelection();
       requestRender();
       return;
     }
-    const task = findTask(taskId);
-    if (!task || stoppingTaskIds.has(taskId)) return;
+    if (stoppingTaskIds.has(taskId)) return;
+    if (task.backend === "durable" && task.durableAbortController) {
+      // Latch cancellation on the runner before it can admit its child input;
+      // aborting an idle conversation here would leave the runner free to submit.
+      task.durableAbortController.abort();
+      return;
+    }
     stoppingTaskIds.add(taskId);
     Promise.resolve()
       .then(() => deps?.stopTask(taskId, task))
@@ -292,12 +692,32 @@ export function createTaskWidgetController(
 
   const host: TaskPanelHost = {
     panelState: () => panelState,
+    taskMonitorVisible: () => taskMonitorVisible,
     panelRows: () => panelRows(),
     onSelect: (selection: PanelSelection) => {
+      if (selection === null) {
+        clearAgentSwitcherState();
+        panelState = { ...panelState, switcherMode: false };
+      }
       panelState = { ...panelState, selection };
       requestRender();
     },
+    onCancelSwitcher: () => {
+      // The picker contract: cancelling restores only an interrupted overlay;
+      // a native Pi transcript session remains active behind the picker.
+      const restore = switcherRestoreOverlayId;
+      clearAgentSwitcherState();
+      panelState = { ...panelState, selection: null, switcherMode: false };
+      if (restore) openView(restore);
+      else requestRender();
+    },
     onEnter: (taskId: string | null) => {
+      if (agentsSwitcher) {
+        panelState = { ...panelState, selection: null, switcherMode: false };
+        activateAgentTarget(taskId);
+        return;
+      }
+      panelState = { ...panelState, selection: null, switcherMode: false };
       if (taskId) openView(taskId);
       else closeView();
     },
@@ -317,6 +737,10 @@ export function createTaskWidgetController(
       // maps are empty (nothing else re-invokes pruneFinished).
       pruneFinished();
       reconcileSelection();
+      if (!taskMonitorVisible) return [];
+      // The transcript overlay owns the screen while a view is open; the
+      // below-editor panel would be a second copy of the same information.
+      if (panelState.viewTaskId !== null) return [];
       if (isPanelFocused(panelState)) {
         return renderTaskPanel({
           rows: panelRows(),
@@ -325,6 +749,13 @@ export function createTaskWidgetController(
           now: now(),
           width,
           theme: widgetTheme,
+          ...(agentsSwitcher
+            ? {
+                hint: `Switch to: ${panelRows().length + 1} agents — ↑↓ select · enter switch · esc close`,
+                showTaskIds: true,
+                shownTaskId: switcherShownId,
+              }
+            : {}),
         });
       }
       return renderTaskWidget({
@@ -334,7 +765,7 @@ export function createTaskWidgetController(
         backgroundCount: backgroundTasks.size,
         width,
         theme: widgetTheme,
-        finishedTasks: [...finishedTasks.entries()].map(
+        finishedTasks: retainedFinishedRows().map(
           ([id, f]) => [id, f.task] as const,
         ),
       });
@@ -343,7 +774,7 @@ export function createTaskWidgetController(
       const active = [
         ...Array.from(foregroundTasks.entries()),
         ...Array.from(backgroundTasks.entries()),
-        ...Array.from(finishedTasks.entries()).map(([id, f]) => [id, f.task] as const),
+        ...retainedFinishedRows().map(([id, f]) => [id, f.task] as const),
       ];
       if (active.length === 0) return [];
       const [, task] = active[0]!;
@@ -356,6 +787,38 @@ export function createTaskWidgetController(
     }
   }
 
+  function setLiveTranscript(
+    taskId: string,
+    items: readonly TranscriptItem[],
+    toolUses?: number,
+  ): void {
+    const task = findTask(taskId);
+    if (!task || task.backend !== "durable") return;
+    const retained = items.slice(-MAX_TRANSCRIPT_ITEMS);
+    const previous = liveTranscripts.get(taskId);
+    liveTranscripts.set(taskId, {
+      items: [...retained],
+      revision: (previous?.revision ?? 0) + 1,
+    });
+    const calls = retained.filter((item): item is Extract<TranscriptItem, { type: "tool" }> => item.type === "tool");
+    task.toolUses = toolUses ?? calls.length;
+    task.recentCalls = calls.slice(-10).map((item) => {
+      const summary = transcriptActivity([item]);
+      const detail = summary.startsWith("$ ")
+        ? summary.slice(2)
+        : summary.startsWith(`${item.name} `)
+          ? summary.slice(item.name.length + 1)
+          : "";
+      return {
+        id: item.toolCallId,
+        name: item.name,
+        detail,
+        status: item.inProgress ? "in_progress" : item.isError ? "error" : "done",
+      };
+    });
+    requestRender();
+  }
+
   function requestRender(): void {
     requestWidgetRender?.();
   }
@@ -365,9 +828,17 @@ export function createTaskWidgetController(
   }
 
   function installEditor(targetCtx: ExtensionContext): void {
+    if (targetCtx.mode === "tui") widgetCtx = targetCtx;
     // Keyboard access needs the editor wrapper; step aside if another
     // extension owns a custom editor (the widget stays display-only).
-    if (targetCtx.hasUI && !targetCtx.ui.getEditorComponent()) {
+    // Hosts without the editor APIs just get the display-only widget.
+    if (
+      targetCtx.hasUI &&
+      typeof targetCtx.ui.getEditorComponent === "function" &&
+      typeof targetCtx.ui.setEditorComponent === "function" &&
+      !targetCtx.ui.getEditorComponent()
+    ) {
+      panelEditorInstalled = true;
       ignoreStaleExtensionCtx(() =>
         targetCtx.ui.setEditorComponent(
           (tui, theme, keybindings) =>
@@ -379,9 +850,10 @@ export function createTaskWidgetController(
 
   function ensureTaskWidget(targetCtx: ExtensionContext): void {
     if (targetCtx.mode !== "tui") return;
+    widgetCtx = targetCtx;
     installEditor(targetCtx);
-    if (!widgetCtx) {
-      widgetCtx = targetCtx;
+    if (!taskWidgetInstalled) {
+      taskWidgetInstalled = true;
       ignoreStaleExtensionCtx(() =>
         targetCtx.ui.setWidget(
           "task",
@@ -406,6 +878,25 @@ export function createTaskWidgetController(
     requestRender();
   }
 
+  function toggleTaskMonitor(
+    targetCtx: ExtensionContext,
+  ): boolean | undefined {
+    if (targetCtx.mode !== "tui" || !targetCtx.hasUI) return undefined;
+    taskMonitorVisible = !taskMonitorVisible;
+    if (!taskMonitorVisible) {
+      panelState = { ...panelState, selection: null };
+    }
+    if (
+      taskMonitorVisible &&
+      (foregroundTasks.size > 0 || backgroundTasks.size > 0 || finishedTasks.size > 0)
+    ) {
+      ensureTaskWidget(targetCtx);
+    } else {
+      requestRender();
+    }
+    return taskMonitorVisible;
+  }
+
   function noteTaskFinished(
     id: string,
     task: BackgroundTask,
@@ -420,12 +911,16 @@ export function createTaskWidgetController(
 
   let overlayOpen = false;
 
-  async function openOverlay(targetCtx: ExtensionContext): Promise<boolean> {
+  async function showOverlay(
+    targetCtx: ExtensionContext,
+    mode: "tasks" | "agents" = "tasks",
+  ): Promise<boolean> {
     if (targetCtx.mode !== "tui" || !targetCtx.hasUI) return false;
-    // The overlay is the browser; the below-editor panel returns to its idle
-    // display while the modal owns the keyboard.
-    if (panelState.viewTaskId !== null) closeView();
-    panelState = { selection: null, viewTaskId: null };
+    if (mode === "tasks") {
+      // The task browser is independent of whichever transcript was open.
+      if (panelState.viewTaskId !== null) closeView();
+      panelState = { selection: null, viewTaskId: null };
+    }
     overlayOpen = true;
     try {
       await targetCtx.ui.custom(
@@ -437,12 +932,21 @@ export function createTaskWidgetController(
               onStop: (taskId) => stopTaskRow(taskId),
               onOpen: (taskId) => {
                 done(undefined);
-                openView(taskId);
+                if (mode === "agents") {
+                  activateAgentTarget(taskId);
+                } else if (taskId === null) {
+                  closeView();
+                } else {
+                  openView(taskId);
+                }
               },
               onClose: () => done(undefined),
               requestRender,
             },
             theme,
+            mode === "agents"
+              ? { mode, getShownTaskId: () => switcherShownId }
+              : {},
           ),
         {
           overlay: true,
@@ -451,8 +955,76 @@ export function createTaskWidgetController(
       );
     } finally {
       overlayOpen = false;
+      if (mode === "agents") {
+        clearAgentSwitcherState();
+        panelState = { ...panelState, selection: null, switcherMode: false };
+      }
       clearTaskWidgetIfIdle();
     }
+    return true;
+  }
+
+  function openOverlay(targetCtx: ExtensionContext): Promise<boolean> {
+    return showOverlay(targetCtx);
+  }
+
+  /**
+   * Open Pi's main/subagent switcher. Selecting a child creates a Pi-native
+   * transcript snapshot; selecting main from that snapshot returns to its
+   * parent session. The task overlay remains the live, steerable view.
+   */
+  async function openAgentSwitcher(targetCtx: ExtensionCommandContext): Promise<boolean> {
+    if (targetCtx.mode !== "tui" || !targetCtx.hasUI) {
+      ignoreStaleExtensionCtx(() =>
+        targetCtx.ui.notify("/agents requires Pi's interactive TUI.", "warning"),
+      );
+      return false;
+    }
+    ensureTaskWidget(targetCtx);
+    const sessionManager = targetCtx.sessionManager;
+    const sessionEntries =
+      typeof sessionManager?.getBranch === "function" ? sessionManager.getBranch() : [];
+    const sessionHeader =
+      typeof sessionManager?.getHeader === "function" ? sessionManager.getHeader() : null;
+    const viewLink = findTaskTranscriptViewLink(sessionEntries, sessionHeader);
+    if (hasTaskTranscriptViewMarker(sessionEntries) && !viewLink) {
+      ignoreStaleExtensionCtx(() =>
+        targetCtx.ui.notify(
+          "This transcript snapshot has a missing or invalid parent Pi session; /agents cannot switch safely.",
+          "warning",
+        ),
+      );
+      return false;
+    }
+    const interruptedOverlayId = panelState.viewTaskId;
+    agentsCommandContext = targetCtx;
+    agentsParentSessionPath = viewLink?.parentSessionPath;
+    agentsParentSessionId = viewLink?.parentSessionId;
+    switcherRestoreOverlayId = interruptedOverlayId;
+    switcherShownId = interruptedOverlayId ?? viewLink?.taskId ?? null;
+    agentsSwitcher = true;
+
+    // The inline picker needs OUR panel editor for keyboard input; when
+    // another extension owns a custom editor the panel is display-only, so
+    // use the capturing modal while preserving the current view on cancel.
+    if (!panelEditorInstalled) {
+      return showOverlay(targetCtx, "agents");
+    }
+
+    // The transcript overlay owns the screen, so close it to reveal the panel.
+    // A native transcript session has no overlay to close and remains active
+    // when the picker is cancelled.
+    if (interruptedOverlayId !== null) closeView();
+    taskMonitorVisible = true;
+    const rows = orderPanelRows(allRows(), now(), true);
+    const shown = switcherShownId;
+    const idx = shown ? rows.findIndex((r) => r.id === shown) + 1 : 0;
+    panelState = {
+      ...panelState,
+      selection: selectAt(rows, Math.max(0, idx)),
+      switcherMode: true,
+    };
+    requestRender();
     return true;
   }
 
@@ -467,30 +1039,44 @@ export function createTaskWidgetController(
       requestRender();
       return;
     }
-    if (widgetCtx) {
+    if (taskWidgetInstalled) {
       const ctx = widgetCtx;
-      ignoreStaleExtensionCtx(() => ctx.ui.setWidget("task", undefined));
+      if (ctx && typeof ctx.ui.setWidget === "function") {
+        ignoreStaleExtensionCtx(() => ctx.ui.setWidget("task", undefined));
+      }
       widgetCtx = null;
+      taskWidgetInstalled = false;
     }
     requestWidgetRender = null;
   }
 
   function dispose(): void {
     closeView();
-    if (widgetCtx) {
+    if (taskWidgetInstalled) {
       const ctx = widgetCtx;
-      ignoreStaleExtensionCtx(() => ctx.ui.setWidget("task", undefined));
+      if (ctx && typeof ctx.ui.setWidget === "function") {
+        ignoreStaleExtensionCtx(() => ctx.ui.setWidget("task", undefined));
+      }
+      widgetCtx = null;
+      taskWidgetInstalled = false;
+    } else {
       widgetCtx = null;
     }
     widgetTheme = null;
     requestWidgetRender = null;
     finishedTasks.clear();
+    liveTranscripts.clear();
   }
 
   return {
     ensureTaskWidget,
     ensurePanelEditor: installEditor,
     openOverlay,
+    openAgentSwitcher,
+    toggleTaskMonitor,
+    openTaskView,
+    closeTaskView,
+    setLiveTranscript,
     requestRender,
     clearTaskWidgetIfIdle,
     getContext,

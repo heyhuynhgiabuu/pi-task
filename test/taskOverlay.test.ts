@@ -8,9 +8,13 @@
  */
 
 import { strict as assert } from "node:assert";
+import { CustomEditor, initTheme } from "@earendil-works/pi-coding-agent";
 import { test } from "node:test";
 
-import { createTaskWidgetController } from "../src/lifecycle/widget.js";
+import {
+  createSteerEditor,
+  createTaskWidgetController,
+} from "../src/lifecycle/widget.js";
 import {
   TaskOverlay,
   type TaskOverlayHost,
@@ -51,7 +55,7 @@ function makeTask(over: Partial<BackgroundTask> = {}): BackgroundTask {
 }
 
 interface OverlayCalls {
-  open: string[];
+  open: Array<string | null>;
   stop: string[];
   close: number;
   renders: number;
@@ -191,33 +195,64 @@ interface CapturedCustom {
     keybindings: unknown,
     done: (result?: unknown) => void,
   ) => { render(w: number): string[]; handleInput(data: string): void };
-  options?: { overlay?: boolean; overlayOptions?: { anchor?: string } };
+  options?: {
+    overlay?: boolean;
+    overlayOptions?: {
+      anchor?: string;
+      width?: number | string;
+      maxHeight?: number | string;
+      margin?: number;
+    };
+  };
   resolve: (result: unknown) => void;
+  resolved: boolean;
 }
 
 function createOverlayContext() {
-  const setWidgetCalls: Array<{ key: string; placement?: string }> = [];
+  const setWidgetCalls: Array<{ key: string; value?: unknown; placement?: string }> = [];
+  let widgetFactory: ((tui: unknown, theme: unknown) => { render(width: number): string[] }) | undefined;
+  let editorFactory:
+    | ((tui: unknown, theme: unknown, keybindings: unknown) => { handleInput(data: string): void })
+    | undefined;
   const customCalls: CapturedCustom[] = [];
   const ui: any = {
     setWidget(key: string, value: unknown, options?: { placement?: string }) {
-      setWidgetCalls.push({ key, placement: options?.placement });
+      setWidgetCalls.push({ key, value, placement: options?.placement });
+      if (typeof value === "function") widgetFactory = value as never;
+      else if (value === undefined) widgetFactory = undefined;
     },
     getEditorComponent: () => undefined,
-    setEditorComponent: () => {},
+    setEditorComponent: (factory: never) => {
+      editorFactory = factory;
+    },
     notify: () => {},
     custom(
       factory: CapturedCustom["factory"],
       options?: CapturedCustom["options"],
     ): Promise<unknown> {
+      const call: CapturedCustom = {
+        factory,
+        options,
+        resolve: () => {},
+        resolved: false,
+      };
       return new Promise((resolve) => {
-        customCalls.push({ factory, options, resolve });
+        call.resolve = (result?: unknown) => {
+          call.resolved = true;
+          resolve(result);
+        };
+        customCalls.push(call);
       });
     },
   };
+  const fakeTui = { terminal: { rows: 40 }, requestRender: () => {} };
   return {
     context: { mode: "tui", hasUI: true, cwd: "/tmp", ui } as any,
     setWidgetCalls,
     customCalls,
+    getFactory: () => widgetFactory,
+    createEditor: () =>
+      editorFactory?.(fakeTui, { borderColor: (t: string) => t }, { matches: () => false }),
   };
 }
 
@@ -262,10 +297,8 @@ test("overlay rows come from the controller and enter opens the live view", asyn
   assert.ok(lines.some((l) => l.includes("run") && l.includes("general")), JSON.stringify(lines));
   overlay.handleInput(ENTER);
   assert.equal(await pending, true, "overlay resolved");
-  assert.ok(
-    setWidgetCalls.some((c) => c.key === "task-transcript"),
-    "live transcript view opened",
-  );
+  assert.equal(customCalls.length, 2, "enter opens the live transcript overlay");
+  assert.equal(customCalls[1]?.options?.overlay, true, "live view is an overlay");
   controller.dispose();
 });
 
@@ -280,10 +313,233 @@ test("esc resolves the overlay without opening a view", async () => {
   );
   overlay.handleInput(ESC);
   assert.equal(await pending, true);
-  assert.equal(
-    setWidgetCalls.some((c) => c.key === "task-transcript"),
-    false,
-    "no transcript view",
+  assert.equal(customCalls.length, 1, "no transcript view opened");
+  controller.dispose();
+});
+
+test("agents overlay marks the shown agent and switches between main and task transcripts", () => {
+  const rows = [makeRow("t1"), makeRow("t2")];
+  const { host, calls } = makeHost(() => rows);
+  const overlay = new TaskOverlay(host, null, {
+    mode: "agents",
+    shownTaskId: "t2",
+  });
+  const lines = renderLines(overlay);
+  assert.ok(lines.some((line) => line.includes("Switch to:")), JSON.stringify(lines));
+  assert.ok(lines.some((line) => line.includes("main")));
+  assert.ok(lines.some((line) => line.includes("t2") && line.includes("(shown)")));
+  assert.ok(
+    lines.find((line) => line.includes("❯"))?.includes("t2"),
+    "the currently shown subagent starts selected",
+  );
+
+  overlay.handleInput(UP);
+  overlay.handleInput(UP);
+  overlay.handleInput(ENTER);
+  assert.deepEqual(calls.open, [null], "main is a selectable switch target");
+  assert.deepEqual(calls.stop, [], "the switcher does not stop agents");
+
+  const { host: mainHost, calls: mainCalls } = makeHost(() => rows);
+  const fromMain = new TaskOverlay(mainHost, null, {
+    mode: "agents",
+    shownTaskId: null,
+  });
+  assert.ok(
+    renderLines(fromMain).some((line) => line.includes("main") && line.includes("(shown)")),
+  );
+  fromMain.handleInput(DOWN);
+  fromMain.handleInput(ENTER);
+  assert.deepEqual(mainCalls.open, ["t1"], "a subagent opens its transcript");
+});
+
+test("agents switcher updates its shown marker when the transcript closes", async () => {
+  const foreground = new Map([["t1", makeTask()]]);
+  const controller = createTaskWidgetController(foreground, new Map());
+  const { context, getFactory } = createOverlayContext();
+  controller.ensureTaskWidget(context);
+
+  assert.equal(await controller.openAgentSwitcher(context), true);
+  const widget = getFactory()!({ terminal: { rows: 40 }, requestRender: () => {} }, null);
+  const lines = (widget.render(120) as string[]).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+  assert.ok(lines.some((line) => line.includes("main") && line.includes("(shown)")));
+  assert.ok(!lines.some((line) => line.includes("t1") && line.includes("(shown)")));
+  controller.dispose();
+});
+
+// ── Inline agent switcher (/agents focuses the below-editor panel) ─────────
+
+test("agents switcher focuses the below-editor panel on the shown agent", async () => {
+  const foreground = new Map([
+    ["t1", makeTask()],
+    ["t2", makeTask({ description: "second" })],
+  ]);
+  const controller = createTaskWidgetController(foreground, new Map());
+  const { context, customCalls, getFactory } = createOverlayContext();
+  controller.ensureTaskWidget(context);
+  controller.openTaskView("t1");
+  assert.deepEqual(customCalls[0]!.options?.overlayOptions, {
+    anchor: "top-left",
+    width: "100%",
+    maxHeight: "100%",
+    margin: 0,
+  });
+  customCalls[0]!.factory({}, null, {}, (r?: unknown) => customCalls[0]!.resolve(r));
+
+  assert.equal(await controller.openAgentSwitcher(context), true);
+  assert.equal(customCalls.length, 1, "the switcher is not a modal anymore");
+  assert.equal(customCalls[0]!.resolved, true, "opening the picker closes the transcript view");
+  const widget = getFactory()!({ terminal: { rows: 40 }, requestRender: () => {} }, null);
+  const lines = (widget.render(120) as string[]).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+  assert.ok(lines.some((l) => l.includes("Switch to:")), JSON.stringify(lines));
+  assert.ok(lines.some((l) => l.includes("#t1") && l.includes("(shown)")), JSON.stringify(lines));
+  assert.ok(
+    lines.find((l) => l.includes("❯"))?.includes("#t1"),
+    "the agent being watched starts selected",
   );
   controller.dispose();
+});
+
+test("agents switcher preselects the watched agent even when its finished row aged out", async () => {
+  let clock = 100_000;
+  const finished = makeTask({ status: "done", description: "aged but watched" });
+  const controller = createTaskWidgetController(new Map(), new Map(), { now: () => clock });
+  controller.noteTaskFinished("t-aged", finished, clock);
+  const { context, customCalls, getFactory } = createOverlayContext();
+  controller.ensureTaskWidget(context);
+  controller.openTaskView("t-aged"); // the user is watching it when /agents fires
+  customCalls[0]!.factory({}, null, {}, (r?: unknown) => customCalls[0]!.resolve(r));
+
+  clock += 60_000; // past the done-linger window (5s): the idle list drops it
+  await controller.openAgentSwitcher(context);
+  const widget = getFactory()!({ terminal: { rows: 40 }, requestRender: () => {} }, null);
+  const lines = (widget.render(140) as string[]).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+  assert.ok(lines.some((l) => l.includes("#t-aged")), JSON.stringify(lines));
+  assert.ok(
+    lines.find((l) => l.includes("❯"))?.includes("#t-aged"),
+    "the watched aged agent starts selected",
+  );
+  controller.dispose();
+});
+
+test("agents enter restores the interrupted view if native session switching is unavailable", async () => {
+  const foreground = new Map([
+    ["t1", makeTask()],
+    ["t2", makeTask({ description: "second" })],
+  ]);
+  const controller = createTaskWidgetController(foreground, new Map());
+  const { context, customCalls, getFactory, createEditor } = createOverlayContext();
+  controller.ensureTaskWidget(context);
+  controller.openTaskView("t1");
+  customCalls[0]!.factory({}, null, {}, (r?: unknown) => customCalls[0]!.resolve(r));
+  await controller.openAgentSwitcher(context);
+
+  const editor = createEditor();
+  assert.ok(editor, "panel editor installed");
+  editor.handleInput(DOWN); // t1 -> t2
+  editor.handleInput(ENTER); // switch to t2
+  await new Promise((r) => setTimeout(r, 0));
+
+  assert.equal(customCalls.length, 2, "the interrupted transcript is restored after the missing API");
+  assert.equal(customCalls[0]!.resolved, true, "the picker closed");
+  assert.equal(customCalls[1]!.options?.overlay, true, "the prior view is restored");
+  const widget = getFactory()!({ terminal: { rows: 40 }, requestRender: () => {} }, null);
+  const lines = (widget.render(120) as string[]).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+  assert.ok(!lines.some((l) => l.includes("Switch to:")), "picker closed after enter");
+  controller.dispose();
+});
+
+test("esc closes the inline agents picker", async () => {
+  const foreground = new Map([["t1", makeTask()]]);
+  const controller = createTaskWidgetController(foreground, new Map());
+  const { context, getFactory, createEditor } = createOverlayContext();
+  controller.ensureTaskWidget(context);
+  await controller.openAgentSwitcher(context);
+
+  const editor = createEditor();
+  editor.handleInput(ESC);
+  const widget = getFactory()!({ terminal: { rows: 40 }, requestRender: () => {} }, null);
+  const lines = (widget.render(120) as string[]).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+  assert.ok(!lines.some((l) => l.includes("Switch to:")), "picker closed");
+  controller.dispose();
+});
+
+test("agents switcher falls back to the modal when another extension owns the editor", async () => {
+  const foreground = new Map([["t1", makeTask({ description: "first" })]]);
+  const controller = createTaskWidgetController(foreground, new Map());
+  const { context, customCalls } = createOverlayContext();
+  // Another extension owns the custom editor: the inline panel cannot take
+  // keyboard input, so /agents must fall back to the capturing modal.
+  context.ui.getEditorComponent = () => ({ handleInput() {} });
+
+  const pending = controller.openAgentSwitcher(context);
+  const modal = customCalls.at(-1)!;
+  assert.equal(modal.options?.overlay, true, "fallback opens the capturing modal");
+  const overlay = modal.factory({}, null, {}, (r?: unknown) => modal.resolve(r));
+  const lines = (overlay.render(80) as string[]).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+  assert.ok(lines.some((l) => l.includes("Switch to:")), JSON.stringify(lines));
+  assert.ok(lines.some((l) => l.includes("main") && l.includes("(shown)")), JSON.stringify(lines));
+  overlay.handleInput("\x1b");
+  assert.equal(await pending, true, "esc closes the fallback switcher");
+  controller.dispose();
+});
+
+test("esc in the inline agents picker restores the interrupted transcript", async () => {
+  const foreground = new Map([["t1", makeTask()]]);
+  const controller = createTaskWidgetController(foreground, new Map());
+  const { context, customCalls, createEditor } = createOverlayContext();
+  controller.ensureTaskWidget(context);
+  controller.openTaskView("t1");
+  customCalls[0]!.factory({}, null, {}, (r?: unknown) => customCalls[0]!.resolve(r));
+  await controller.openAgentSwitcher(context); // picker closes the view
+  assert.equal(customCalls[0]!.resolved, true);
+
+  const editor = createEditor();
+  editor.handleInput(ESC); // cancel the picker
+  await new Promise((r) => setTimeout(r, 0));
+
+  assert.equal(customCalls.length, 2, "the interrupted transcript is restored");
+  assert.equal(customCalls[1]!.options?.overlay, true);
+  controller.dispose();
+});
+
+test("typing in the inline agents picker exits without restoring the transcript", async () => {
+  const foreground = new Map([["t1", makeTask()]]);
+  const controller = createTaskWidgetController(foreground, new Map());
+  const { context, customCalls, createEditor, getFactory } = createOverlayContext();
+  controller.ensureTaskWidget(context);
+  controller.openTaskView("t1");
+  customCalls[0]!.factory({}, null, {}, (r?: unknown) => customCalls[0]!.resolve(r));
+  await controller.openAgentSwitcher(context);
+
+  const editor = createEditor();
+  editor.handleInput("q"); // stray typing exits the picker, restores nothing
+  const widget = getFactory()!({ terminal: { rows: 40 }, requestRender: () => {} }, null);
+  const lines = (widget.render(120) as string[]).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+  assert.ok(!lines.some((l) => l.includes("Switch to:")), "picker closed");
+  assert.equal(customCalls.length, 1, "no transcript restored on stray typing");
+  controller.dispose();
+});
+
+test("createSteerEditor builds a real editor on production-shaped themes", () => {
+  initTheme();
+  // Production shape per the host: ui.custom themes carry fg/bg but NO
+  // borderColor — the editor-theme adapter must supply it.
+  const theme = {
+    bg: (_token: string, text: string) => text,
+    fg: (_token: string, text: string) => text,
+  };
+  const fakeTui = { terminal: { rows: 40 }, requestRender: () => {} };
+  const editor = createSteerEditor(fakeTui, theme, { matches: () => false });
+
+  assert.ok(editor instanceof CustomEditor, "the real CustomEditor activates");
+  const lines = (editor.render(80) as string[]).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+  assert.ok(Array.isArray(lines) && lines.length > 0, "the real editor renders");
+});
+
+test("createSteerEditor falls back to the minimal editor on degraded themes", () => {
+  const fakeTui = { terminal: { rows: 40 }, requestRender: () => {} };
+  const editor = createSteerEditor(fakeTui, { fg: (_s: string, t: string) => t }, { matches: () => false });
+  assert.ok(!(editor instanceof CustomEditor), "degraded theme gets the minimal input");
+  const lines = editor.render(80).map((l: string) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+  assert.ok(lines.some((l) => l.includes("❯")));
 });

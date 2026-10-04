@@ -1,4 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { createHash } from "node:crypto";
+import { closeSync, fstatSync, openSync, readSync } from "node:fs";
+import { StringDecoder } from "node:string_decoder";
 import {
   findJsonlSessionByName,
   readRegistry,
@@ -16,8 +19,12 @@ import {
 } from "../helpers.js";
 import { createSyncHerdrControl } from "../subagent/herdr.js";
 import { killAgentPaneStrict } from "../subagent/tmux.js";
-import { ignoreStaleExtensionCtx } from "../stale-ctx.js";
-import type { BackgroundTask, RegistryEntry } from "../types.js";
+import { isStaleExtensionCtxError } from "../stale-ctx.js";
+import type {
+  BackgroundTask,
+  CompletionDeliveryOutcome,
+  RegistryEntry,
+} from "../types.js";
 
 function closeTaskResource(task: BackgroundTask): void {
   if (task.handle?.backend === "herdr") {
@@ -39,13 +46,312 @@ function closeTaskResource(task: BackgroundTask): void {
  */
 const completedTaskKeys = new Set<string>();
 
-function completionKey(id: string, task: BackgroundTask): string {
-  return `${id}\u0000${task.startedAt}`;
+export function completionDeliveryId(id: string, startedAt: number): string {
+  return `${id}\u0000${startedAt}`;
+}
+
+/**
+ * Send one completion notice. Pi's `sendMessage` throws synchronously when the
+ * extension ctx is stale after a session replacement; that is a deliberate
+ * suppression, not a dispatch failure, so report it as `"suppressed"` for the
+ * delivery queue. Any other error is a real failure the queue must retry.
+ */
+export function sendCompletionNotice(
+  pi: Pick<ExtensionAPI, "sendMessage">,
+  message: Parameters<ExtensionAPI["sendMessage"]>[0],
+): CompletionDeliveryOutcome | void {
+  try {
+    pi.sendMessage(
+      message,
+      completionDeliveryOptions(process.env.PI_TASK_COMPLETION_DELIVERY),
+    );
+  } catch (error) {
+    if (isStaleExtensionCtxError(error)) return "suppressed";
+    throw error;
+  }
 }
 
 export interface CompletionDeliveryQueue {
-  enqueue(delivery: () => void): void;
+  enqueue(
+    deliveryId: string,
+    delivery: () => CompletionDeliveryOutcome | void,
+    onPersisted?: () => void,
+  ): void;
+  acknowledgePersisted(deliveryId: string): void;
+  hasPending(): boolean;
+  pendingDeliveryIds(): readonly string[];
+  cancelPending(deliveryId: string): boolean;
+  setPersistedDeliveryIdsReader(
+    reader:
+      | ((pendingDeliveryIds: ReadonlySet<string>) => ReadonlySet<string>)
+      | undefined,
+  ): void;
   dispose(): void;
+}
+
+interface QueuedCompletionDelivery {
+  deliveryId: string;
+  deliver: () => CompletionDeliveryOutcome | void;
+  attempts: number;
+  nextAttemptAt: number;
+  dispatched: boolean;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function persistedCompletionDeliveryId(entry: unknown): string | undefined {
+  if (
+    !isRecord(entry) ||
+    entry.type !== "custom_message" ||
+    entry.customType !== "task-complete" ||
+    !isRecord(entry.details)
+  ) {
+    return undefined;
+  }
+  const deliveryId = entry.details.completion_delivery_id;
+  return typeof deliveryId === "string" && deliveryId.length > 0
+    ? deliveryId
+    : undefined;
+}
+
+/** Test seam for the filesystem stat used to detect same-inode file mutation. */
+export interface PersistedCompletionScannerOptions {
+  fstat?: (fd: number) => {
+    isFile(): boolean;
+    size: bigint;
+    dev: bigint;
+    ino: bigint;
+    mtimeNs: bigint;
+    ctimeNs: bigint;
+  };
+}
+
+export type PersistedCompletionDeliveryScanner = (
+  sessionPath: string | undefined,
+  revalidateIds?: ReadonlySet<string>,
+) => ReadonlySet<string>;
+
+/** Scan Pi's append-only session JSONL and verify cached IDs after file mutation. */
+export function createPersistedCompletionDeliveryScanner(
+  options: PersistedCompletionScannerOptions = {},
+): PersistedCompletionDeliveryScanner {
+  const statFile = options.fstat ?? ((fd: number) => fstatSync(fd, { bigint: true }));
+  interface PersistedDeliveryLine {
+    offset: number;
+    byteLength: number;
+    digest: string;
+  }
+
+  const CHECKPOINT_BYTES = 256;
+  let currentPath: string | undefined;
+  let fileIdentity: string | undefined;
+  let fileVersion: string | undefined;
+  let offset = 0;
+  let pendingStartOffset = 0;
+  let pending = "";
+  let decoder = new StringDecoder("utf8");
+  let checkpoint: Uint8Array = new Uint8Array(0);
+  const deliveryIds = new Set<string>();
+  const persistedLines = new Map<string, PersistedDeliveryLine>();
+
+  const reset = (sessionPath: string) => {
+    currentPath = sessionPath;
+    fileIdentity = undefined;
+    fileVersion = undefined;
+    offset = 0;
+    pendingStartOffset = 0;
+    pending = "";
+    decoder = new StringDecoder("utf8");
+    checkpoint = new Uint8Array(0);
+    deliveryIds.clear();
+    persistedLines.clear();
+  };
+
+  const digestRange = (
+    fd: number,
+    start: number,
+    byteLength: number,
+  ): string | undefined => {
+    const hash = createHash("sha256");
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    let readOffset = 0;
+    while (readOffset < byteLength) {
+      const bytesRead = readSync(
+        fd,
+        buffer,
+        0,
+        Math.min(buffer.length, byteLength - readOffset),
+        start + readOffset,
+      );
+      if (bytesRead === 0) return undefined;
+      hash.update(buffer.subarray(0, bytesRead));
+      readOffset += bytesRead;
+    }
+    return hash.digest("hex");
+  };
+
+  const readRange = (fd: number, start: number, byteLength: number): Buffer | undefined => {
+    const buffer = Buffer.allocUnsafe(byteLength);
+    let readOffset = 0;
+    while (readOffset < byteLength) {
+      const bytesRead = readSync(
+        fd,
+        buffer,
+        readOffset,
+        byteLength - readOffset,
+        start + readOffset,
+      );
+      if (bytesRead === 0) return undefined;
+      readOffset += bytesRead;
+    }
+    return buffer;
+  };
+
+  const hasPersistedLineBoundaries = (
+    fd: number,
+    persistedLine: PersistedDeliveryLine,
+  ): boolean => {
+    if (persistedLine.offset > 0) {
+      const precedingByte = readRange(fd, persistedLine.offset - 1, 1);
+      if (precedingByte?.[0] !== 0x0a) return false;
+    }
+    const followingByte = readRange(
+      fd,
+      persistedLine.offset + persistedLine.byteLength,
+      1,
+    );
+    return followingByte?.[0] === 0x0a;
+  };
+
+  /** True when the cached line still matches the file bytes and both delimiters. */
+  const isPersistedLineIntact = (
+    fd: number,
+    persistedLine: PersistedDeliveryLine,
+  ): boolean =>
+    digestRange(fd, persistedLine.offset, persistedLine.byteLength) ===
+      persistedLine.digest && hasPersistedLineBoundaries(fd, persistedLine);
+
+  const inspectLine = (line: string, lineOffset: number) => {
+    if (
+      !line.includes('"customType"') ||
+      !line.includes('"completion_delivery_id"')
+    ) {
+      return;
+    }
+    try {
+      const entry: unknown = JSON.parse(line);
+      const deliveryId = persistedCompletionDeliveryId(entry);
+      if (!deliveryId) return;
+      deliveryIds.add(deliveryId);
+      persistedLines.set(deliveryId, {
+        offset: lineOffset,
+        byteLength: Buffer.byteLength(line, "utf8"),
+        digest: createHash("sha256").update(line, "utf8").digest("hex"),
+      });
+    } catch {
+      // Ignore malformed lines; only a valid persisted custom entry can ack.
+    }
+  };
+
+  return (sessionPath, revalidateIds) => {
+    if (!sessionPath?.trim()) return new Set<string>();
+    if (currentPath !== sessionPath) reset(sessionPath);
+
+    let fd: number | undefined;
+    try {
+      fd = openSync(sessionPath, "r");
+      const stats = statFile(fd);
+      if (!stats.isFile() || stats.size > BigInt(Number.MAX_SAFE_INTEGER)) {
+        return new Set<string>();
+      }
+      const size = Number(stats.size);
+      const identity = `${stats.dev}:${stats.ino}`;
+      if (fileIdentity !== undefined && fileIdentity !== identity) reset(sessionPath);
+      fileIdentity = identity;
+      if (size < offset) reset(sessionPath);
+
+      if (checkpoint.length > 0 && offset >= checkpoint.length) {
+        const currentTail = readRange(fd, offset - checkpoint.length, checkpoint.length);
+        if (!currentTail?.equals(checkpoint)) reset(sessionPath);
+      }
+      const version = `${stats.mtimeNs}:${stats.ctimeNs}`;
+      if (fileVersion !== undefined && fileVersion !== version) {
+        for (const persistedLine of persistedLines.values()) {
+          if (!isPersistedLineIntact(fd, persistedLine)) {
+            reset(sessionPath);
+            break;
+          }
+        }
+      }
+      // Re-read the caller's pending entries even when the timestamps look
+      // unchanged: a same-size in-place rewrite inside one coarse timestamp
+      // tick would otherwise leave a stale ID acknowledged. The cost stays
+      // proportional to the pending notices, not the whole cache.
+      if (revalidateIds !== undefined && revalidateIds.size > 0) {
+        for (const deliveryId of revalidateIds) {
+          const persistedLine = persistedLines.get(deliveryId);
+          if (persistedLine && !isPersistedLineIntact(fd, persistedLine)) {
+            reset(sessionPath);
+            break;
+          }
+        }
+      }
+      fileIdentity = identity;
+      fileVersion = version;
+
+      const buffer = Buffer.allocUnsafe(64 * 1024);
+      while (offset < size) {
+        const bytesRead = readSync(
+          fd,
+          buffer,
+          0,
+          Math.min(buffer.length, size - offset),
+          offset,
+        );
+        if (bytesRead === 0) break;
+        offset += bytesRead;
+        pending += decoder.write(buffer.subarray(0, bytesRead));
+        let newline = pending.indexOf("\n");
+        while (newline !== -1) {
+          const lineWithNewline = pending.slice(0, newline + 1);
+          const line = pending.slice(0, newline);
+          inspectLine(line, pendingStartOffset);
+          pendingStartOffset += Buffer.byteLength(lineWithNewline, "utf8");
+          pending = pending.slice(newline + 1);
+          newline = pending.indexOf("\n");
+        }
+      }
+      const checkpointLength = Math.min(CHECKPOINT_BYTES, offset);
+      checkpoint = checkpointLength === 0
+        ? new Uint8Array(0)
+        : readRange(fd, offset - checkpointLength, checkpointLength) ?? new Uint8Array(0);
+    } catch {
+      // A cached ID is not current persistence evidence when this read failed.
+      return new Set<string>();
+    } finally {
+      if (fd !== undefined) {
+        try {
+          closeSync(fd);
+        } catch {
+          // Read errors are handled above; close is best effort.
+        }
+      }
+    }
+    return deliveryIds;
+  };
+}
+
+/** Acknowledge only IDs found in persisted custom session entries. */
+export function acknowledgePersistedCompletionDeliveries(
+  queue: CompletionDeliveryQueue,
+  entries: readonly unknown[],
+): void {
+  for (const entry of entries) {
+    const deliveryId = persistedCompletionDeliveryId(entry);
+    if (deliveryId) queue.acknowledgePersisted(deliveryId);
+  }
 }
 
 /**
@@ -53,29 +359,136 @@ export interface CompletionDeliveryQueue {
  * window do not each independently interrupt the parent session.
  */
 export function createCompletionDeliveryQueue(windowMs = 200): CompletionDeliveryQueue {
+  const initialWindowMs = Math.max(0, windowMs);
   let timer: ReturnType<typeof setTimeout> | undefined;
-  let pending: Array<() => void> = [];
-  const flush = () => {
-    timer = undefined;
-    const deliveries = pending;
-    pending = [];
-    for (const delivery of deliveries) {
-      try {
-        delivery();
-      } catch {
-        // A stale parent context or one failed send must not block siblings.
-      }
+  let persistenceTimer: ReturnType<typeof setTimeout> | undefined;
+  let persistedDeliveryIdsReader:
+    | ((pendingDeliveryIds: ReadonlySet<string>) => ReadonlySet<string>)
+    | undefined;
+  const pending = new Map<string, QueuedCompletionDelivery>();
+  const persistedCallbacks = new Map<string, () => void>();
+  let flush: () => void = () => {};
+
+  const acknowledgePersisted = (deliveryId: string) => {
+    if (!pending.delete(deliveryId)) return;
+    const onPersisted = persistedCallbacks.get(deliveryId);
+    persistedCallbacks.delete(deliveryId);
+    try {
+      onPersisted?.();
+    } catch {
+      // Persistence callbacks cannot block unrelated completion notices.
     }
   };
+
+  const scanPersistedDeliveries = () => {
+    if (!persistedDeliveryIdsReader || pending.size === 0) return;
+    try {
+      // Pass the pending IDs so the scanner can re-read exactly those entries
+      // even when the file's timestamps look unchanged.
+      for (const deliveryId of persistedDeliveryIdsReader(new Set(pending.keys()))) {
+        if (pending.has(deliveryId)) acknowledgePersisted(deliveryId);
+      }
+    } catch {
+      // A temporary read failure must not release the session guard.
+    }
+  };
+
+  const cancelPending = (deliveryId: string): boolean => {
+    if (!pending.delete(deliveryId)) return false;
+    persistedCallbacks.delete(deliveryId);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+    if (persistenceTimer !== undefined && pending.size === 0) {
+      clearTimeout(persistenceTimer);
+      persistenceTimer = undefined;
+    }
+    scheduleDeliveryFlush();
+    return true;
+  };
+
+  function scheduleDeliveryFlush(): void {
+    if (timer !== undefined) return;
+    const retryable = [...pending.values()].filter((delivery) => !delivery.dispatched);
+    if (retryable.length === 0) return;
+    const nextAttemptAt = Math.min(...retryable.map((delivery) => delivery.nextAttemptAt));
+    timer = setTimeout(flush, Math.max(0, nextAttemptAt - Date.now()));
+    timer.unref?.();
+  }
+
+  const schedulePersistenceCheck = () => {
+    if (persistenceTimer !== undefined || pending.size === 0 || !persistedDeliveryIdsReader) {
+      return;
+    }
+    persistenceTimer = setTimeout(() => {
+      persistenceTimer = undefined;
+      scanPersistedDeliveries();
+      schedulePersistenceCheck();
+    }, 25);
+    persistenceTimer.unref?.();
+  };
+
+  flush = () => {
+    timer = undefined;
+    // A replay may already be present in the saved JSONL after a crash that
+    // occurred between Pi's append and our acknowledgement callback.
+    scanPersistedDeliveries();
+    const now = Date.now();
+    for (const delivery of [...pending.values()]) {
+      if (delivery.dispatched || delivery.nextAttemptAt > now) continue;
+      try {
+        const outcome = delivery.deliver();
+        if (outcome === "suppressed") {
+          cancelPending(delivery.deliveryId);
+          continue;
+        }
+        delivery.dispatched = true;
+      } catch {
+        delivery.attempts += 1;
+        const delay = Math.min(5_000, 50 * 2 ** Math.min(delivery.attempts - 1, 7));
+        delivery.nextAttemptAt = Date.now() + delay;
+      }
+    }
+    scheduleDeliveryFlush();
+    schedulePersistenceCheck();
+  };
+
   return {
-    enqueue(delivery) {
-      pending.push(delivery);
-      if (timer === undefined) timer = setTimeout(flush, windowMs);
+    enqueue(deliveryId, deliver, onPersisted) {
+      if (!deliveryId.trim() || pending.has(deliveryId)) return;
+      pending.set(deliveryId, {
+        deliveryId,
+        deliver,
+        attempts: 0,
+        nextAttemptAt: Date.now() + initialWindowMs,
+        dispatched: false,
+      });
+      if (onPersisted) persistedCallbacks.set(deliveryId, onPersisted);
+      scheduleDeliveryFlush();
+      schedulePersistenceCheck();
+    },
+    acknowledgePersisted,
+    hasPending() {
+      return pending.size > 0;
+    },
+    pendingDeliveryIds() {
+      return [...pending.keys()];
+    },
+    cancelPending,
+    setPersistedDeliveryIdsReader(reader) {
+      persistedDeliveryIdsReader = reader;
+      scanPersistedDeliveries();
+      schedulePersistenceCheck();
     },
     dispose() {
       if (timer !== undefined) clearTimeout(timer);
+      if (persistenceTimer !== undefined) clearTimeout(persistenceTimer);
       timer = undefined;
-      pending = [];
+      persistenceTimer = undefined;
+      pending.clear();
+      persistedCallbacks.clear();
+      persistedDeliveryIdsReader = undefined;
     },
   };
 }
@@ -116,7 +529,7 @@ export function completeTask({
   writeRegistryFn = writeRegistry,
   deliveryQueue,
 }: CompleteTaskOptions): { cleanupSucceeded: boolean } {
-  const key = completionKey(id, task);
+  const key = completionDeliveryId(id, task.startedAt);
   if (completedTaskKeys.has(key)) {
     // Already fully processed in this process: never re-deliver or re-close.
     return { cleanupSucceeded: true };
@@ -299,42 +712,41 @@ export function completeTask({
     return { cleanupSucceeded };
   }
 
-  const deliver = () => ignoreStaleExtensionCtx(() =>
-    pi.sendMessage(
-      {
-        customType: "task-complete",
-        content: `Background task ${id} (${task.agentType}) ${phase}.\n\n${warning ? warning + "\n\n" : ""}${summaryText}`,
-        display: true,
-        details: {
-          task_id: id,
-          agent_type: task.agentType,
-          description: task.description,
-          phase,
-          execution_phase: phase,
-          status: assessment.reportedStatus,
-          reported_status: assessment.reportedStatus,
-          raw_status: assessment.rawStatus,
-          result_valid: assessment.valid,
-          result: content,
-          summary: parsed.summary,
-          findings: parsed.findings,
-          evidence: parsed.evidence,
-          files: parsed.files,
-          caveats: parsed.caveats,
-          next_steps: parsed.next_steps,
-          confidence: parsed.confidence,
-          duration_ms: durationMs,
-          tool_uses: task.toolUses,
-          turn_count: task.turns,
-          background: true,
-          structured_result: structuredResultPayload(assessment),
-          full_output: parsed.raw.trim() || content.trim(),
-        },
+  const deliver = (): CompletionDeliveryOutcome | void => {
+    if (deliveryGuard && !deliveryGuard()) return "suppressed";
+    return sendCompletionNotice(pi, {
+      customType: "task-complete",
+      content: `Background task ${id} (${task.agentType}) ${phase}.\n\n${warning ? warning + "\n\n" : ""}${summaryText}`,
+      display: true,
+      details: {
+        task_id: id,
+        agent_type: task.agentType,
+        description: task.description,
+        phase,
+        execution_phase: phase,
+        status: assessment.reportedStatus,
+        reported_status: assessment.reportedStatus,
+        raw_status: assessment.rawStatus,
+        result_valid: assessment.valid,
+        result: content,
+        summary: parsed.summary,
+        findings: parsed.findings,
+        evidence: parsed.evidence,
+        files: parsed.files,
+        caveats: parsed.caveats,
+        next_steps: parsed.next_steps,
+        confidence: parsed.confidence,
+        duration_ms: durationMs,
+        tool_uses: task.toolUses,
+        turn_count: task.turns,
+        background: true,
+        structured_result: structuredResultPayload(assessment),
+        full_output: parsed.raw.trim() || content.trim(),
+        completion_delivery_id: key,
       },
-      completionDeliveryOptions(process.env.PI_TASK_COMPLETION_DELIVERY),
-    ),
-  );
-  if (deliveryQueue) deliveryQueue.enqueue(deliver);
+    });
+  };
+  if (deliveryQueue) deliveryQueue.enqueue(key, deliver);
   else deliver();
 
   return { cleanupSucceeded };

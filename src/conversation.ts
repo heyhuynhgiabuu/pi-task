@@ -341,6 +341,42 @@ export function upsertTaskSessionHistory(
   });
 }
 
+/** Fail an unadmitted request only if its inspected history identity is current. */
+export function failUnadmittedTaskSessionHistory(
+  piDir: string,
+  expected: Pick<
+    TaskSessionHistoryEntry,
+    "id" | "status" | "durableRequestId" | "ownerPid"
+  >,
+  completedAt: number,
+): boolean {
+  if (expected.status !== "running") return false;
+  const file = getTaskSessionHistoryPath(piDir);
+  return withFileLock(file, () => {
+    const parsed = readDurableJson(file);
+    if (parsed !== undefined && !Array.isArray(parsed)) unreadableShape(file);
+    const entries = parseTaskSessionHistory(parsed ?? []);
+    const index = entries.findIndex((entry) => entry.id === expected.id);
+    const current = entries[index];
+    if (
+      !current ||
+      current.status !== expected.status ||
+      current.durableRequestId !== expected.durableRequestId ||
+      current.ownerPid !== expected.ownerPid
+    ) return false;
+    entries[index] = {
+      ...current,
+      status: "failed",
+      reportedStatus: "failure",
+      rawStatus: "host-restarted-before-admission",
+      resultValid: false,
+      completedAt,
+    };
+    writeJsonFile(file, entries);
+    return true;
+  });
+}
+
 /** Mark both durable sibling records after a comparison report is delivered. */
 export function markComparisonGroupDelivered(
   piDir: string,

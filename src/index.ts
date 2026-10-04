@@ -61,6 +61,7 @@ export type {
 import {
   completeTask,
   createCompletionDeliveryQueue,
+  createPersistedCompletionDeliveryScanner,
   createTaskWidgetController,
   executeTerminalTask,
   restoreActiveBackgroundTasks,
@@ -108,20 +109,23 @@ import {
   taskResultOutputSchema,
   withTaskStructuredContent,
 } from "./tool/structured.js";
-import type { BackgroundTask } from "./types.js";
+import type { BackgroundTask, ExecutionBackend } from "./types.js";
 import { startIntentHash } from "./task-intent.js";
 import {
   executeDurableTask,
+  reconcileUnadmittedDurableTasks,
   resumeDurableAfterRestart,
 } from "./lifecycle/durable-execution.js";
 import {
   abortDurableTask,
   steerDurableTask,
+  type DurableRuntimeModelRegistry,
 } from "./subagent/durable.js";
 import { ignoreStaleExtensionCtx } from "./stale-ctx.js";
 import { resolveTaskCwd } from "./task-cwd.js";
 import { serializeTaskAdmission } from "./task-admission.js";
 import { handleTaskControl } from "./task-control-api.js";
+import { registerTaskSessionReplacementGuard } from "./lifecycle/session-switch-guard.js";
 import {
   parseTaskControlRequest,
   parseTaskStartRequest,
@@ -163,18 +167,34 @@ export default function (pi: ExtensionAPI) {
   const extensionPiDir = piDir;
   const backgroundTasks = new Map<string, BackgroundTask>();
   const foregroundTasks = new Map<string, BackgroundTask>();
+  const completionDeliveryQueue = createCompletionDeliveryQueue();
+  const persistedCompletionDeliveryIds = createPersistedCompletionDeliveryScanner();
   const asyncHerdr = createDefaultHerdrTerminalBackend();
+  let runtimeModelRegistry: DurableRuntimeModelRegistry | undefined;
   const taskWidget = createTaskWidgetController(foregroundTasks, backgroundTasks, {
     steerTask: (task, taskId, text) => {
       if (task.backend === "durable") {
-        return steerDurableTask(extensionPiDir, taskId, text);
+        return steerDurableTask(extensionPiDir, taskId, text, {
+          modelRegistry: runtimeModelRegistry,
+        });
+      }
+      if (task.backend === "sdk") {
+        return task.sdkSteer
+          ? task.sdkSteer(text)
+          : "SDK steering is unavailable for this task.";
       }
       const result = steerRunningBackgroundTask(task.paneId, text, task.handle);
       return result.ok ? null : result.reason;
     },
+    canReplaceSession: () =>
+      foregroundTasks.size === 0 &&
+      backgroundTasks.size === 0 &&
+      !completionDeliveryQueue.hasPending(),
     stopTask: async (taskId, task) => {
       if (task.backend === "durable") {
-        return abortDurableTask(extensionPiDir, taskId);
+        return abortDurableTask(extensionPiDir, taskId, {
+          modelRegistry: runtimeModelRegistry,
+        });
       }
       if (task.backend === "sdk") {
         return "SDK tasks cannot be stopped from the panel yet.";
@@ -198,7 +218,12 @@ export default function (pi: ExtensionAPI) {
   // Records which conversation spawned each background task so a result is
   // never delivered into a different conversation or branch.
   const deliveryGuard = new DeliveryGuard();
-  const completionDeliveryQueue = createCompletionDeliveryQueue();
+  registerTaskSessionReplacementGuard(
+    pi,
+    foregroundTasks,
+    backgroundTasks,
+    () => completionDeliveryQueue.hasPending(),
+  );
   const completeTaskWithDelivery: typeof completeTask = (options) =>
     completeTask({
       ...options,
@@ -225,7 +250,10 @@ export default function (pi: ExtensionAPI) {
 
   // ── Polling loop (background task completion, pane death, timeout) ──────
 
-  const comparisonCoordinator = new ComparisonCoordinator();
+  const comparisonCoordinator = new ComparisonCoordinator({
+    enqueueDelivery: (deliveryId, delivery, onPersisted) =>
+      completionDeliveryQueue.enqueue(deliveryId, delivery, onPersisted),
+  });
 
   const comparisonSettledHandler = createComparisonSettledHandler({
     piDir,
@@ -241,11 +269,17 @@ export default function (pi: ExtensionAPI) {
   // maps stay empty; polling picks restored tasks up on its next tick.
   let restoredLifecycleOnce = false;
   pi.on("session_start", async (_event, ctx) => {
+    completionDeliveryQueue.setPersistedDeliveryIdsReader((pendingDeliveryIds) =>
+      persistedCompletionDeliveryIds(
+        ctx.sessionManager.getSessionFile?.(),
+        pendingDeliveryIds,
+      ),
+    );
+    runtimeModelRegistry = ctx.modelRegistry;
     if (restoredLifecycleOnce) return;
     restoredLifecycleOnce = true;
     const sessionId = sessionViewOf(ctx).getSessionId();
     try {
-      reconcileStaleSdkBackgroundTasks(piDir);
       await restoreActiveBackgroundTasks(
         piDir,
         backgroundTasks,
@@ -307,6 +341,105 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
+    // Durable recovery identifies live submissions before stale-SDK
+    // reconciliation and restores their progress stream.
+    const recoveredWatchErrors = new Set<string>();
+    let recoveredDurableTaskIds: ReadonlySet<string> = new Set();
+    try {
+      recoveredDurableTaskIds = await resumeDurableAfterRestart({
+        pi,
+        piDir,
+        sessionId,
+        modelRegistry: ctx.modelRegistry,
+        enqueueDelivery: (deliveryId, delivery) =>
+          completionDeliveryQueue.enqueue(deliveryId, delivery),
+        onTaskResumed: (taskId, history, childConversationId) => {
+          if (!history || history.status !== "running" || backgroundTasks.has(taskId)) return;
+          backgroundTasks.set(taskId, {
+            dir: history.dir,
+            ...(history.cwd !== undefined ? { cwd: history.cwd } : {}),
+            agentType: history.agentType,
+            sessionName: history.sessionName,
+            backend: "durable",
+            originalPane: null,
+            description: history.description,
+            startedAt: history.startedAt,
+            toolUses: 0,
+            turns: 0,
+            conversationId: childConversationId,
+            ...(history.ownerSessionId !== undefined
+              ? { ownerSessionId: history.ownerSessionId }
+              : {}),
+            ...(history.ownerLeafId !== undefined
+              ? { ownerLeafId: history.ownerLeafId }
+              : {}),
+            recentCalls: [],
+            status: "running",
+          });
+          taskWidget.ensureTaskWidget(ctx);
+        },
+        onTaskProgress: (taskId, items, toolUses) => {
+          taskWidget.setLiveTranscript(taskId, items, toolUses);
+        },
+        onTaskWatchError: (taskId, items, toolUses) => {
+          if (recoveredWatchErrors.has(taskId)) return;
+          recoveredWatchErrors.add(taskId);
+          taskWidget.setLiveTranscript(
+            taskId,
+            [
+              ...items,
+              {
+                type: "system",
+                text: "Live durable updates are unavailable; the task continues running.",
+                timestamp: "",
+              },
+            ],
+            toolUses,
+          );
+        },
+        onTaskSettled: (taskId, _history, status) => {
+          const task = backgroundTasks.get(taskId);
+          if (!task || task.backend !== "durable") return;
+          task.status = status;
+          task.completedAt = Date.now();
+          backgroundTasks.delete(taskId);
+          taskWidget.noteTaskFinished(taskId, task, task.completedAt);
+          clearTaskWidgetIfIdle();
+        },
+      });
+    } catch (error) {
+      console.error(
+        `[pi-task] durable resume skipped: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    try {
+      reconcileStaleSdkBackgroundTasks(piDir, recoveredDurableTaskIds, { sessionId });
+    } catch (error) {
+      console.error(
+        `[pi-task] stale-SDK reconciliation skipped: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    const activeDurableTaskIds = new Set(
+      [...backgroundTasks.entries(), ...foregroundTasks.entries()]
+        .filter(([, task]) => task.backend === "durable")
+        .map(([taskId]) => taskId),
+    );
+    try {
+      await reconcileUnadmittedDurableTasks({
+        piDir,
+        sessionId,
+        recoveredTaskIds: recoveredDurableTaskIds,
+        activeTaskIds: activeDurableTaskIds,
+        modelRegistry: ctx.modelRegistry,
+      });
+    } catch (error) {
+      console.error(
+        `[pi-task] durable admission reconciliation skipped: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    // With durable recovery and stale-SDK reconciliation complete, comparison
+    // replay can include siblings interrupted by the previous process.
     let restoredComparisonRuns: ReturnType<typeof restoreComparisonGroups>;
     try {
       restoredComparisonRuns = restoreComparisonGroups(
@@ -346,13 +479,6 @@ export default function (pi: ExtensionAPI) {
         // Retry on next restart via durable history.
       }
     }
-
-    // Durable backend: finish submissions a previous process left running.
-    resumeDurableAfterRestart({ pi, piDir, sessionId }).catch((error) => {
-      console.error(
-        `[pi-task] durable resume skipped: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    });
   });
 
   const stopBackgroundPolling = startBackgroundPolling(
@@ -383,17 +509,21 @@ export default function (pi: ExtensionAPI) {
     BACKGROUND_CHECK_MS,
   );
 
-  const controlTask = (request: Parameters<typeof handleTaskControl>[0]) =>
+  const controlTask = (
+    request: Parameters<typeof handleTaskControl>[0],
+    modelRegistry?: DurableRuntimeModelRegistry,
+  ) =>
     handleTaskControl(request, {
       pi,
       piDir,
       backgroundTasks,
+      foregroundTasks,
       registryEntryStatus: registryEntryCancellationStatus,
       clearTaskWidgetIfIdle,
       completeTask: completeTaskWithDelivery,
       onComparisonSettled: comparisonSettledHandler,
       noteTaskFinished: (id, task) => taskWidget.noteTaskFinished(id, task),
-      abortDurable: (taskId) => abortDurableTask(piDir, taskId),
+      abortDurable: (taskId) => abortDurableTask(piDir, taskId, { modelRegistry }),
     });
 
   // ── Panel ready at session start ───────────────────────────────────────
@@ -668,6 +798,7 @@ export default function (pi: ExtensionAPI) {
           let id: string;
           let sessionName: string;
           let resume = false;
+          let resumeBackend: ExecutionBackend | undefined;
           let resumeSessionRef: string | undefined;
     
           const artifactsDir = join(piDir, "artifacts", "tasks");
@@ -711,6 +842,7 @@ export default function (pi: ExtensionAPI) {
         id = taskResumeResolution.id;
         sessionName = taskResumeResolution.sessionName;
         resume = taskResumeResolution.resume;
+        resumeBackend = taskResumeResolution.backend;
         resumeSessionRef = taskResumeResolution.resumeSessionRef;
         persistedTaskCwd = taskResumeResolution.persistedTaskCwd;
 
@@ -757,8 +889,15 @@ export default function (pi: ExtensionAPI) {
         : undefined;
 
       // ─── Build and run the sub-agent pi process ──────────────────────────
+      // Backend selection: PI_TASK_BACKEND env > `taskBackend` setting > auto.
+      // Settings live on the extension API (pi.getSettings), not the tool ctx;
+      // headless harnesses may omit it, in which case the setting is absent.
+      const settingsBackend = typeof pi.getSettings === "function"
+        ? (pi.getSettings() as Record<string, unknown> | undefined)?.taskBackend
+        : undefined;
       const backendResolution = await resolveTaskBackend({
         allowAcpSession: !claudeRuntime && !conversationId,
+        settingsBackend: typeof settingsBackend === "string" ? settingsBackend : undefined,
       });
       if (!backendResolution.ok) {
         return {
@@ -773,9 +912,9 @@ export default function (pi: ExtensionAPI) {
       }
       const {
         requestedBackend,
-        selectedBackend,
         herdrBackend,
       } = backendResolution;
+      const selectedBackend = resumeBackend ?? backendResolution.selectedBackend;
       if (claudeRuntime && selectedBackend === "sdk") {
         return {
           content: [
@@ -849,6 +988,7 @@ export default function (pi: ExtensionAPI) {
           pi,
           piDir,
           artifactsDir,
+          toolCallId,
           signal,
           isBackground,
           backgroundTasks,
@@ -858,7 +998,8 @@ export default function (pi: ExtensionAPI) {
           clearTaskWidgetIfIdle,
           ensureTaskWidget: () =>
             ignoreStaleExtensionCtx(() => ensureTaskWidget(ctx)),
-          enqueueDelivery: (delivery) => completionDeliveryQueue.enqueue(delivery),
+          enqueueDelivery: (delivery, deliveryId) =>
+            completionDeliveryQueue.enqueue(deliveryId, delivery),
         });
       }
       await materializeTaskExecution({
@@ -1006,7 +1147,8 @@ export default function (pi: ExtensionAPI) {
               ensureTaskWidget: () =>
                 ignoreStaleExtensionCtx(() => ensureTaskWidget(ctx)),
               clearTaskWidgetIfIdle,
-              enqueueDelivery: (delivery) => completionDeliveryQueue.enqueue(delivery),
+              enqueueDelivery: (delivery, deliveryId) =>
+                completionDeliveryQueue.enqueue(deliveryId, delivery),
             });
           }
 
@@ -1099,24 +1241,90 @@ export default function (pi: ExtensionAPI) {
    */
   pi.registerCommand("task", {
     description:
-      "Open the navigable task panel; /task [list | status <id> | cancel <id>]",
+      "Toggle the task progress monitor; /task [list | status <id> | cancel <id> | delivery list | delivery cancel <id> [startedAt]]",
     handler: async (args, ctx) => {
-      const [subcommand, id] = args.trim().split(/\s+/).filter(Boolean);
+      const [subcommand, ...subcommandArgs] = args.trim().split(/\s+/).filter(Boolean);
+      const id = subcommandArgs[0];
+      if (!subcommand) {
+        const visible = taskWidget.toggleTaskMonitor(ctx);
+        if (visible === undefined) {
+          ctx.ui.notify("/task monitor toggling requires Pi's interactive TUI; use /task list to inspect tasks.", "warning");
+        } else {
+          ctx.ui.notify(`Task progress monitor ${visible ? "shown" : "hidden"}.`, "info");
+        }
+        return;
+      }
+      if (subcommand === "delivery") {
+        const [deliveryAction, taskId, startedAt] = subcommandArgs;
+        const pendingDeliveries = completionDeliveryQueue.pendingDeliveryIds();
+        if (deliveryAction === "list") {
+          const listing = pendingDeliveries.length === 0
+            ? "No completion notices are awaiting persistence."
+            : pendingDeliveries.map((deliveryId, index) => {
+                const separator = deliveryId.lastIndexOf("\u0000");
+                const detail = separator >= 0
+                  ? `${deliveryId.slice(0, separator).replaceAll("\u0000", " / ")} (startedAt ${deliveryId.slice(separator + 1)})`
+                  : deliveryId;
+                return `#${index + 1} ${detail}`;
+              }).join("\n");
+          ctx.ui.notify(listing, "info");
+          return;
+        }
+        if (deliveryAction !== "cancel" || !taskId) {
+          ctx.ui.notify("Usage: /task delivery list | /task delivery cancel <task-id> [startedAt] | /task delivery cancel #<number>", "error");
+          return;
+        }
+        const indexMatch = /^#([1-9]\d*)$/.exec(taskId);
+        const matchingDeliveries = indexMatch
+          ? (pendingDeliveries[Number(indexMatch[1]) - 1]
+            ? [pendingDeliveries[Number(indexMatch[1]) - 1]!]
+            : [])
+          : pendingDeliveries.filter((deliveryId) => {
+              const separator = deliveryId.lastIndexOf("\u0000");
+              return deliveryId.slice(0, separator) === taskId &&
+                (startedAt === undefined || deliveryId.slice(separator + 1) === startedAt);
+            });
+        if (matchingDeliveries.length !== 1) {
+          ctx.ui.notify(
+            matchingDeliveries.length === 0
+              ? `No pending completion notice found for task ${taskId}.`
+              : `More than one completion notice is pending for ${taskId}; run /task delivery list and specify startedAt or use #<number>.`,
+            "error",
+          );
+          return;
+        }
+        const cancelled = completionDeliveryQueue.cancelPending(matchingDeliveries[0]!);
+        ctx.ui.notify(
+          cancelled
+            ? `Abandoned the pending completion notice for ${taskId}; its task status/history is unchanged.`
+            : `The completion notice for ${taskId} was already resolved.`,
+          cancelled ? "info" : "warning",
+        );
+        return;
+      }
       if (subcommand !== "status" && subcommand !== "cancel") {
-        // A bare /task opens the centered overlay (TUI only); `list` and
-        // headless contexts keep the text listing of durable conversations.
-        if (!subcommand && (await taskWidget.openOverlay(ctx))) return;
+        // Explicit /task list opens the task browser in TUI and keeps the
+        // durable-conversation text listing in headless contexts.
+        if (subcommand === "list" && (await taskWidget.openOverlay(ctx))) return;
         const listing = taskSessionListing(ctx.sessionManager?.getCwd?.() ?? process.cwd());
         ctx.ui.notify(listing.text, listing.level);
         return;
       }
       const request = parseTaskControlRequest({ operation: subcommand, task_id: id });
       if (!request) {
-        ctx.ui.notify(`/task ${subcommand} needs a task id. Run /task to list them.`, "error");
+        ctx.ui.notify(`/task ${subcommand} needs a task id. Run /task list to inspect tasks.`, "error");
         return;
       }
-      const result = await controlTask(request);
+      const result = await controlTask(request, ctx.modelRegistry);
       ctx.ui.notify(result.content[0].text.trim(), result.isError ? "error" : "info");
+    },
+  });
+
+  pi.registerCommand("agents", {
+    description: "Open a Pi-native snapshot of a subagent transcript",
+    handler: async (_args, ctx) => {
+      if (await taskWidget.openAgentSwitcher(ctx)) return;
+      ctx.ui.notify("/agents requires Pi's interactive TUI.", "warning");
     },
   });
 }

@@ -285,6 +285,10 @@ export function renderTaskPanel(params: {
   theme?: ThemeLike | null;
   /** Override the status hint line (the /task overlay words its own keys). */
   hint?: string;
+  /** Agent currently shown by the switcher; null means the main conversation. */
+  shownTaskId?: string | null;
+  /** Include task IDs in rows when the panel is used as an agent switcher. */
+  showTaskIds?: boolean;
 }): string[] {
   const { rows, selection, viewTaskId, now, width, theme } = params;
   const maxWidth = Math.min(width, MAX_WIDTH);
@@ -300,9 +304,10 @@ export function renderTaskPanel(params: {
       : `tasks (${rows.length}) — ↓ to select · enter to view · x to stop/dismiss · esc back`);
 
   const lines = [truncateToWidth(color(theme, "dim", hint), maxWidth, "…")];
+  const mainLabel = `  main${params.shownTaskId === null ? " (shown)" : ""}`;
   lines.push(
     truncateToWidth(
-      color(theme, "dim", `${selection === "main" ? "❯" : " "}  main`),
+      color(theme, "dim", `${selection === "main" ? "❯" : " "}${mainLabel}`),
       maxWidth,
       "…",
     ),
@@ -312,8 +317,10 @@ export function renderTaskPanel(params: {
     const icon = color(theme, "accent", panelStatusIcon(row.status));
     const elapsed = formatElapsed(row.startedAt, row.finishedAt, now);
     const activity = row.activity ? ` · ${row.activity}` : "";
+    const identity = params.showTaskIds ? ` #${row.id}` : "";
+    const shown = params.shownTaskId === row.id ? " (shown)" : "";
     const text =
-      `${marker} ${icon} ${color(theme, "toolTitle", row.agentType)} — ${row.description}${activity} · ${elapsed}`;
+      `${marker} ${icon} ${color(theme, "toolTitle", `${row.agentType}${identity}${shown}`)} — ${row.description}${activity} · ${elapsed}`;
     lines.push(truncateToWidth(text, maxWidth, "…"));
   });
   return lines;

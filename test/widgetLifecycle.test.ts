@@ -112,6 +112,13 @@ test("transcript view sig/read survive a hostile session dir", () => {
     });
 
     const widgets = new Map<string, any>();
+    const customCalls: Array<{
+      factory: (tui: any, theme: any, kb: any, done: (r?: unknown) => void) => {
+        render(width: number): string[];
+      };
+      options?: { overlay?: boolean };
+      resolved: boolean;
+    }> = [];
     let editorFactory: ((tui: any, theme: any, kb: any) => any) | undefined;
     const context = {
       mode: "tui",
@@ -120,6 +127,19 @@ test("transcript view sig/read survive a hostile session dir", () => {
       ui: {
         setWidget(name: string, value: unknown) {
           widgets.set(name, value);
+        },
+        custom(
+          factory: (typeof customCalls)[number]["factory"],
+          options?: (typeof customCalls)[number]["options"],
+        ): Promise<unknown> {
+          const call: (typeof customCalls)[number] = { factory, options, resolved: false };
+          customCalls.push(call);
+          return new Promise((resolve) => {
+            (call as unknown as { resolve: (r?: unknown) => void }).resolve = () => {
+              call.resolved = true;
+              resolve(undefined);
+            };
+          });
         },
         getEditorComponent() {
           return undefined;
@@ -143,20 +163,23 @@ test("transcript view sig/read survive a hostile session dir", () => {
       .host;
     host.onEnter("t-hostile");
 
-    const paneFactory = widgets.get("task-transcript");
-    assert.ok(typeof paneFactory === "function", "transcript pane registered");
+    assert.equal(customCalls.length, 1, "transcript view is an overlay");
+    assert.equal(customCalls[0]!.options?.overlay, true);
     const fakeTheme = { fg: (_style: string, text: string) => text };
-    const lines = paneFactory(fakeTui, fakeTheme).render(80);
+    const overlayHostile = customCalls[0]!.factory(fakeTui, fakeTheme, {}, () =>
+      customCalls[0]!.resolve(undefined),
+    );
+    const lines = overlayHostile.render(80);
     assert.ok(Array.isArray(lines), "tmux not-found path renders");
 
-    const paneSdk = widgets.get("task-transcript");
-    assert.ok(typeof paneSdk === "function", "sdk transcript pane registered");
-    void paneSdk; // replaced per openView call; re-open for the sdk task
     const editor2 = editorFactory!(fakeTui, { borderColor: "#000" }, {});
     const host2 = (editor2 as unknown as { host: { onEnter(id: string | null): void } }).host;
     host2.onEnter("t-sdk");
-    const paneFactorySdk = widgets.get("task-transcript");
-    const linesSdk = paneFactorySdk(fakeTui, fakeTheme).render(80);
+    const callSdk = customCalls.at(-1)!;
+    const overlaySdk = callSdk.factory(fakeTui, fakeTheme, {}, () =>
+      callSdk.resolve(undefined),
+    );
+    const linesSdk = overlaySdk.render(80);
     assert.ok(Array.isArray(linesSdk), "sdk ENOTDIR path renders without throwing");
     controller.dispose();
   } finally {

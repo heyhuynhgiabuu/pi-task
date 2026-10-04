@@ -6,6 +6,8 @@ import test from "node:test";
 import { readRegistry, upsertTaskSessionHistory, writeRegistry } from "../src/conversation.js";
 import registerTaskExtension from "../src/index.js";
 import { completeTask as persistCompletedTask } from "../src/lifecycle/completion.js";
+import { resolveTaskResume } from "../src/lifecycle/task-resume.js";
+import { DeliveryGuard } from "../src/panel/delivery.js";
 import { handleTaskControl } from "../src/task-control-api.js";
 import {
   decideCancellation,
@@ -346,6 +348,9 @@ test("task control is reachable from the /task command", async () => {
   };
   const commands = new Map<string, Command>();
   const notices: Array<{ message: string; level: string }> = [];
+  let customOverlayCalls = 0;
+  let customOverlayLines: string[] = [];
+  const widgets = new Map<string, (tui: any, theme: any) => { render(w: number): string[] }>();
   let shutdown: (() => void) | undefined;
   const pi = {
     on(event: string, handler: () => void) {
@@ -369,13 +374,63 @@ test("task control is reachable from the /task command", async () => {
     const task = commands.get("task");
     assert.ok(task, "the /task command is registered");
     assert.match(task.description ?? "", /cancel/i);
+    const agents = commands.get("agents");
+    assert.ok(agents, "the /agents command is registered");
+    assert.match(agents.description ?? "", /transcript/i);
 
     const ui = {
       notify: (message: string, level: string) => notices.push({ message, level }),
+      custom: async (factory: (...args: any[]) => any, options: any) => {
+        customOverlayCalls++;
+        assert.equal(options.overlay, true);
+        const overlay = factory({}, null, {}, () => {});
+        customOverlayLines = overlay.render(80);
+        overlay.handleInput("\r");
+      },
     };
     const ctx = { ui, sessionManager: { getCwd: () => isolatedCwd } };
 
+    await agents.handler("", ctx);
+    assert.equal(notices.at(-1)?.level, "warning");
+    assert.match(notices.at(-1)?.message ?? "", /interactive TUI/);
+
     await task.handler("", ctx);
+    assert.equal(notices.at(-1)?.level, "warning");
+    assert.match(notices.at(-1)?.message ?? "", /interactive TUI/);
+
+    const tuiUi = {
+      notify: (message: string, level: string) => notices.push({ message, level }),
+      setWidget: (name: string, value: unknown) => {
+        if (typeof value === "function") widgets.set(name, value as never);
+        else widgets.delete(name);
+      },
+      getEditorComponent: () => undefined,
+      setEditorComponent: () => {},
+    };
+    const tuiCtx = {
+      ui: tuiUi,
+      sessionManager: { getCwd: () => isolatedCwd },
+      mode: "tui",
+      hasUI: true,
+    };
+    await task.handler("", tuiCtx);
+    assert.equal(notices.at(-1)?.level, "info");
+    assert.match(notices.at(-1)?.message ?? "", /monitor hidden/);
+    await task.handler("", tuiCtx);
+    assert.match(notices.at(-1)?.message ?? "", /monitor shown/);
+
+    await agents.handler("", tuiCtx);
+    assert.equal(customOverlayCalls, 0, "/agents uses the inline panel, not a modal");
+    const widget = widgets.get("task");
+    assert.ok(widget, "the task panel is visible");
+    const switcherLines = (
+      widget({ terminal: { rows: 40 }, requestRender: () => {} }, null).render(120) as string[]
+    ).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+    assert.ok(switcherLines.some((line) => line.includes("Switch to:")));
+    assert.ok(switcherLines.some((line) => line.includes("main") && line.includes("(shown)")));
+    assert.match(notices.at(-1)?.message ?? "", /monitor shown/, "the TUI path does not fall back to a warning");
+
+    await task.handler("list", ctx);
     assert.equal(notices.at(-1)?.level, "info");
     assert.match(notices.at(-1)?.message ?? "", /No durable pi-task conversations found/);
 
@@ -456,6 +511,95 @@ test("cancellation is backend-aware and refuses terminal or SDK records", () => 
     kind: "terminal",
     status: "done",
   });
+});
+
+test("durable task IDs resume the existing durable child without requiring a JSONL session", () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-resume-durable-"));
+  const taskId = "task-durable-resume";
+  const cwd = join(piDir, "worktree");
+  upsertTaskSessionHistory(piDir, {
+    id: taskId,
+    agentType: "explore",
+    description: "Original durable task",
+    sessionName: `task-${taskId}`,
+    piDir,
+    dir: join(piDir, "missing-artifacts"),
+    cwd,
+    backend: "durable",
+    startedAt: 100,
+    completedAt: 200,
+    status: "done",
+    background: false,
+  });
+
+  const resolution = resolveTaskResume({
+    requestedTaskId: taskId,
+    taskParams: {
+      agent_type: "explore",
+      description: "Continue the durable session",
+      prompt: "Inspect the next concern.",
+      task_id: taskId,
+    },
+    agentName: "explore",
+    piDir,
+    artifactsDir: join(piDir, "artifacts"),
+    extensionPiDir: piDir,
+    ctx: {} as never,
+    backgroundTasks: new Map(),
+    deliveryGuard: new DeliveryGuard(),
+    registryEntryStatus: () => "missing",
+  });
+
+  assert.equal(resolution.kind, "continue");
+  if (resolution.kind === "continue") {
+    assert.equal(resolution.id, taskId);
+    assert.equal(resolution.sessionName, `task-${taskId}`);
+    assert.equal(resolution.resume, true);
+    assert.equal(resolution.backend, "durable");
+    assert.equal(resolution.persistedTaskCwd, cwd);
+    assert.equal(resolution.resumeSessionRef, undefined);
+  }
+});
+
+test("running durable task IDs are not launched as overlapping resumes", () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-resume-durable-running-"));
+  const taskId = "task-durable-running";
+  upsertTaskSessionHistory(piDir, {
+    id: taskId,
+    agentType: "explore",
+    description: "Running durable task",
+    sessionName: `task-${taskId}`,
+    piDir,
+    dir: join(piDir, "artifacts"),
+    backend: "durable",
+    startedAt: 100,
+    status: "running",
+    background: true,
+  });
+
+  const resolution = resolveTaskResume({
+    requestedTaskId: taskId,
+    taskParams: {
+      agent_type: "explore",
+      description: "Continue the durable session",
+      prompt: "Inspect the next concern.",
+      task_id: taskId,
+    },
+    agentName: "explore",
+    piDir,
+    artifactsDir: join(piDir, "artifacts"),
+    extensionPiDir: piDir,
+    ctx: {} as never,
+    backgroundTasks: new Map(),
+    deliveryGuard: new DeliveryGuard(),
+    registryEntryStatus: () => "missing",
+  });
+
+  assert.equal(resolution.kind, "handled");
+  if (resolution.kind === "handled") {
+    assert.equal(resolution.result.isError, true);
+    assert.match(resolution.result.content[0].text, /already running/i);
+  }
 });
 
 test("legacy registry records infer tmux from a pane id", () => {
@@ -567,6 +711,73 @@ test("status reports unreadable durable state instead of treating it as empty", 
   assert.equal(result.isError, true);
   assert.equal(result.details.error, "durable_state_unreadable");
   assert.match(result.content[0].text, /unreadable durable state/i);
+});
+
+test("cancel control leaves active durable completion delivery to its runner", async () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-control-foreground-durable-"));
+  const id = "task-foreground-durable";
+  const abortController = new AbortController();
+  const foregroundTasks = new Map([[id, {
+    dir: join(piDir, "artifacts"),
+    cwd: piDir,
+    agentType: "explore",
+    sessionName: id,
+    backend: "durable" as const,
+    originalPane: null,
+    description: "foreground durable task",
+    startedAt: 100,
+    toolUses: 0,
+    turns: 0,
+    recentCalls: [],
+    status: "running" as const,
+    durableAbortController: abortController,
+  }]]);
+  // The history row is deliberately legacy-shaped: task control must prefer
+  // the live foreground record, not infer SDK from a missing backend marker.
+  upsertTaskSessionHistory(piDir, {
+    id,
+    agentType: "explore",
+    description: "foreground durable task",
+    sessionName: id,
+    piDir,
+    dir: join(piDir, "artifacts"),
+    startedAt: 100,
+    status: "running",
+    background: false,
+  });
+  let abortedTaskId: string | undefined;
+  let completedPhase: string | undefined;
+  let finishedTask: string | undefined;
+
+  const result = await handleTaskControl(
+    { operation: "cancel", taskId: id },
+    {
+      pi: {} as never,
+      piDir,
+      backgroundTasks: new Map(),
+      foregroundTasks,
+      registryEntryStatus: () => "missing",
+      clearTaskWidgetIfIdle: () => {},
+      abortDurable: async (taskId) => {
+        abortedTaskId = taskId;
+        return null;
+      },
+      completeTask: ({ phase }) => {
+        completedPhase = phase;
+        return { cleanupSucceeded: true };
+      },
+      noteTaskFinished: (taskId) => { finishedTask = taskId; },
+    },
+  );
+
+  assert.equal(result.isError, undefined);
+  assert.equal(result.details.backend, "durable");
+  assert.equal(result.details.status, "cancelled");
+  assert.equal(abortController.signal.aborted, true, "cancellation is latched on the active runner before admission");
+  assert.equal(abortedTaskId, undefined, "an active runner does not race its pre-admission mapping with a direct abort");
+  assert.equal(completedPhase, undefined, "an active durable runner owns history and completion delivery");
+  assert.equal(finishedTask, undefined);
+  assert.equal(foregroundTasks.has(id), true, "the runner retires its foreground row when cancellation settles");
 });
 
 test("cancel control refuses an active SDK task explicitly", async () => {

@@ -46,6 +46,9 @@ export interface PanelViewState {
   selection: PanelSelection;
   /** Task whose transcript view is open (non-null while in the view). */
   viewTaskId: string | null;
+  /** The /agents picker is focused over an interrupted transcript; esc must
+   * restore that transcript (task id kept by the controller). */
+  switcherMode?: boolean;
 }
 
 export function initialPanelState(): PanelViewState {

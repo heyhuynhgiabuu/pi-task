@@ -11,6 +11,14 @@ import { join } from "node:path";
 
 export const MAX_TRANSCRIPT_ITEMS = 400;
 
+/** CSI escape sequences (SGR colors, cursor moves) emitted by tool output. */
+const ANSI_CSI_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
+
+/** Terminal output keeps ANSI styling; the transcript renders its own. */
+function stripAnsiCodes(text: string): string {
+  return text.replace(ANSI_CSI_RE, "");
+}
+
 export type TranscriptItem =
   | { type: "user"; text: string; timestamp: string }
   | {
@@ -26,6 +34,8 @@ export type TranscriptItem =
       args: Record<string, unknown>;
       result?: string;
       isError?: boolean;
+      /** True while the corresponding tool slot is still running. */
+      inProgress?: boolean;
       timestamp: string;
     }
   | { type: "system"; text: string; timestamp: string };
@@ -160,6 +170,17 @@ export function readTaskTranscript(
 ): TranscriptReadResult {
   const file = findTaskSessionFile(sessionDir, sessionName);
   if (!file) return { items: [], found: false };
+  return readTaskSessionFile(file);
+}
+
+/**
+ * Parse one exact session JSONL. The transcript view uses this for SDK tasks
+ * whose live session path is captured when the child session opens — scanning
+ * a sessions directory by name can match the parent (whose transcript quotes
+ * the task id), and the artifacts dir holds no session at all.
+ */
+export function readTaskSessionFile(file: string): TranscriptReadResult {
+  if (!existsSync(file)) return { items: [], found: false };
 
   const items: TranscriptItem[] = [];
   const pendingTools = new Map<string, TranscriptItem & { type: "tool" }>();
@@ -179,10 +200,10 @@ export function readTaskTranscript(
     const timestamp = entry.timestamp ?? "";
 
     if (msg.role === "user") {
-      const text = extractText(msg.content);
+      const text = stripAnsiCodes(extractText(msg.content));
       if (text) items.push({ type: "user", text, timestamp });
     } else if (msg.role === "assistant") {
-      const text = extractText(msg.content);
+      const text = stripAnsiCodes(extractText(msg.content));
       const thinking = extractThinking(msg.content);
       if (text || thinking) {
         items.push({
@@ -199,16 +220,18 @@ export function readTaskTranscript(
           toolCallId: call.id,
           args: call.arguments,
           timestamp,
+          inProgress: true,
         };
         pendingTools.set(call.id, item);
         items.push(item);
       }
     } else if (msg.role === "toolResult" && msg.toolCallId) {
-      const text = extractText(msg.content);
+      const text = stripAnsiCodes(extractText(msg.content));
       const existing = pendingTools.get(msg.toolCallId);
       if (existing) {
         existing.result = text || undefined;
         existing.isError = Boolean(msg.isError);
+        existing.inProgress = false;
         pendingTools.delete(msg.toolCallId);
       } else {
         // Tool result without a paired call (older files or resumed sessions):
@@ -221,6 +244,7 @@ export function readTaskTranscript(
           result: text || undefined,
           isError: Boolean(msg.isError),
           timestamp,
+          inProgress: false,
         });
       }
     }
@@ -231,6 +255,16 @@ export function readTaskTranscript(
     items.splice(0, items.length - MAX_TRANSCRIPT_ITEMS);
   }
   return { items, found: true };
+}
+
+/** Cheap change signature for one exact session file: mtime + size. */
+export function sessionFileSignature(file: string): string {
+  try {
+    const stats = statSync(file);
+    return `${stats.mtimeMs}:${stats.size}`;
+  } catch {
+    return "";
+  }
 }
 
 /** One-line activity summary from the last tool row, if any. */

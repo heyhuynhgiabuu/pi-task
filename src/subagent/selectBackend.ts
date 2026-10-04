@@ -32,22 +32,36 @@ export type TaskBackendResolution =
     };
 
 export async function resolveTaskBackend(
-  options: { allowAcpSession?: boolean } = {},
+  options: {
+    allowAcpSession?: boolean;
+    /** `taskBackend` from pi settings — explicit opt-in persisted across
+     * restarts. The PI_TASK_BACKEND env var overrides it. */
+    settingsBackend?: string;
+  } = {},
 ): Promise<TaskBackendResolution> {
   const legacyRequestedBackend = process.env.PI_TASK_USE_TMUX_BACKEND === "1"
     ? "tmux"
     : process.env.PI_TASK_USE_SDK_BACKEND === "1"
       ? "sdk"
       : undefined;
+  // Blank env values are treated as unset so they cannot shadow the setting.
+  const envRaw = process.env.PI_TASK_BACKEND;
+  const envBackend = envRaw?.trim() ? envRaw : undefined;
+  const settingsBackend = typeof options.settingsBackend === "string"
+    ? options.settingsBackend.trim().toLowerCase()
+    : undefined;
   const requestedBackend = (
-    legacyRequestedBackend ?? process.env.PI_TASK_BACKEND ?? "auto"
+    legacyRequestedBackend ?? envBackend ?? settingsBackend ?? "auto"
   ).trim().toLowerCase();
   if (!["auto", "sdk", "durable", "tmux", "herdr"].includes(requestedBackend)) {
+    const source = requestedBackend === envRaw?.trim().toLowerCase()
+      ? `PI_TASK_BACKEND=${requestedBackend}`
+      : `taskBackend=${requestedBackend} (settings)`;
     return {
       ok: false,
       kind: "invalid",
       requestedBackend,
-      error: `Invalid PI_TASK_BACKEND=${requestedBackend}. Expected auto, sdk, durable, tmux, or herdr.`,
+      error: `Invalid ${source}. Expected auto, sdk, durable, tmux, or herdr.`,
     };
   }
   // The durable backend needs its optional framework packages at runtime;

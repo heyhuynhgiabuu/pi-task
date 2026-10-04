@@ -28,32 +28,50 @@ export interface TaskOverlayHost {
   now(): number;
   /** x on a row: stop a running task, dismiss a finished one. */
   onStop(taskId: string): void;
-  /** enter on a row: close the overlay and open the live transcript view. */
-  onOpen(taskId: string): void;
+  /** Select an agent; null returns to the main conversation. */
+  onOpen(taskId: string | null): void;
   /** esc: close the overlay. */
   onClose(): void;
   requestRender(): void;
 }
 
+export interface TaskOverlayOptions {
+  mode?: "tasks" | "agents";
+  /** Currently shown task; null means the main conversation. */
+  shownTaskId?: string | null;
+  /** Read the shown task live while the overlay is open. */
+  getShownTaskId?: () => string | null;
+}
+
 /**
- * Centered /task overlay. A plain pi-tui Component (no editor): it owns the
- * keyboard while visible, so typing cannot steer tasks here — enter hands the
- * row to the live below-editor view, where typing steers. esc is the only way
- * out, and unhandled keys are swallowed so stray typing cannot leak into the
- * conversation under the modal.
+ * Centered task-browser/agent-switcher overlay. A plain pi-tui Component (no
+ * editor): it owns the keyboard while visible, so typing cannot steer tasks
+ * here — enter hands the selected row to the live below-editor view. In agent
+ * mode, escape cancels without changing the shown transcript. Unhandled keys
+ * are swallowed so stray typing cannot leak into the conversation under it.
  */
 export class TaskOverlay implements Component {
   private selection: PanelSelection;
   private readonly theme: TaskOverlayTheme | null;
+  private readonly mode: "tasks" | "agents";
+  private readonly getShownTaskId: () => string | null;
+  private selectionFollowsShown = true;
   private box: Box;
 
   constructor(
     private host: TaskOverlayHost,
     theme: TaskOverlayTheme | null = null,
+    options: TaskOverlayOptions = {},
   ) {
     this.theme = theme;
+    this.mode = options.mode ?? "tasks";
+    this.getShownTaskId = options.getShownTaskId ?? (() => options.shownTaskId ?? null);
     const rows = host.getRows();
-    this.selection = rows.length > 0 ? selectAt(rows, 1) : "main";
+    if (this.mode === "agents") {
+      this.selection = this.selectionForShown(rows);
+    } else {
+      this.selection = rows.length > 0 ? selectAt(rows, 1) : "main";
+    }
     this.box = new Box(
       1,
       1,
@@ -68,6 +86,7 @@ export class TaskOverlay implements Component {
   handleInput(data: string): void {
     const rows = this.host.getRows();
     this.reconcile(rows);
+    this.syncSelectionToShown(rows);
     // dispatchPanelKey maps escape and top-up to the same "clear" action; the
     // overlay must close only on escape, so both are handled before dispatch.
     if (matchesKey(data, "escape")) {
@@ -79,17 +98,19 @@ export class TaskOverlay implements Component {
         this.selection !== null && this.selection !== "main"
           ? this.selection.taskId
           : null;
-      if (taskId) this.host.onOpen(taskId);
+      if (this.mode === "agents") this.host.onOpen(taskId);
+      else if (taskId) this.host.onOpen(taskId);
       return;
     }
     const action = dispatchPanelKey(data, this.selection, rows, "panel");
     switch (action.kind) {
       case "select":
         this.selection = action.selection;
+        if (this.mode === "agents") this.selectionFollowsShown = false;
         this.host.requestRender();
         return;
       case "stop":
-        this.host.onStop(action.taskId);
+        if (this.mode === "tasks") this.host.onStop(action.taskId);
         return;
       case "clear":
       case "enter":
@@ -111,6 +132,7 @@ export class TaskOverlay implements Component {
   private renderBody(width: number): string[] {
     const rows = this.host.getRows();
     this.reconcile(rows);
+    this.syncSelectionToShown(rows);
     return renderTaskPanel({
       rows,
       selection: this.selection,
@@ -118,8 +140,28 @@ export class TaskOverlay implements Component {
       now: this.host.now(),
       width,
       theme: this.theme,
-      hint: `tasks (${rows.length}) — ↑↓ select · enter open · x stop/dismiss · esc close`,
+      hint:
+        this.mode === "agents"
+          ? `Switch to: ${rows.length + 1} agents — ↑↓ select · enter switch · esc close`
+          : `tasks (${rows.length}) — ↑↓ select · enter open · x stop/dismiss · esc close`,
+      ...(this.mode === "agents"
+        ? { shownTaskId: this.getShownTaskId(), showTaskIds: true }
+        : {}),
     });
+  }
+
+  private selectionForShown(rows: readonly TaskPanelRow[]): PanelSelection {
+    const shownTaskId = this.getShownTaskId();
+    const index = shownTaskId
+      ? rows.findIndex((row) => row.id === shownTaskId) + 1
+      : 0;
+    return selectAt(rows, Math.max(0, index));
+  }
+
+  private syncSelectionToShown(rows: readonly TaskPanelRow[]): void {
+    if (this.mode === "agents" && this.selectionFollowsShown) {
+      this.selection = this.selectionForShown(rows);
+    }
   }
 
   /** Follow rows that vanish (finished rows dismissed, tasks removed). */

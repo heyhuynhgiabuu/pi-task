@@ -379,8 +379,8 @@ export default function (pi: ExtensionAPI) {
           });
           taskWidget.ensureTaskWidget(ctx);
         },
-        onTaskProgress: (taskId, items, toolUses) => {
-          taskWidget.setLiveTranscript(taskId, items, toolUses);
+        onTaskProgress: (taskId, items, toolUses, agent) => {
+          taskWidget.setLiveTranscript(taskId, items, toolUses, agent);
         },
         onTaskWatchError: (taskId, items, toolUses) => {
           if (recoveredWatchErrors.has(taskId)) return;

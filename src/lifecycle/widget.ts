@@ -6,7 +6,14 @@ import { truncateToWidth } from "@earendil-works/pi-tui";
 import { dirname, join } from "node:path";
 
 import { formatMs } from "../helpers.js";
-import { renderTaskWidget, renderTaskPanel, type ThemeLike } from "../task-widget.js";
+import {
+  renderTaskWidget,
+  renderTaskPanel,
+  TASK_WIDGET_RENDER_MS,
+  type ThemeLike,
+  type WidgetTask,
+} from "../task-widget.js";
+import { taskActivity, type TaskActivity } from "../task-activity.js";
 import { ignoreStaleExtensionCtx } from "../stale-ctx.js";
 import type { BackgroundTask } from "../types.js";
 import {
@@ -25,8 +32,11 @@ import {
   sessionFileSignature,
   transcriptActivity,
   transcriptSignature,
+  type ChildSessionMeta,
   type TranscriptItem,
 } from "../panel/transcript.js";
+import type { TaskContextInfo } from "../panel/task-context.js";
+import type { DurableChildAgent } from "../panel/durable-transcript.js";
 import { CustomEditor, getSelectListTheme } from "@earendil-works/pi-coding-agent";
 import { TaskPanelEditor, type TaskPanelHost } from "../panel/task-editor.js";
 import { TaskOverlay } from "../panel/task-overlay.js";
@@ -72,6 +82,10 @@ export function createSteerEditor(
         tui,
         editorTheme as never,
         keybindings as never,
+        // Native chrome: the working indicator renders inside the editor's top
+        // border (pi's own streaming screen does the same). Harmless when no
+        // indicator is set: the border renders unchanged.
+        { embedWorkingStatus: true },
       ) as unknown as SteerEditorLike;
     } catch {
       // Theme not initialized / degraded host: fall through to the minimal input.
@@ -140,11 +154,16 @@ export interface TaskWidgetController {
   openTaskView(taskId: string): void;
   /** Close the transcript view only if it still shows this task. */
   closeTaskView(taskId: string): void;
-  /** Replace one durable task's bounded transcript and cumulative tool-call count. */
+  /**
+   * Replace one durable task's bounded transcript and cumulative tool-call
+   * count. `agent` is the child conversation's own `pi.agent` state (model,
+   * thinking level, cwd) when the live stream carries one.
+   */
   setLiveTranscript(
     taskId: string,
     items: readonly TranscriptItem[],
     toolUses?: number,
+    agent?: DurableChildAgent,
   ): void;
   requestRender(): void;
   clearTaskWidgetIfIdle(): void;
@@ -181,9 +200,128 @@ export function createTaskWidgetController(
   let agentsParentSessionId: string | undefined;
   const now = () => deps?.now?.() ?? Date.now();
   const finishedTasks = new Map<string, FinishedTask>();
-  const liveTranscripts = new Map<string, { items: TranscriptItem[]; revision: number }>();
+  const liveTranscripts = new Map<
+    string,
+    { items: TranscriptItem[]; revision: number; agent?: DurableChildAgent }
+  >();
+  /** Child session metadata (model/thinking) memoized by transcript signature. */
+  const sessionMetaCache = new Map<string, { sig: string; meta?: ChildSessionMeta }>();
   const stoppingTaskIds = new Set<string>();
   let activePane: TaskTranscriptPane | undefined;
+  /** The mounted overlay component, so closing the view stops its timers. */
+  let activeOverlay: TaskTranscriptOverlay | undefined;
+  /** Repaints the below-editor rows while at least one task is still running. */
+  let animationTicker: ReturnType<typeof setInterval> | undefined;
+
+  // ── Working indicators ───────────────────────────────────────────────────
+
+  /** Phase of a task's child right now; undefined once it has settled. */
+  function activityFor(taskId: string, task: BackgroundTask): TaskActivity | undefined {
+    return taskActivity({
+      items: liveTranscripts.get(taskId)?.items,
+      recentCalls: task.recentCalls,
+      status: task.status,
+    });
+  }
+
+  /**
+   * Child session metadata Pi persisted in its own JSONL (`model_change`,
+   * `thinking_level_change`). Read lazily and memoized by the same cheap
+   * signature the transcript pane uses, so an open panel re-reads only when the
+   * child's session actually grows.
+   */
+  function sessionMetaFor(taskId: string, task: BackgroundTask): ChildSessionMeta | undefined {
+    try {
+      const sig = transcriptSig(taskId);
+      const cached = sessionMetaCache.get(taskId);
+      if (cached && cached.sig === sig) return cached.meta;
+      const result =
+        task.backend === "sdk" && task.sessionPath
+          ? readTaskSessionFile(task.sessionPath)
+          : readTaskTranscript(transcriptDir(taskId, task), task.sessionName);
+      const meta = result.found ? result.meta : undefined;
+      sessionMetaCache.set(taskId, { sig, meta });
+      return meta;
+    } catch {
+      // A hostile/unreadable session dir must degrade to "no metadata", never
+      // break the render pass.
+      return undefined;
+    }
+  }
+
+  /**
+   * What the live child panel may state about the viewed child. Only recorded
+   * facts: the task record, the child's durable `pi.agent` state, or its own
+   * session metadata. Model/thinking stay absent when nothing recorded them.
+   */
+  function childContext(taskId: string): TaskContextInfo | undefined {
+    const task = findTask(taskId);
+    if (!task) return undefined;
+    const durableAgent = liveTranscripts.get(taskId)?.agent;
+    const meta = durableAgent ? undefined : sessionMetaFor(taskId, task);
+    const rows = allRows();
+    const index = rows.findIndex((row) => row.id === taskId);
+    const end = rows[index]?.finishedAt ?? now();
+    return {
+      taskId,
+      agentType: task.agentType,
+      description: task.description,
+      status: task.status,
+      phaseLabel: activityFor(taskId, task)?.label,
+      backend: task.backend,
+      runtime: task.runtime,
+      cwd: durableAgent?.cwd ?? task.cwd ?? widgetCtx?.cwd,
+      model: durableAgent?.model ?? meta?.model ?? task.comparisonModel,
+      thinkingLevel: durableAgent?.thinkingLevel ?? meta?.thinkingLevel,
+      elapsedMs: Math.max(0, end - task.startedAt),
+      toolUses: task.toolUses,
+      taskIndex: index >= 0 ? index + 1 : undefined,
+      taskCount: rows.length,
+    };
+  }
+
+  function hasRunningTask(): boolean {
+    for (const task of foregroundTasks.values()) {
+      if (task.status === undefined || task.status === "running") return true;
+    }
+    for (const task of backgroundTasks.values()) {
+      if (task.status === undefined || task.status === "running") return true;
+    }
+    return false;
+  }
+
+  /**
+   * The rows animate a clock-derived frame, so they only need a repaint every
+   * TASK_WIDGET_RENDER_MS. The ticker runs exactly while a running task is on
+   * screen (no overlay owns the screen) and stops itself, so no timer outlives
+   * the work it animates, a disposed widget, or a replaced session.
+   */
+  function syncAnimationTicker(): void {
+    const wanted =
+      taskWidgetInstalled &&
+      taskMonitorVisible &&
+      panelState.viewTaskId === null &&
+      hasRunningTask();
+    if (!wanted) {
+      stopAnimationTicker();
+      return;
+    }
+    if (animationTicker) return;
+    animationTicker = setInterval(() => {
+      if (!hasRunningTask()) {
+        stopAnimationTicker();
+        return;
+      }
+      requestRender();
+    }, TASK_WIDGET_RENDER_MS);
+    animationTicker.unref?.();
+  }
+
+  function stopAnimationTicker(): void {
+    if (!animationTicker) return;
+    clearInterval(animationTicker);
+    animationTicker = undefined;
+  }
 
   // ── Row building ──────────────────────────────────────────────────────────
 
@@ -361,12 +499,23 @@ export function createTaskWidgetController(
     if (panelState.viewTaskId === taskId) return true;
     closeView();
     panelState = { selection: null, viewTaskId: taskId };
+    syncAnimationTicker();
     const generation = ++viewGeneration;
     overlayOpen = true;
+    /** Phase of the viewed child, for the working row and the repaint policy. */
+    const viewedActivity = () => {
+      const viewed = findTask(taskId);
+      return viewed ? activityFor(taskId, viewed) : undefined;
+    };
     // Live streaming: the pane re-reads the session on signature change, so a
     // steady repaint tick turns JSONL growth into live transcript updates.
+    // While the working indicator animates it already repaints every frame, so
+    // this slower tick yields to it instead of drawing a second frame.
     clearInterval(transcriptTicker);
-    transcriptTicker = setInterval(() => requestRender(), 700);
+    transcriptTicker = setInterval(() => {
+      if (viewedActivity()) return;
+      requestRender();
+    }, 700);
     transcriptTicker.unref?.();
     // A synchronous `ui.custom` failure leaves `overlay` unset, so the view is
     // honestly reported as not opened. The stale-ctx throw a replaced session
@@ -384,18 +533,24 @@ export function createTaskWidgetController(
               read: () => itemsFor(taskId),
             });
             activePane = pane;
-            return new TaskTranscriptOverlay({
+            activeOverlay = new TaskTranscriptOverlay({
               pane,
               host: {
                 taskId,
                 onSteer: (text: string) => steerViewedTask(text),
                 onClose: () => done(undefined),
                 requestRender,
+                // The viewed child's live phase drives the animated working row.
+                activity: viewedActivity,
+                // Compact child status row + footer, from recorded facts only.
+                context: () => childContext(taskId),
               },
               theme,
               editor: createSteerEditor(tui, theme, keybindings),
               terminalRows: () => tui.terminal.rows,
+              ui: tui,
             });
+            return activeOverlay;
           },
           {
             overlay: true,
@@ -417,6 +572,7 @@ export function createTaskWidgetController(
       if (panelState.viewTaskId === taskId) {
         panelState = { ...panelState, viewTaskId: null, selection: null };
       }
+      syncAnimationTicker();
       requestRender();
       return false;
     }
@@ -430,6 +586,7 @@ export function createTaskWidgetController(
         transcriptTicker = undefined;
         transcriptOverlayDone = undefined;
         activePane = undefined;
+        activeOverlay = undefined;
         if (panelState.viewTaskId === taskId) {
           panelState = { ...panelState, viewTaskId: null, selection: null };
         }
@@ -442,9 +599,14 @@ export function createTaskWidgetController(
 
   function closeView(): void {
     panelState = { ...panelState, viewTaskId: null, selection: null };
+    syncAnimationTicker();
     const done = transcriptOverlayDone;
     transcriptOverlayDone = undefined;
     activePane = undefined;
+    // Pi disposes the component when the custom promise settles; disposing here
+    // too stops the working indicator's timer as soon as the view closes.
+    activeOverlay?.dispose();
+    activeOverlay = undefined;
     clearInterval(transcriptTicker);
     transcriptTicker = undefined;
     if (done) done(undefined);
@@ -730,6 +892,15 @@ export function createTaskWidgetController(
 
   // ── Widget ────────────────────────────────────────────────────────────────
 
+  /** Task rows plus the phase that drives their animated working indicator. */
+  function* withActivity(
+    entries: Iterable<[string, BackgroundTask]>,
+  ): Generator<[string, WidgetTask]> {
+    for (const [id, task] of entries) {
+      yield [id, { ...task, activity: activityFor(id, task) }];
+    }
+  }
+
   function renderWidget(width: number): string[] {
     try {
       // Expire finished rows that outlived their linger window; without this
@@ -759,8 +930,8 @@ export function createTaskWidgetController(
         });
       }
       return renderTaskWidget({
-        foregroundTasks: foregroundTasks.entries(),
-        backgroundTasks: backgroundTasks.entries(),
+        foregroundTasks: withActivity(foregroundTasks.entries()),
+        backgroundTasks: withActivity(backgroundTasks.entries()),
         foregroundCount: foregroundTasks.size,
         backgroundCount: backgroundTasks.size,
         width,
@@ -791,14 +962,18 @@ export function createTaskWidgetController(
     taskId: string,
     items: readonly TranscriptItem[],
     toolUses?: number,
+    agent?: DurableChildAgent,
   ): void {
     const task = findTask(taskId);
     if (!task || task.backend !== "durable") return;
     const retained = items.slice(-MAX_TRANSCRIPT_ITEMS);
     const previous = liveTranscripts.get(taskId);
+    // A watch-error update carries no agent state; keep the last one we saw.
+    const nextAgent = agent ?? previous?.agent;
     liveTranscripts.set(taskId, {
       items: [...retained],
       revision: (previous?.revision ?? 0) + 1,
+      ...(nextAgent === undefined ? {} : { agent: nextAgent }),
     });
     const calls = retained.filter((item): item is Extract<TranscriptItem, { type: "tool" }> => item.type === "tool");
     task.toolUses = toolUses ?? calls.length;
@@ -816,6 +991,8 @@ export function createTaskWidgetController(
         status: item.inProgress ? "in_progress" : item.isError ? "error" : "done",
       };
     });
+    // The phase just changed (tool -> thinking/streaming or back).
+    syncAnimationTicker();
     requestRender();
   }
 
@@ -875,6 +1052,7 @@ export function createTaskWidgetController(
         ),
       );
     }
+    syncAnimationTicker();
     requestRender();
   }
 
@@ -892,6 +1070,7 @@ export function createTaskWidgetController(
     ) {
       ensureTaskWidget(targetCtx);
     } else {
+      syncAnimationTicker();
       requestRender();
     }
     return taskMonitorVisible;
@@ -906,6 +1085,7 @@ export function createTaskWidgetController(
     finishedTasks.set(id, { task, finishedAt: completedAt });
     pruneFinished();
     reconcileSelection();
+    syncAnimationTicker();
     requestRender();
   }
 
@@ -1036,9 +1216,11 @@ export function createTaskWidgetController(
       finishedTasks.size > 0 ||
       isPanelFocused(panelState)
     ) {
+      syncAnimationTicker();
       requestRender();
       return;
     }
+    stopAnimationTicker();
     if (taskWidgetInstalled) {
       const ctx = widgetCtx;
       if (ctx && typeof ctx.ui.setWidget === "function") {
@@ -1051,6 +1233,7 @@ export function createTaskWidgetController(
   }
 
   function dispose(): void {
+    stopAnimationTicker();
     closeView();
     if (taskWidgetInstalled) {
       const ctx = widgetCtx;
@@ -1066,6 +1249,7 @@ export function createTaskWidgetController(
     requestWidgetRender = null;
     finishedTasks.clear();
     liveTranscripts.clear();
+    sessionMetaCache.clear();
   }
 
   return {

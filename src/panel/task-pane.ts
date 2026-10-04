@@ -136,6 +136,9 @@ export function createTaskTranscriptPane(
           tool.updateResult(
             {
               content: [{ type: "text", text: item.result ?? "" }],
+              // Pi's renderers read `details` (edit draws its diff from it); the
+              // projections keep it on the item, so hand it over unchanged.
+              ...(item.details === undefined ? {} : { details: item.details }),
               isError: Boolean(item.isError),
             },
             item.inProgress ?? false,

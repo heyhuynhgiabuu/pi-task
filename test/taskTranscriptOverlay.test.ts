@@ -213,11 +213,13 @@ test("non-wheel mouse events are ignored", () => {
   assert.deepEqual(editor.keys, []);
 });
 
-test("renders the task hint, pane body, and the editor prompt", () => {
+test("renders the pane body, the key hints, and the editor prompt", () => {
   const { overlay, editor, calls } = makeOverlay();
   const lines = overlay.render(100).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
-  assert.ok(lines.some((l) => l.includes("@t1")), JSON.stringify(lines));
-  assert.ok(lines.some((l) => l.includes("esc back to main")), JSON.stringify(lines));
+  // No `context` provider: the footer keeps the key hints and no facts are
+  // invented for a host that has none.
+  assert.ok(lines.some((l) => l.includes("esc back")), JSON.stringify(lines));
+  assert.ok(lines.some((l) => l.includes("enter steer")), JSON.stringify(lines));
   assert.ok(lines.some((l) => l.includes("transcript-line-a")), JSON.stringify(lines));
   assert.ok(lines.some((l) => l.includes("❯")), "the steer editor renders its prompt");
 });
@@ -317,7 +319,7 @@ test("overlay fill is restored after background resets in transcript and editor 
   }
 });
 
-test("fills the terminal height and keeps the steer editor at the bottom", () => {
+test("fills the terminal height and keeps the editor above the footer", () => {
   const terminalRows = 12;
   const pane = {
     scrollBy() {},
@@ -347,7 +349,10 @@ test("fills the terminal height and keeps the steer editor at the bottom", () =>
 
   const lines = overlay.render(60);
   assert.equal(lines.length, terminalRows, "the overlay frame covers every terminal row");
-  assert.ok(lines.at(-1)?.includes("editor last line"), "the editor remains at the bottom");
+  const editorRow = lines.findIndex((line) => line.includes("editor last line"));
+  const footerRow = lines.findIndex((line) => line.includes("esc back"));
+  assert.ok(editorRow >= 0, "the editor renders");
+  assert.ok(footerRow > editorRow, "the footer sits under the editor, as pi's own screen does");
   overlay.dispose();
 });
 

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { renderTaskWidget } from "../src/task-widget.js";
+import { renderTaskWidget, type WidgetTask } from "../src/task-widget.js";
 
 test("task widget prefixes in-progress spinner with a leading space", () => {
   const lines = renderTaskWidget({
@@ -125,6 +125,71 @@ test("foreground widget renders a single tree connector for the latest tool call
 
   assert.equal(lines.filter((line) => line.includes("└─")).length, 1, "renders only one connector line");
   assert.match(lines[1] ?? "", /└─ .*edit  b\.ts \(\+2 more\)$/, "shows latest call and collapses older ones");
+});
+
+test("task widget shows the running phase next to an advancing spinner frame", () => {
+  const task: WidgetTask = {
+    agentType: "general",
+    description: "search the repo",
+    startedAt: 0,
+    toolUses: 1,
+    activity: { phase: "tool", label: "Running websearch\u2026" },
+    recentCalls: [{ id: "c1", name: "websearch", detail: "pi task", status: "in_progress" }],
+  };
+  const render = (now: number) =>
+    renderTaskWidget({
+      foregroundTasks: [["task-1", task]],
+      backgroundTasks: [],
+      foregroundCount: 1,
+      backgroundCount: 0,
+      width: 120,
+      now,
+    });
+
+  const first = render(0)[0] ?? "";
+  assert.match(first, /Running websearch\u2026/, "the row names the phase it is in");
+  assert.match(first, /^ \u280B /, "frame 0 of the spinner");
+  assert.match(render(80)[0] ?? "", /^ \u2819 /, "the next frame follows one interval later");
+
+  const background = renderTaskWidget({
+    foregroundTasks: [],
+    backgroundTasks: [["task-2", { ...task, activity: { phase: "running", label: "Running\u2026" } }]],
+    foregroundCount: 0,
+    backgroundCount: 1,
+    width: 120,
+    now: 0,
+  });
+  assert.match(
+    background[0] ?? "",
+    /\u00b7 Running\u2026 \u2022 /,
+    "background rows name their phase too",
+  );
+});
+
+test("task widget leaves settled tasks without a phase segment", () => {
+  const lines = renderTaskWidget({
+    foregroundTasks: [
+      [
+        "task-1",
+        {
+          agentType: "general",
+          description: "finished run",
+          startedAt: 0,
+          toolUses: 1,
+          status: "done",
+          recentCalls: [{ id: "c1", name: "read", detail: "a.ts", status: "done" }],
+        },
+      ],
+    ],
+    backgroundTasks: [],
+    foregroundCount: 1,
+    backgroundCount: 0,
+    width: 120,
+    now: 0,
+  });
+
+  assert.doesNotMatch(lines[0] ?? "", /Running|Thinking|Streaming/, "no phase for a settled task");
+  assert.match(lines[0] ?? "", /\u2022 1 tool$/, "the row still renders its metadata");
 });
 
 import { visibleWidth } from "@earendil-works/pi-tui";

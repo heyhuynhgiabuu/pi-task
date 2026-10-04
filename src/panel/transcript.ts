@@ -25,6 +25,12 @@ export type TranscriptItem =
       type: "assistant";
       text: string;
       thinking?: string;
+      /**
+       * True while this item is the in-flight streamed partial of a live
+       * transcript (durable `pi.live` generation). Snapshot reads of a session
+       * JSONL only hold committed messages, so they never set it.
+       */
+      streaming?: boolean;
       timestamp: string;
     }
   | {
@@ -32,6 +38,12 @@ export type TranscriptItem =
       name: string;
       toolCallId: string;
       args: Record<string, unknown>;
+      /**
+       * Tool-defined render data, passed through to pi's per-tool renderers as
+       * `details` (edit draws its diff from `details.diff`). Pi persists it on
+       * the toolResult message, so the projections must carry it too.
+       */
+      details?: Record<string, unknown>;
       result?: string;
       isError?: boolean;
       /** True while the corresponding tool slot is still running. */
@@ -40,23 +52,45 @@ export type TranscriptItem =
     }
   | { type: "system"; text: string; timestamp: string };
 
+/**
+ * Child identity Pi itself persisted in the session metadata: the model and
+ * thinking level the child session started with (or last switched to). Read
+ * from the same JSONL pass, so no extra I/O and no new storage contract.
+ */
+export interface ChildSessionMeta {
+  /** `provider/modelId`, as recorded by the session's `model_change`. */
+  model?: string;
+  /** Level from the session's last `thinking_level_change`. */
+  thinkingLevel?: string;
+}
+
 export interface TranscriptReadResult {
   items: TranscriptItem[];
   /** True when a matching session file was found (as opposed to empty dir). */
   found: boolean;
+  /** Absent when the session recorded neither a model nor a thinking level. */
+  meta?: ChildSessionMeta;
 }
 
 interface JsonlEntry {
   type?: string;
   timestamp?: string;
+  provider?: string;
+  modelId?: string;
+  thinkingLevel?: string;
   message?: {
     role?: string;
     content?: unknown;
     toolCallId?: string;
     toolName?: string;
+    details?: unknown;
     isError?: boolean;
     stopReason?: string;
   };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function extractText(content: unknown): string {
@@ -184,6 +218,7 @@ export function readTaskSessionFile(file: string): TranscriptReadResult {
 
   const items: TranscriptItem[] = [];
   const pendingTools = new Map<string, TranscriptItem & { type: "tool" }>();
+  const meta: ChildSessionMeta = {};
 
   const content = readFileSync(file, "utf-8");
   for (const rawLine of content.split("\n")) {
@@ -193,6 +228,19 @@ export function readTaskSessionFile(file: string): TranscriptReadResult {
     try {
       entry = JSON.parse(line) as JsonlEntry;
     } catch {
+      continue;
+    }
+    if (entry.type === "model_change") {
+      const modelId = entry.modelId?.trim();
+      if (modelId) {
+        const provider = entry.provider?.trim();
+        meta.model = provider ? `${provider}/${modelId}` : modelId;
+      }
+      continue;
+    }
+    if (entry.type === "thinking_level_change") {
+      const level = entry.thinkingLevel?.trim();
+      if (level) meta.thinkingLevel = level;
       continue;
     }
     if (entry.type !== "message" || !entry.message) continue;
@@ -227,9 +275,11 @@ export function readTaskSessionFile(file: string): TranscriptReadResult {
       }
     } else if (msg.role === "toolResult" && msg.toolCallId) {
       const text = stripAnsiCodes(extractText(msg.content));
+      const details = isRecord(msg.details) ? msg.details : undefined;
       const existing = pendingTools.get(msg.toolCallId);
       if (existing) {
         existing.result = text || undefined;
+        if (details) existing.details = details;
         existing.isError = Boolean(msg.isError);
         existing.inProgress = false;
         pendingTools.delete(msg.toolCallId);
@@ -241,6 +291,7 @@ export function readTaskSessionFile(file: string): TranscriptReadResult {
           name: msg.toolName ?? "tool",
           toolCallId: msg.toolCallId,
           args: {},
+          ...(details ? { details } : {}),
           result: text || undefined,
           isError: Boolean(msg.isError),
           timestamp,
@@ -254,7 +305,11 @@ export function readTaskSessionFile(file: string): TranscriptReadResult {
   if (items.length > MAX_TRANSCRIPT_ITEMS) {
     items.splice(0, items.length - MAX_TRANSCRIPT_ITEMS);
   }
-  return { items, found: true };
+  return {
+    items,
+    found: true,
+    ...(meta.model === undefined && meta.thinkingLevel === undefined ? {} : { meta }),
+  };
 }
 
 /** Cheap change signature for one exact session file: mtime + size. */

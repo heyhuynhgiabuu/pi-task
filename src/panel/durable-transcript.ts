@@ -13,6 +13,15 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Tool-defined render data (pi's `ToolResultMessage.details` / `ToolSlot.details`).
+ * Pi's per-tool renderers read it directly — `edit` draws `details.diff` — so it
+ * must survive the projection exactly as it was stored.
+ */
+function toolDetails(value: unknown): Record<string, unknown> | undefined {
+  return isRecord(value) ? value : undefined;
+}
+
 function parseContentBlock(value: unknown): ContentBlock | undefined {
   if (!isRecord(value)) return undefined;
   if (value.type === "text" && typeof value.text === "string") {
@@ -68,13 +77,17 @@ function timestampOf(message: Message): string {
     : "";
 }
 
-function asAssistant(message: Message): AssistantTranscriptItem | undefined {
+function asAssistant(
+  message: Message,
+  streaming = false,
+): AssistantTranscriptItem | undefined {
   if (message.role !== "assistant") return undefined;
   const thinking = thinkingContent(message.content);
   return {
     type: "assistant",
     text: textContent(message.content),
     ...(thinking ? { thinking } : {}),
+    ...(streaming ? { streaming: true } : {}),
     timestamp: timestampOf(message),
   };
 }
@@ -102,6 +115,18 @@ function toolOutput(current: string, output: NonNullable<Extract<AgentEvent, { t
 }
 
 /**
+ * The child conversation's own agent state (`pi.agent`): the model, thinking
+ * level, and cwd the harness actually runs the child with. Absent fields mean
+ * the harness has none configured, so the panel must not invent them.
+ */
+export interface DurableChildAgent {
+  /** `provider/modelId`. */
+  model?: string;
+  thinkingLevel?: string;
+  cwd?: string;
+}
+
+/**
  * Projects pi-durable snapshots and committed event batches into the task
  * panel's transcript format. Partial assistant text and running tool output
  * are replaced immutably so the pane can refresh its cached components.
@@ -114,6 +139,7 @@ export class DurableTranscript {
   private snapshotHistoryToolCalls = new Set<string>();
   private countedToolCalls = new Set<string>();
   private toolCallTotal = 0;
+  private agent: DurableChildAgent = {};
   private partialAssistantIndex: number | undefined;
   private partialTextBlocks = new Map<number, string>();
   private partialThinkingBlocks = new Map<number, string>();
@@ -130,11 +156,19 @@ export class DurableTranscript {
     return this.toolCallTotal;
   }
 
+  /** The child's own agent state, for the panel's child status/footer. */
+  agentState(): DurableChildAgent {
+    return { ...this.agent };
+  }
+
   apply(events: readonly AgentEvent[]): TranscriptItem[] {
     for (const event of events) {
       switch (event.type) {
         case "snapshot":
           this.replaceSnapshot(event);
+          break;
+        case "agent_changed":
+          this.setAgentState(event.agent);
           break;
         case "message_start":
           if (event.message.role === "assistant") this.writePartialAssistant(event.message, true);
@@ -163,6 +197,9 @@ export class DurableTranscript {
             ...(event.output === undefined
               ? {}
               : { result: toolOutput(item.result ?? "", event.output) }),
+            ...(event.details === undefined
+              ? {}
+              : { details: toolDetails(event.details) }),
             inProgress: true,
           }), event.toolName);
           break;
@@ -188,7 +225,20 @@ export class DurableTranscript {
     return this.items();
   }
 
+  private setAgentState(state: SnapshotEvent["agent"] | undefined): void {
+    const modelId = typeof state?.model?.modelId === "string" ? state.model.modelId : undefined;
+    const provider = typeof state?.model?.provider === "string" ? state.model.provider : undefined;
+    this.agent = {
+      ...(modelId ? { model: provider ? `${provider}/${modelId}` : modelId } : {}),
+      ...(typeof state?.thinkingLevel === "string"
+        ? { thinkingLevel: state.thinkingLevel }
+        : {}),
+      ...(typeof state?.cwd === "string" ? { cwd: state.cwd } : {}),
+    };
+  }
+
   private replaceSnapshot(snapshot: SnapshotEvent): void {
+    this.setAgentState(snapshot.agent);
     this.transcript = [];
     this.toolIndexes.clear();
     this.snapshotToolCalls.clear();
@@ -207,12 +257,14 @@ export class DurableTranscript {
     for (const slot of snapshot.tools) {
       if (slot.status === "done") continue;
       this.snapshotToolCalls.add(slot.callId);
+      const details = toolDetails(slot.details);
       this.updateTool(
         slot.callId,
         (item) => ({
           ...item,
           name: slot.name,
           ...(slot.output === undefined ? {} : { result: slot.output }),
+          ...(details === undefined ? {} : { details }),
           inProgress: true,
         }),
         slot.name,
@@ -267,6 +319,7 @@ export class DurableTranscript {
       if (countLiveTools) this.observeToolCall(message.toolCallId);
       this.snapshotToolCalls.delete(message.toolCallId);
       const result = textContent(message.content);
+      const details = toolDetails(message.details);
       const existingIndex = this.toolIndexes.get(message.toolCallId);
       if (existingIndex === undefined) {
         this.upsertTool({
@@ -274,6 +327,7 @@ export class DurableTranscript {
           name: message.toolName || "tool",
           toolCallId: message.toolCallId,
           args: {},
+          ...(details === undefined ? {} : { details }),
           result: result || undefined,
           isError: Boolean(message.isError),
           timestamp,
@@ -285,6 +339,7 @@ export class DurableTranscript {
           this.transcript[existingIndex] = {
             ...existing,
             name: message.toolName || existing.name,
+            ...(details === undefined ? {} : { details }),
             result: result || undefined,
             isError: Boolean(message.isError),
             inProgress: false,
@@ -296,7 +351,7 @@ export class DurableTranscript {
   }
 
   private writePartialAssistant(message: Message, countLiveTools = false): void {
-    const assistant = asAssistant(message);
+    const assistant = asAssistant(message, true);
     if (!assistant) return;
     this.partialTextBlocks.clear();
     this.partialThinkingBlocks.clear();
@@ -389,7 +444,7 @@ export class DurableTranscript {
       .join("\n");
     if (this.partialAssistantIndex === undefined) {
       this.partialAssistantIndex = this.transcript.length;
-      this.append({ type: "assistant", text, timestamp: "", ...(thinking ? { thinking } : {}) });
+      this.append({ type: "assistant", text, streaming: true, timestamp: "", ...(thinking ? { thinking } : {}) });
       return;
     }
     const current = this.transcript[this.partialAssistantIndex];

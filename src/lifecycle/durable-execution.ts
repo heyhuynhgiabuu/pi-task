@@ -49,7 +49,7 @@ import {
 import { sessionViewOf, type DeliveryGuard } from "../panel/delivery.js";
 import { durableParentOf } from "./ownership.js";
 import type { TaskWidgetController } from "./widget.js";
-import { DurableTranscript } from "../panel/durable-transcript.js";
+import { DurableTranscript, type DurableChildAgent } from "../panel/durable-transcript.js";
 import { isProcessAliveOrUnknown } from "../process.js";
 import type { TranscriptItem } from "../panel/transcript.js";
 import { startSdkBackgroundTask } from "../subagent/sdkBackground.js";
@@ -120,6 +120,8 @@ export async function resumeDurableAfterRestart(deps: {
     taskId: string,
     items: readonly TranscriptItem[],
     toolUses: number,
+    /** The child conversation's own `pi.agent` state, when it has one. */
+    agent?: DurableChildAgent,
   ) => void;
   onTaskWatchError?: (
     taskId: string,
@@ -212,7 +214,12 @@ export async function resumeDurableAfterRestart(deps: {
       onSnapshot: (taskId, snapshot) => {
         const transcript = new DurableTranscript(snapshot);
         resumedTranscripts.set(taskId, transcript);
-        deps.onTaskProgress?.(taskId, transcript.items(), transcript.toolCallCount());
+        deps.onTaskProgress?.(
+          taskId,
+          transcript.items(),
+          transcript.toolCallCount(),
+          transcript.agentState(),
+        );
       },
       onEvents: (taskId, events) => {
         const transcript = resumedTranscripts.get(taskId);
@@ -221,6 +228,7 @@ export async function resumeDurableAfterRestart(deps: {
           taskId,
           transcript.apply(events),
           transcript.toolCallCount(),
+          transcript.agentState(),
         );
       },
       onWatchError: (taskId, error) => {
@@ -507,7 +515,7 @@ export async function executeDurableTask({
   const updateTranscript = (items: readonly TranscriptItem[], toolUses: number) => {
     const task = backgroundTasks.get(id) ?? foregroundTasks.get(id);
     if (task) task.toolUses = toolUses;
-    taskWidget.setLiveTranscript(id, items, toolUses);
+    taskWidget.setLiveTranscript(id, items, toolUses, progressTranscript?.agentState());
   };
   const showProgressFailure = () => {
     if (progressFailureShown) return;

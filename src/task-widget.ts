@@ -2,6 +2,7 @@ import { truncateToWidth } from "@earendil-works/pi-tui";
 import type { PanelSelection, TaskPanelRow, TaskRowStatus } from "./panel/panel-core.js";
 import type { ToolCallRecord } from "./helpers.js";
 import { formatMs } from "./helpers.js";
+import type { TaskActivity } from "./task-activity.js";
 
 export interface WidgetTask {
   agentType: string;
@@ -11,13 +12,23 @@ export interface WidgetTask {
   recentCalls?: ToolCallRecord[];
   /** Terminal status used by the finished section to pick the icon/color. */
   status?: string;
+  /**
+   * Phase of a running task, rendered next to the animated spinner. Absent for
+   * settled tasks, so no indicator keeps moving after they end.
+   */
+  activity?: TaskActivity;
 }
 
 export interface ThemeLike {
   fg(color: string, text: string): string;
 }
 
-const TASK_WIDGET_RENDER_MS = 80;
+/**
+ * Animation frame interval. The spinner frame is derived from the clock, so the
+ * widget only needs repainting this often; the widget controller's animation
+ * ticker uses the same constant.
+ */
+export const TASK_WIDGET_RENDER_MS = 80;
 
 const SPINNER_FRAMES = [
   "\u280B",
@@ -62,6 +73,16 @@ function formatToolCount(count: number): string {
   return `${count} ${count === 1 ? "tool" : "tools"}`;
 }
 
+/** Phase segment of a running row; empty when the task has no live phase. */
+function activitySegment(
+  theme: ThemeLike | null | undefined,
+  activity: TaskActivity | undefined,
+): string {
+  return activity
+    ? color(theme, "accent", activity.label) + color(theme, "dim", " \u2022 ")
+    : "";
+}
+
 function renderForegroundTask(
 
   task: WidgetTask,
@@ -82,6 +103,7 @@ function renderForegroundTask(
     color(theme, "toolTitle", agentName) +
     color(theme, "dim", description) +
     color(theme, "dim", "  \u2022 ") +
+    activitySegment(theme, task.activity) +
     color(theme, "warning", elapsed) +
     (task.toolUses > 0
       ? color(theme, "dim", " \u2022 ") +
@@ -126,6 +148,7 @@ function renderBackgroundTask(
         color(theme, "dim", " · ") +
         color(theme, "accent", id) +
         color(theme, "dim", " · ") +
+        activitySegment(theme, task.activity) +
         color(theme, "warning", elapsed) +
         color(theme, "dim", " · ") +
         color(theme, "success", formatToolCount(task.toolUses)),

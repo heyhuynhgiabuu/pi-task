@@ -73,6 +73,38 @@ test("durable transcript hydrates message history and pairs tool results", () =>
   assert.equal(items[3]?.type === "assistant" ? items[3].text : "", "The file is clean.");
 });
 
+test("durable transcript exposes the child's own agent state", () => {
+  const snapshot = {
+    ...makeSnapshot(),
+    agent: {
+      model: { provider: "opencode-go", modelId: "deepseek-flash" },
+      thinkingLevel: "high",
+      cwd: "/tmp/child-cwd",
+    },
+  } as SnapshotEvent;
+  const transcript = new DurableTranscript(snapshot);
+  assert.deepEqual(transcript.agentState(), {
+    model: "opencode-go/deepseek-flash",
+    thinkingLevel: "high",
+    cwd: "/tmp/child-cwd",
+  });
+
+  // A later agent change replaces the stored state; absent fields are dropped.
+  transcript.apply([
+    {
+      type: "agent_changed",
+      agent: { model: { provider: "anthropic", modelId: "claude-sonnet-4" } },
+    } as never,
+  ]);
+  assert.deepEqual(transcript.agentState(), {
+    model: "anthropic/claude-sonnet-4",
+  });
+
+  // An empty agent state means the harness has none: nothing is invented.
+  transcript.apply([{ type: "agent_changed", agent: {} } as never]);
+  assert.deepEqual(transcript.agentState(), {});
+});
+
 test("durable transcript reflects a running tool, partial output, and its final result", () => {
   const transcript = new DurableTranscript(makeSnapshot());
   transcript.apply([

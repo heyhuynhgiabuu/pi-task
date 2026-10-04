@@ -849,6 +849,97 @@ test("transcript overlay hides the below-editor task panel while viewing", () =>
   controller.dispose();
 });
 
+test("child panel footer shows the child's recorded model, thinking, and cwd", () => {
+  initTheme();
+  const root = mkdtempSync(join(tmpdir(), "pi-task-child-meta-"));
+  try {
+    const sessionsDir = join(root, "sessions");
+    mkdirSync(sessionsDir, { recursive: true });
+    const sessionFile = join(sessionsDir, "2026-01-01T00-00-00-000Z_a.jsonl");
+    writeFileSync(
+      sessionFile,
+      [
+        JSON.stringify({
+          type: "model_change",
+          provider: "anthropic",
+          modelId: "claude-sonnet-4",
+          timestamp: "2026-01-01T00:00:00.000Z",
+        }),
+        JSON.stringify({
+          type: "thinking_level_change",
+          thinkingLevel: "medium",
+          timestamp: "2026-01-01T00:00:00.000Z",
+        }),
+        JSON.stringify({
+          type: "message",
+          message: { role: "assistant", content: [{ type: "text", text: "session body" }] },
+          timestamp: "",
+        }),
+      ].join("\n"),
+    );
+    const task = makeTask({
+      backend: "sdk",
+      dir: join(root, "artifacts"),
+      sessionPath: sessionFile,
+      sessionName: "task-meta",
+      cwd: join(root, "child-cwd"),
+      status: undefined,
+    });
+    const { context, mountOverlay } = createTuiContext();
+    const controller = createTaskWidgetController(new Map(), new Map([["t-meta", task]]));
+    controller.ensureTaskWidget(context);
+    controller.openTaskView("t-meta");
+    const overlay = mountOverlay({ fg: (_style: string, text: string) => text });
+    initTheme();
+
+    try {
+      const view = overlay.render(140).join("\n");
+      assert.match(view, /#t-meta/, "the footer names the child");
+      assert.match(view, /claude-sonnet-4/, "the session's recorded model is shown");
+      assert.match(view, /thinking medium/, "the session's recorded thinking level is shown");
+      assert.match(view, /child-cwd/, "the child's cwd is shown");
+      assert.match(view, /esc back/, "key hints stay in the footer");
+    } finally {
+      controller.dispose();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("child panel footer prefers the live durable agent state over session metadata", () => {
+  initTheme();
+  const task = makeTask({ backend: "durable", cwd: "/tmp/child-cwd" });
+  const { context, mountOverlay } = createTuiContext();
+  const controller = createTaskWidgetController(new Map([["t-durable-meta", task]]), new Map());
+  controller.ensureTaskWidget(context);
+  controller.setLiveTranscript("t-durable-meta", [
+    { type: "user", text: "do the thing", timestamp: "" },
+  ], 2, { model: "opencode-go/deepseek-flash", thinkingLevel: "high", cwd: "/tmp/child-cwd" });
+  controller.openTaskView("t-durable-meta");
+  const overlay = mountOverlay({ fg: (_style: string, text: string) => text });
+  initTheme();
+
+  try {
+    const view = overlay.render(140).join("\n");
+    assert.match(view, /deepseek-flash/, "the live agent state's model is shown");
+    assert.match(view, /thinking high/, "the live agent state's thinking level is shown");
+    assert.match(view, /child-cwd/, "the live agent state's cwd is shown");
+
+    // A watch-error update carries no agent state: the last one we saw stays.
+    controller.setLiveTranscript(
+      "t-durable-meta",
+      [{ type: "system", text: "live updates unavailable", timestamp: "" }],
+      2,
+    );
+    const afterWatchError = overlay.render(140).join("\n");
+    assert.match(afterWatchError, /deepseek-flash/, "the model survives an update without agent state");
+    assert.match(afterWatchError, /thinking high/, "the thinking level survives too");
+  } finally {
+    controller.dispose();
+  }
+});
+
 test("sdk transcript reads the captured session file and streams growth", () => {
   initTheme();
   const root = mkdtempSync(join(tmpdir(), "pi-task-sdk-transcript-"));

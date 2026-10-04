@@ -129,6 +129,109 @@ test("readTaskTranscript parses user/assistant/tool rows and pairs tool calls wi
   }
 });
 
+test("readTaskTranscript keeps a tool result's details for pi's per-tool renderers", () => {
+  // pi persists the whole toolResult message, `details` included; the pane hands
+  // it to the tool renderer (edit draws its diff from `details.diff`).
+  const dir = mkdtempSync(join(tmpdir(), "pi-task-transcript-"));
+  writeFileSync(
+    join(dir, "s.jsonl"),
+    [
+      JSON.stringify({
+        type: "message",
+        timestamp: "2026-08-19T00:00:01.000Z",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              id: "call_00_edit",
+              name: "edit",
+              arguments: {
+                path: "tools/align.py",
+                edits: [{ oldText: "old line", newText: "new line" }],
+              },
+            },
+          ],
+          stopReason: "toolUse",
+        },
+      }),
+      JSON.stringify({
+        type: "message",
+        timestamp: "2026-08-19T00:00:02.000Z",
+        message: {
+          role: "toolResult",
+          toolCallId: "call_00_edit",
+          toolName: "edit",
+          content: [{ type: "text", text: "Successfully replaced 1 block(s) in tools/align.py." }],
+          details: { diff: "-1 old line\n+1 new line", patch: "patch", firstChangedLine: 1 },
+          isError: false,
+        },
+      }),
+    ].join("\n"),
+    "utf-8",
+  );
+
+  const { items } = readTaskTranscript(dir, undefined);
+  const tool = items.find((item) => item.type === "tool");
+  assert.ok(tool && tool.type === "tool");
+  assert.deepEqual(tool.details, {
+    diff: "-1 old line\n+1 new line",
+    patch: "patch",
+    firstChangedLine: 1,
+  });
+});
+
+test("readTaskTranscript records the child's own model and thinking level", () => {
+  // Pi writes these at session start (and on change); the panel shows them in
+  // the child footer instead of guessing a model.
+  const dir = mkdtempSync(join(tmpdir(), "pi-task-transcript-meta-"));
+  writeFileSync(
+    join(dir, "s.jsonl"),
+    [
+      JSON.stringify({
+        type: "model_change",
+        provider: "opencode-go",
+        modelId: "deepseek-flash",
+        timestamp: "2026-08-19T00:00:00.000Z",
+      }),
+      JSON.stringify({
+        type: "thinking_level_change",
+        thinkingLevel: "high",
+        timestamp: "2026-08-19T00:00:00.000Z",
+      }),
+      JSON.stringify({
+        type: "message",
+        timestamp: "2026-08-19T00:00:01.000Z",
+        message: { role: "assistant", content: [{ type: "text", text: "working" }] },
+      }),
+      JSON.stringify({
+        type: "thinking_level_change",
+        thinkingLevel: "low",
+        timestamp: "2026-08-19T00:00:02.000Z",
+      }),
+    ].join("\n"),
+  );
+
+  const { meta, found } = readTaskTranscript(dir, undefined);
+  assert.equal(found, true);
+  assert.equal(meta?.model, "opencode-go/deepseek-flash", "the last model_change wins");
+  assert.equal(meta?.thinkingLevel, "low", "the last thinking_level_change wins");
+});
+
+test("readTaskTranscript reports no metadata for a session that recorded none", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-task-transcript-nometa-"));
+  writeFileSync(
+    join(dir, "s.jsonl"),
+    JSON.stringify({
+      type: "message",
+      timestamp: "2026-08-19T00:00:01.000Z",
+      message: { role: "assistant", content: [{ type: "text", text: "no metadata" }] },
+    }),
+  );
+  const { meta } = readTaskTranscript(dir, undefined);
+  assert.equal(meta, undefined, "nothing is invented for a session without metadata");
+});
+
 test("readTaskTranscript synthesizes tool rows for unmatched tool results", () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-task-transcript-"));
   writeFileSync(

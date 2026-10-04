@@ -105,10 +105,12 @@ export function createPiRuntimeModels(
   };
   // OpenCode providers reject requests without `x-opencode-session` (400
   // MissingSessionID) and pi-durable generation calls streamSimple without a
-  // session id. Give each harness open a stable routing id: opencode uses it
-  // for routing affinity, and the harness (not a conversation) is the stable
-  // unit visible to this adapter.
-  const routingSessionId = `pi-task-durable-${randomUUID()}`;
+  // session id. Give each harness open a stable routing id for opencode's
+  // routing affinity. The value must be a plain UUID: opencode validates the
+  // header and rejects a decorated id (`pi-task-durable-<uuid>` came back as
+  // `400 {"model":"deepseek-flash"}` while the same model works in the parent,
+  // whose header is Pi's bare session UUID).
+  const routingSessionId = randomUUID();
   const asRecord = (value: unknown): Record<string, unknown> | undefined =>
     typeof value === "object" && value !== null && !Array.isArray(value)
       ? (value as Record<string, unknown>)
@@ -327,7 +329,7 @@ export async function openDurableHarness(
       options.models || options.modelRegistry
         ? undefined
         : (await import("@earendil-works/pi-ai/models")).createModels();
-    const matchesFastModel = createTaskFastModeModelMatcher(piDir);
+    const matchesFastModel = createTaskFastModeModelMatcher();
     const models = options.models
       ? options.models(durable)
       : createPiRuntimeModels(

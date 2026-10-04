@@ -6,6 +6,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Durable tasks on OpenCode providers now send a plain UUID as the
+  `x-opencode-session` header. The previous fix injected a decorated id
+  (`pi-task-durable-<uuid>`), which OpenCode rejects with
+  `400 {"model":"<model>"}`; the model itself is valid (the same model works in
+  the parent session, whose header is Pi's bare session UUID), so the malformed
+  session id was the failure. Only `opencode`/`opencode-go` requests are
+  affected; other providers never carry the header.
+
 ## [0.10.0] - 2026-10-04
 
 ### Added

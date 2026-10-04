@@ -3141,7 +3141,11 @@ test("durable models adapter injects an opencode routing session id", () => {
     { apiKey: "k", sessionId: "explicit" },
   );
 
-  assert.match(String(captured[0]?.sessionId), /^pi-task-durable-/, "opencode gets a routing id");
+  assert.match(
+    String(captured[0]?.sessionId),
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    "opencode gets a bare UUID routing id (opencode rejects a decorated one)",
+  );
   assert.equal(captured[1]?.sessionId, undefined, "non-opencode providers are untouched");
   assert.equal(captured[2]?.sessionId, "explicit", "an explicit session id wins");
 });

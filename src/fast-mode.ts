@@ -168,10 +168,11 @@ function isConfiguredModel(
 /**
  * Match a model against the configured fast-mode list. Extension-less children
  * (durable, SDK) never load the parent's fast-mode extension, so the durable
- * bridge reuses the same list to decide when to request the priority tier.
+ * bridge reuses the same list to decide when to request the priority tier. The
+ * config lives in the Pi agent dir, not the project's `.pi`.
  */
 export function createTaskFastModeModelMatcher(
-  agentDir: string,
+  agentDir: string = getAgentDir(),
 ): (model: { provider: string; id?: string }) => boolean {
   const config = loadTaskFastModeConfig(agentDir);
   return (model) =>

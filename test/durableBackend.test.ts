@@ -26,6 +26,7 @@ import {
   runDurableTask,
   steerDurableTask,
   createPiRuntimeModels,
+  parseDurableThinkingLevel,
   type DurableRuntimeModelRegistry,
 } from "../src/subagent/durable.js";
 import {
@@ -3119,6 +3120,15 @@ test("SIGKILL mid-tool: the next process resumes and delivers exactly once", () 
     completionQueue.dispose();
     rmSync(root, { recursive: true, force: true });
   });
+});
+
+test("durable thinking levels accept only canonical Pi values", () => {
+  assert.equal(parseDurableThinkingLevel("high"), "high");
+  assert.equal(parseDurableThinkingLevel("  XHigh "), "xhigh");
+  assert.equal(parseDurableThinkingLevel("off"), "off");
+  assert.equal(parseDurableThinkingLevel(undefined), undefined);
+  assert.equal(parseDurableThinkingLevel(""), undefined);
+  assert.equal(parseDurableThinkingLevel("disable"), undefined);
 });
 
 test("durable models adapter injects an opencode routing session id", () => {

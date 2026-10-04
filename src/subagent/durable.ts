@@ -389,7 +389,11 @@ export async function openDurableHarness(
 async function findOrCreateChild(
   handle: DurableHarnessHandle,
   ownerKey: string,
-  configure?: { model?: { provider: string; modelId: string }; cwd?: string },
+  configure?: {
+    model?: { provider: string; modelId: string };
+    cwd?: string;
+    thinkingLevel?: DurableThinkingLevel;
+  },
 ): Promise<ConversationId> {
   const root = await handle.harness.root(handle.context);
   return root.commit(async (tx) => {
@@ -404,6 +408,9 @@ async function findOrCreateChild(
     await handle.module.configure(tx, created.id, {
       ...(configure?.model !== undefined ? { model: configure.model } : {}),
       ...(configure?.cwd !== undefined ? { cwd: configure.cwd } : {}),
+      ...(configure?.thinkingLevel !== undefined
+        ? { thinkingLevel: configure.thinkingLevel }
+        : {}),
     });
     map.byOwner[ownerKey] = { conversationId: created.id };
     return created.id;
@@ -529,6 +536,40 @@ const THINKING_LEVELS = new Set<import("@earendil-works/pi-ai").ModelThinkingLev
 ]);
 
 /** Resolve the complete model ID before interpreting an optional legacy thinking suffix. */
+/**
+ * Pi's canonical thinking levels: the values `pi.agent.thinkingLevel` accepts.
+ * A durable conversation that stores none runs at the harness default, which
+ * for a model whose `thinkingLevelMap.off` maps to a provider effort can send
+ * an effort the provider rejects (for example `"disable"`).
+ */
+export type DurableThinkingLevel =
+  | "off"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max";
+
+/** Normalize agent frontmatter `thinking`; anything unrecognized is left unset. */
+export function parseDurableThinkingLevel(
+  value: string | undefined,
+): DurableThinkingLevel | undefined {
+  const normalized = value?.trim().toLowerCase();
+  switch (normalized) {
+    case "off":
+    case "minimal":
+    case "low":
+    case "medium":
+    case "high":
+    case "xhigh":
+    case "max":
+      return normalized;
+    default:
+      return undefined;
+  }
+}
+
 function parseAgentModel(
   model: string | undefined,
   models: Pick<import("@earendil-works/pi-ai").Models, "getAllModels" | "getModel">,
@@ -987,6 +1028,8 @@ export async function runDurableTask(input: {
   modelRegistry?: DurableRuntimeModelRegistry;
   /** Stable parent tool-call id: replays the same submission, new calls resume the same child. */
   requestId?: string;
+  /** Agent frontmatter thinking level; without it the child runs at the harness default. */
+  thinkingLevel?: DurableThinkingLevel;
   /** Mirror the parent's fast mode onto the child's Codex requests. */
   fast?: boolean;
   /** Called once the submission is durably admitted, before it settles. */
@@ -1014,6 +1057,7 @@ export async function runDurableTask(input: {
         input.sessionModel ??
         defaultModelRef(handle),
       cwd: input.cwd,
+      thinkingLevel: input.thinkingLevel,
     },
   );
   const conversation = (await handle.harness.conversation(childId, handle.context))!;

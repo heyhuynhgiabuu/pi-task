@@ -4,19 +4,23 @@ All notable changes to `@heyhuynhgiabuu/pi-task` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
-
 ## [0.10.1] - 2026-10-04
 
 ### Fixed
 
-- Durable tasks on OpenCode providers now send a plain UUID as the
-  `x-opencode-session` header. The previous fix injected a decorated id
-  (`pi-task-durable-<uuid>`), which OpenCode rejects with
-  `400 {"model":"<model>"}`; the model itself is valid (the same model works in
-  the parent session, whose header is Pi's bare session UUID), so the malformed
-  session id was the failure. Only `opencode`/`opencode-go` requests are
-  affected; other providers never carry the header.
+- Durable OpenCode requests now send a plain UUID as the `x-opencode-session`
+  header — the same shape Pi's own generation sends — instead of the decorated
+  `pi-task-durable-<uuid>` id. Only `opencode`/`opencode-go` requests carry the
+  header. This corrects the header format; it does not by itself resolve the
+  `400 {"model":"deepseek-flash"}` failure still open on `opencode-go` (the
+  same error appears with either value).
+
+- Durable children now run at the agent's configured `thinking` level. The
+  durable path stored only the model and cwd, so a child fell back to the
+  harness default; for a model whose `thinkingLevelMap.off` maps to a provider
+  effort (for example `"disable"`), that could send an effort the provider
+  rejects. Agent frontmatter levels are validated before they reach
+  `pi.agent.thinkingLevel`; unrecognized values are still left unset.
 
 ## [0.10.0] - 2026-10-04
 

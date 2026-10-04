@@ -20,6 +20,7 @@ import {
   inspectDurableDatabasePath,
   DurableTaskCancelledError,
   inspectDurableTaskAdmission,
+  parseDurableThinkingLevel,
   releaseUnadmittedDurableRun,
   resumeDurableTasks,
   runDurableTask,
@@ -533,6 +534,7 @@ export async function executeDurableTask({
       model,
       sessionModel,
       fast,
+      thinkingLevel: parseDurableThinkingLevel(agent.thinking),
       modelRegistry: ctx.modelRegistry,
       signal: runnerAbortController.signal,
       onSnapshot: (snapshot) => {

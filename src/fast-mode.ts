@@ -83,16 +83,21 @@ const DEFAULT_STREAMERS: TaskFastModeStreamers = {
  * construction: forward all native options, then add the priority service tier.
  * maxTokens is clamped to the model context window as an upper bound (the
  * native implementation subtracts estimated context usage; we use the window
- * to avoid importing pi-ai's internal token estimator).
+ * to avoid importing pi-ai's internal token estimator). Sampling params merge
+ * like the native helper: model defaults, then the effective thinking level's
+ * overrides, then the request's.
  */
 function buildFastBaseOptions(
   model: Model<Api>,
   options: SimpleStreamOptions | undefined,
   apiKey: string | undefined,
 ): OpenAIResponsesOptions & OpenAICodexResponsesOptions {
-  const samplingParams = model.samplingParams || options?.samplingParams
-    ? { ...model.samplingParams, ...options?.samplingParams }
-    : undefined;
+  const thinkingLevel = clampThinkingLevel(model, options?.reasoning ?? "off");
+  const thinkingLevelParams = model.samplingParamsByThinkingLevel?.[thinkingLevel];
+  const samplingParams =
+    model.samplingParams || thinkingLevelParams || options?.samplingParams
+      ? { ...model.samplingParams, ...thinkingLevelParams, ...options?.samplingParams }
+      : undefined;
   const requestedMaxTokens = options?.maxTokens ?? model.maxTokens;
   const maxTokens = model.contextWindow > 0
     ? Math.min(requestedMaxTokens, model.contextWindow)

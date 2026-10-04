@@ -106,6 +106,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- Fast Mode now honors `samplingParamsByThinkingLevel` from `models.json`, the
+  per-thinking-level sampling overrides added in pi 1.0.2. The fast-mode request
+  builder mirrors pi-ai's `buildBaseOptions`, which now resolves model defaults,
+  then the effective thinking level's overrides, then the request's; without
+  this, fast-mode requests silently ignored the configured per-level sampling
+  while normal requests applied it. On pi 1.0.0/1.0.1 the field is absent and
+  behavior is unchanged.
+
 - SDK subagent sessions now inherit extension-registered providers from the
   parent session's model registry (for example `antigravity` registered by an
   OAuth package). Child sessions intentionally load no extensions, so models

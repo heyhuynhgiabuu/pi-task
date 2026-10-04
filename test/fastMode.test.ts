@@ -319,6 +319,41 @@ test("configured fast models preserve native options and add only priority", () 
   }
 });
 
+test("fast mode resolves per-thinking-level sampling like native options", () => {
+  const { agentDir, calls, stream } = createFastStreamHarness(["openai/gpt-fast"]);
+  const model = {
+    provider: "openai",
+    id: "gpt-fast",
+    api: "openai-responses",
+    maxTokens: 131_072,
+    contextWindow: 400_000,
+    reasoning: true,
+    samplingParams: { top_p: 0.9 },
+    samplingParamsByThinkingLevel: {
+      high: { temperature: 0.3 },
+      off: { temperature: 1 },
+    },
+  };
+  const context = { messages: [] };
+  const options = { reasoning: "high" as const };
+
+  try {
+    stream(model as never, context, options);
+
+    assert.deepEqual(calls[0]?.options, {
+      ...buildNativeBaseOptions(model as never, context, options, undefined),
+      reasoningEffort: "high",
+      serviceTier: "priority",
+    });
+    assert.deepEqual(calls[0]?.options.samplingParams, {
+      top_p: 0.9,
+      temperature: 0.3,
+    });
+  } finally {
+    rmSync(agentDir, { recursive: true, force: true });
+  }
+});
+
 test("unlisted and unsupported models use their normal streamer", () => {
   const { agentDir, calls, stream } = createFastStreamHarness(["openai/gpt-fast"]);
   const model = {

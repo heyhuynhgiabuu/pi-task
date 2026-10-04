@@ -3204,3 +3204,50 @@ test("durable Codex tasks request detailed reasoning summaries without changing 
   );
   assert.equal(captured[1]?.onPayload, undefined, "other APIs are untouched");
 });
+
+test("durable Codex tasks request the priority service tier only under fast mode", async () => {
+  const captured: Array<Record<string, unknown> | undefined> = [];
+  const registry = {
+    getAll: () => [],
+    find: () => undefined,
+    streamSimple: (_model: unknown, _context: unknown, options: Record<string, unknown>) => {
+      captured.push(options);
+      return {} as never;
+    },
+  };
+  const codexModel = { provider: "openai-codex", api: "openai-codex-responses" };
+  const body = { model: "gpt-6.1-sol", reasoning: { effort: "high", summary: "auto" } };
+
+  const fastAdapter = createPiRuntimeModels(
+    { current: registry as never },
+    undefined,
+    () => true,
+  );
+  fastAdapter.streamSimple(codexModel as never, { messages: [] }, { apiKey: "test" });
+  const fastHook = captured[0]?.onPayload as (p: unknown, m: unknown) => Promise<unknown>;
+  assert.deepEqual(await fastHook(body, codexModel), {
+    ...body,
+    reasoning: { effort: "high", summary: "detailed" },
+    service_tier: "priority",
+  });
+
+  const normalAdapter = createPiRuntimeModels(
+    { current: registry as never },
+    undefined,
+    () => false,
+  );
+  normalAdapter.streamSimple(codexModel as never, { messages: [] }, { apiKey: "test" });
+  const normalHook = captured[1]?.onPayload as (p: unknown, m: unknown) => Promise<unknown>;
+  assert.deepEqual(await normalHook(body, codexModel), {
+    ...body,
+    reasoning: { effort: "high", summary: "detailed" },
+  });
+
+  const defaultAdapter = createPiRuntimeModels({ current: registry as never }, undefined);
+  defaultAdapter.streamSimple(codexModel as never, { messages: [] }, { apiKey: "test" });
+  const defaultHook = captured[2]?.onPayload as (p: unknown, m: unknown) => Promise<unknown>;
+  assert.deepEqual(await defaultHook(body, codexModel), {
+    ...body,
+    reasoning: { effort: "high", summary: "detailed" },
+  }, "fast mode is off unless a predicate says otherwise");
+});

@@ -11,7 +11,7 @@ import {
   createAgentSessionServices,
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
-import { createTaskFastModeStream } from "../src/fast-mode.js";
+import { createTaskFastModeStream, gptConfigFastEnabled } from "../src/fast-mode.js";
 import type { AgentConfig } from "../src/helpers.js";
 import {
   buildPiArgv,
@@ -58,6 +58,16 @@ function createFastStreamHarness(models?: string[]) {
   });
   return { agentDir, calls, stream };
 }
+
+test("gpt-config fast mode is read from the parent settings blob", () => {
+  assert.equal(gptConfigFastEnabled(undefined), false);
+  assert.equal(gptConfigFastEnabled({}), false);
+  assert.equal(gptConfigFastEnabled({ gptConfig: undefined }), false);
+  assert.equal(gptConfigFastEnabled({ gptConfig: "fast" }), false);
+  assert.equal(gptConfigFastEnabled({ gptConfig: { fastMode: false } }), false);
+  assert.equal(gptConfigFastEnabled({ gptConfig: { fastMode: true } }), true);
+  assert.equal(gptConfigFastEnabled({ gptConfig: { fastMode: "true" } }), false);
+});
 
 test("fast is a session and agent setting, not a task parameter", () => {
   const schema = taskParametersSchema() as {

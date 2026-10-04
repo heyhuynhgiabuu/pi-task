@@ -28,6 +28,7 @@ import {
   MAX_POLL_ERRORS,
 } from "./constants.js";
 import { registerParentFastMode } from "./fast.js";
+import { gptConfigFastEnabled } from "./fast-mode.js";
 export { createTaskFastModeStream, registerTaskFastModeBridge } from "./fast-mode.js";
 export type { TaskToolParameters } from "./tool/schema.js";
 import {
@@ -892,9 +893,10 @@ export default function (pi: ExtensionAPI) {
       // Backend selection: PI_TASK_BACKEND env > `taskBackend` setting > auto.
       // Settings live on the extension API (pi.getSettings), not the tool ctx;
       // headless harnesses may omit it, in which case the setting is absent.
-      const settingsBackend = typeof pi.getSettings === "function"
-        ? (pi.getSettings() as Record<string, unknown> | undefined)?.taskBackend
+      const settings = typeof pi.getSettings === "function"
+        ? (pi.getSettings() as Record<string, unknown> | undefined)
         : undefined;
+      const settingsBackend = settings?.taskBackend;
       const backendResolution = await resolveTaskBackend({
         allowAcpSession: !claudeRuntime && !conversationId,
         settingsBackend: typeof settingsBackend === "string" ? settingsBackend : undefined,
@@ -915,6 +917,14 @@ export default function (pi: ExtensionAPI) {
         herdrBackend,
       } = backendResolution;
       const selectedBackend = resumeBackend ?? backendResolution.selectedBackend;
+      // Fast mode: agent frontmatter is the explicit setting and wins over the
+      // session's `--fast` flag. Terminal children launched with `--no-extensions`
+      // load pi-task's own provider bridge instead of the user's extensions, so the
+      // launch decision stays on the explicit signal only. Extension-less children
+      // (durable, SDK) never run the user's fast-mode extension, so they also mirror
+      // its persisted switch (gpt-config's `fastMode`).
+      const effectiveFast = resolveTaskFastMode(agent.fast, pi.getFlag("fast") === true);
+      const isolatedFast = effectiveFast || gptConfigFastEnabled(settings);
       if (claudeRuntime && selectedBackend === "sdk") {
         return {
           content: [
@@ -990,6 +1000,7 @@ export default function (pi: ExtensionAPI) {
           artifactsDir,
           toolCallId,
           signal,
+          fast: isolatedFast,
           isBackground,
           backgroundTasks,
           foregroundTasks,
@@ -1009,7 +1020,6 @@ export default function (pi: ExtensionAPI) {
         sessionDir,
         conversationId,
       });
-      const effectiveFast = resolveTaskFastMode(agent.fast, pi.getFlag("fast") === true);
 
       if (taskParams.compare) {
         return executeComparisonTask({
@@ -1136,7 +1146,7 @@ export default function (pi: ExtensionAPI) {
               conversationId,
               toolSelection,
               skillPaths,
-              fast: effectiveFast,
+              fast: isolatedFast,
               signal,
               isBackground,
               foregroundTask,

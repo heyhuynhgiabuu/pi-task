@@ -106,6 +106,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- The durable backend now honors fast mode. Durable children run no user
+  extensions, so the parent's fast-mode extension (for example `gpt-config`)
+  never applied its priority service tier to them, and the durable execution
+  path ignored `fast` entirely. Durable and SDK children now request
+  `service_tier: "priority"` for Codex models in the configured fast list when
+  the agent's frontmatter, the session's `--fast` flag, or the parent's
+  persisted `gpt-config` `fastMode` enables it. Terminal children are unchanged:
+  they still load the user's extension and let it shape their requests.
+
 - Fast Mode now honors `samplingParamsByThinkingLevel` from `models.json`, the
   per-thinking-level sampling overrides added in pi 1.0.2. The fast-mode request
   builder mirrors pi-ai's `buildBaseOptions`, which now resolves model defaults,

@@ -24,6 +24,7 @@ import {
   resumeDurableTasks,
   runDurableTask,
 } from "../subagent/durable.js";
+import { gptConfigFastEnabled } from "../fast-mode.js";
 import {
   failUnadmittedTaskSessionHistory,
   findTaskSessionHistory,
@@ -68,6 +69,8 @@ export interface DurableTaskExecutionOptions {
   conversationId?: string;
   toolCallId?: string;
   signal?: AbortSignal;
+  /** Mirror the parent's fast mode onto the child's Codex requests. */
+  fast?: boolean;
   isBackground: boolean;
   backgroundTasks: Map<string, BackgroundTask>;
   foregroundTasks: Map<string, BackgroundTask>;
@@ -358,6 +361,12 @@ export async function resumeDurableAfterRestart(deps: {
       databasePath: deps.databasePath,
       models: deps.models,
       modelRegistry: deps.modelRegistry,
+      fast: (typeof deps.pi.getFlag === "function" && deps.pi.getFlag("fast") === true) ||
+        gptConfigFastEnabled(
+          typeof deps.pi.getSettings === "function"
+            ? (deps.pi.getSettings() as Record<string, unknown> | undefined)
+            : undefined,
+        ),
     },
   );
   return durableTaskIds;
@@ -461,6 +470,7 @@ export async function executeDurableTask({
   conversationId,
   toolCallId,
   signal,
+  fast,
   isBackground,
   backgroundTasks,
   foregroundTasks,
@@ -522,6 +532,7 @@ export async function executeDurableTask({
       cwd,
       model,
       sessionModel,
+      fast,
       modelRegistry: ctx.modelRegistry,
       signal: runnerAbortController.signal,
       onSnapshot: (snapshot) => {

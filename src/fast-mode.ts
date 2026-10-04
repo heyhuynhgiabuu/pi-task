@@ -165,6 +165,34 @@ function isConfiguredModel(
   return config.models.some((entry) => entry === bare || entry === qualified);
 }
 
+/**
+ * Match a model against the configured fast-mode list. Extension-less children
+ * (durable, SDK) never load the parent's fast-mode extension, so the durable
+ * bridge reuses the same list to decide when to request the priority tier.
+ */
+export function createTaskFastModeModelMatcher(
+  agentDir: string,
+): (model: { provider: string; id?: string }) => boolean {
+  const config = loadTaskFastModeConfig(agentDir);
+  return (model) =>
+    model.id !== undefined &&
+    isConfiguredModel(config, { provider: model.provider, id: model.id });
+}
+
+/**
+ * True when the parent session's `gpt-config` extension has fast mode on.
+ * gpt-config persists `fastMode` in `settings.json` and applies it with a
+ * `before_provider_request` hook; extension-less children (durable, SDK) never
+ * run that hook, so pi-task mirrors the switch for them.
+ */
+export function gptConfigFastEnabled(settings: Record<string, unknown> | undefined): boolean {
+  const gptConfig = settings?.gptConfig;
+  if (typeof gptConfig !== "object" || gptConfig === null || Array.isArray(gptConfig)) {
+    return false;
+  }
+  return (gptConfig as Record<string, unknown>).fastMode === true;
+}
+
 function mapReasoningEffort(
   model: Model<Api>,
   reasoning: ThinkingLevel | undefined,

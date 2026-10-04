@@ -13,6 +13,8 @@ import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import { join } from "node:path";
 
+import { createTaskFastModeModelMatcher } from "../fast-mode.js";
+
 /** The subset of the pi-durable module the backend uses. */
 type DurableModule = typeof import("@earendil-works/pi-durable");
 
@@ -72,9 +74,15 @@ type RuntimeModelRegistryRef = {
   current: DurableRuntimeModelRegistry | undefined;
 };
 
+/** Mutable fast-mode switch, refreshed per open like the model registry. */
+type RuntimeFastRef = {
+  current: boolean;
+};
+
 type CachedHarness = {
   promise: Promise<DurableHarnessHandle>;
   runtimeModelRegistry: RuntimeModelRegistryRef;
+  runtimeFast: RuntimeFastRef;
 };
 
 const harnessCache = new Map<string, CachedHarness>();
@@ -88,6 +96,7 @@ const harnessCache = new Map<string, CachedHarness>();
 export function createPiRuntimeModels(
   registryRef: RuntimeModelRegistryRef,
   fallback: import("@earendil-works/pi-ai").Models | undefined,
+  useFastMode?: (model: { provider: string; id?: string }) => boolean,
 ): import("@earendil-works/pi-ai").Models {
   type Models = import("@earendil-works/pi-ai").Models;
   const fallbackModels = (): Models => {
@@ -105,7 +114,7 @@ export function createPiRuntimeModels(
       ? (value as Record<string, unknown>)
       : undefined;
   const withProviderOptions = (
-    model: { provider: string; api?: string },
+    model: { provider: string; id?: string; api?: string },
     options: object | undefined,
   ): object | undefined => {
     let adapted = options ? { ...(options as Record<string, unknown>) } : undefined;
@@ -113,7 +122,9 @@ export function createPiRuntimeModels(
     // pi-ai 1.0.0's Codex `streamSimple` maps reasoning effort but leaves the
     // Responses API summary at `auto`. Request a provider-generated detailed
     // summary so text can populate ThinkingContent; keep effort unchanged and
-    // preserve any caller payload hook and explicit non-auto summary.
+    // preserve any caller payload hook and explicit non-auto summary. Fast mode
+    // rides the same hook: the child cannot run the parent's provider-request
+    // hook, so it mirrors the parent's priority service tier here.
     if (model.api === "openai-codex-responses") {
       const originalHook = adapted?.onPayload;
       adapted = {
@@ -129,20 +140,30 @@ export function createPiRuntimeModels(
                 )(payload, payloadModel)
               : undefined;
           const body = asRecord(callerResult === undefined ? payload : callerResult);
-          const reasoning = asRecord(body?.reasoning);
-          if (!body || !reasoning) return callerResult;
+          if (!body) return callerResult;
 
-          const effort = reasoning.effort;
-          const summary = reasoning.summary;
-          if (
-            typeof effort !== "string" ||
-            effort === "none" ||
-            effort === "off" ||
-            (summary !== undefined && summary !== "auto")
-          ) {
-            return callerResult;
+          let next = body;
+          let changed = false;
+          if (useFastMode?.(model)) {
+            next = { ...next, service_tier: "priority" };
+            changed = true;
           }
-          return { ...body, reasoning: { ...reasoning, summary: "detailed" } };
+
+          const reasoning = asRecord(next.reasoning);
+          if (reasoning) {
+            const effort = reasoning.effort;
+            const summary = reasoning.summary;
+            if (
+              typeof effort === "string" &&
+              effort !== "none" &&
+              effort !== "off" &&
+              (summary === undefined || summary === "auto")
+            ) {
+              next = { ...next, reasoning: { ...reasoning, summary: "detailed" } };
+              changed = true;
+            }
+          }
+          return changed ? next : callerResult;
         },
       };
     }
@@ -279,17 +300,21 @@ export async function openDurableHarness(
     databasePath?: string;
     models?: DurableModelsFactory;
     modelRegistry?: DurableRuntimeModelRegistry;
+    /** Mirror the parent's fast mode onto Codex requests (durable children run no extensions). */
+    fast?: boolean;
   } = {},
 ): Promise<DurableHarnessHandle> {
   const databasePath = options.databasePath ?? durableDatabasePath(piDir);
   const cached = harnessCache.get(databasePath);
   if (cached) {
     if (options.modelRegistry) cached.runtimeModelRegistry.current = options.modelRegistry;
+    if (options.fast !== undefined) cached.runtimeFast.current = options.fast;
     return cached.promise;
   }
   const runtimeModelRegistry: RuntimeModelRegistryRef = {
     current: options.modelRegistry,
   };
+  const runtimeFast: RuntimeFastRef = { current: options.fast === true };
   const promise = (async () => {
     const [durable, sqlite, chordContext] = await Promise.all([
       import("@earendil-works/pi-durable"),
@@ -302,9 +327,14 @@ export async function openDurableHarness(
       options.models || options.modelRegistry
         ? undefined
         : (await import("@earendil-works/pi-ai/models")).createModels();
+    const matchesFastModel = createTaskFastModeModelMatcher(piDir);
     const models = options.models
       ? options.models(durable)
-      : createPiRuntimeModels(runtimeModelRegistry, fallbackModels);
+      : createPiRuntimeModels(
+          runtimeModelRegistry,
+          fallbackModels,
+          (model) => runtimeFast.current && matchesFastModel(model),
+        );
     const registry = durable.createRegistry();
     registry.install(CodingTools);
     const storage = await sqlite.openNodeSqliteStorage(databasePath);
@@ -349,7 +379,7 @@ export async function openDurableHarness(
       usageDoc: durable.UsageDoc,
     };
   })();
-  harnessCache.set(databasePath, { promise, runtimeModelRegistry });
+  harnessCache.set(databasePath, { promise, runtimeModelRegistry, runtimeFast });
   return promise;
 }
 
@@ -955,6 +985,8 @@ export async function runDurableTask(input: {
   modelRegistry?: DurableRuntimeModelRegistry;
   /** Stable parent tool-call id: replays the same submission, new calls resume the same child. */
   requestId?: string;
+  /** Mirror the parent's fast mode onto the child's Codex requests. */
+  fast?: boolean;
   /** Called once the submission is durably admitted, before it settles. */
   onSubmitted?: (conversationId: string) => void;
   /** Initial committed state for a live durable transcript view. */
@@ -969,6 +1001,7 @@ export async function runDurableTask(input: {
     databasePath: input.databasePath,
     models: input.models,
     modelRegistry: input.modelRegistry,
+    fast: input.fast,
   });
   const childId = await findOrCreateChild(
     handle,
@@ -1286,12 +1319,14 @@ export async function resumeDurableTasks(
     databasePath?: string;
     models?: DurableModelsFactory;
     modelRegistry?: DurableRuntimeModelRegistry;
+    fast?: boolean;
   } = {},
 ): Promise<void> {
   const handle = await openDurableHarness(piDir, {
     databasePath: options.databasePath,
     models: options.models,
     modelRegistry: options.modelRegistry,
+    fast: options.fast,
   });
   const inspection = await handle.harness.inspect(handle.context);
   const groups = new Map<

@@ -8,19 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- Durable OpenCode requests now send a plain UUID as the `x-opencode-session`
-  header — the same shape Pi's own generation sends — instead of the decorated
-  `pi-task-durable-<uuid>` id. Only `opencode`/`opencode-go` requests carry the
-  header. This corrects the header format; it does not by itself resolve the
-  `400 {"model":"deepseek-flash"}` failure still open on `opencode-go` (the
-  same error appears with either value).
-
 - Durable children now run at the agent's configured `thinking` level. The
   durable path stored only the model and cwd, so a child fell back to the
-  harness default; for a model whose `thinkingLevelMap.off` maps to a provider
-  effort (for example `"disable"`), that could send an effort the provider
-  rejects. Agent frontmatter levels are validated before they reach
-  `pi.agent.thinkingLevel`; unrecognized values are still left unset.
+  harness default `off`; for `opencode-go/deepseek-flash`, whose
+  `thinkingLevelMap.off` maps to `"disable"`, that made the provider reject the
+  request with `400 {"model":"deepseek-flash"}`. Agent frontmatter levels are
+  validated before they reach `pi.agent.thinkingLevel`; unrecognized values are
+  still left unset. Verified live: a `general` task on
+  `opencode-go/deepseek-flash` now completes with `thinkingLevel: "high"`
+  stored on the child.
+
+- Durable OpenCode requests send a plain UUID as the `x-opencode-session`
+  header — the same shape Pi's own generation sends — instead of the decorated
+  `pi-task-durable-<uuid>` id. Only `opencode`/`opencode-go` requests carry the
+  header. This corrects the header format; it was not the cause of the
+  `400 {"model":"deepseek-flash"}` failure (both values produced the same
+  error).
 
 ## [0.10.0] - 2026-10-04
 

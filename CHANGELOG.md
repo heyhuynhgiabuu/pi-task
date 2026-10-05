@@ -4,6 +4,69 @@ All notable changes to `@heyhuynhgiabuu/pi-task` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.11.0] - 2026-10-06
+
+### Added
+
+- Child-scoped built-in commands: searchable `/model`, `/thinking`, `/session`
+  and `/resume` pickers rendered inside the child transcript overlay, isolated
+  from parent session defaults (shared-default saving is disabled; historical
+  children stay read-only).
+
+- Live child usage metadata above the child input: cumulative tokens and cost,
+  latest-assistant cache-hit ratio, and the child model's own context usage.
+  Values come from the child's durable ledger, SDK session, or persisted JSONL
+  (signature-cached, no per-render reads). Context reports unknown after
+  compaction or reset until a new measurement exists, and subscription /
+  auto-compaction badges appear only on explicit child signals.
+
+- Owner-scoped `/agents`: the switcher lists every child belonging to the
+  current parent session across leaves, deduplicates runtime state against
+  persisted history, and hydrates transcripts from the exact recorded source.
+
+- Plain left/right navigation between child sessions from the same focused
+  `/agents` ordering. Arrows act only when the editor is exactly empty with no
+  autocomplete or subview open; boundaries clamp and never select main; stale
+  or failed loads keep the current view and its draft.
+
+- Tightened child handoff contract: role-neutral integrity bullets, read-only
+  and no-side-effect constraints must be honored during verification, and a
+  child can no longer end without a report (blocked status states what is
+  missing instead of an empty result).
+
+### Changed
+
+- `/agents` selections no longer create native Pi snapshot sessions. Live and
+  finished children open as steerable overlays; historical children open as
+  read-only transcripts with their snapshot metadata (previously rebuilt
+  snapshots showed the parent's model with zero usage and forked a new session
+  file on every activation). Existing snapshot sessions keep working and
+  return to their parent through `/agents` → main.
+
+- Child status and usage stats share one summary row above the input
+  (`reviewer — description · running · elapsed · tools · ↑in ↓out R $cost
+  context`), separated by ` · `. Narrow widths truncate the description before
+  the stats and never add a second metadata row.
+
+### Fixed
+
+- Durable child attribution: the conversation id is persisted when the child
+  is admitted instead of at settlement, and background terminal writes no
+  longer clobber it with an unset value, so completed children stay browsable
+  from `/agents` and `←/→` after a restart. Legacy history rows missing the id
+  are resolved from the task-id-specific durable owner mapping; explicitly
+  mismatched or foreign-owner rows still fail closed.
+
+- Model-less durable requests are rejected before a child mapping is created,
+  leaving no orphan steerable state (the original admission failed only after
+  `no_model` settlement).
+
+### Removed
+
+- The inert `canReplaceSession` controller dependency. Hosts constructing
+  `TaskWidgetControllerDeps` manually no longer need to provide it; session
+  replacement decisions now live entirely in Pi's native switching flow.
+
 ## [0.10.1] - 2026-10-04
 
 ### Fixed

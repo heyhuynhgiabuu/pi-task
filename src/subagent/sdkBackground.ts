@@ -90,7 +90,9 @@ export function startSdkBackgroundTask<TResult extends SdkBackgroundResult>(
       piDir: input.piDir,
       dir: input.artifactsDir,
       cwd: input.cwd,
-      conversationId: input.conversationId,
+      ...(input.conversationId !== undefined
+        ? { conversationId: input.conversationId }
+        : {}),
       backend: input.backend ?? "sdk",
       ...(input.durableRequestId !== undefined
         ? { durableRequestId: input.durableRequestId }

@@ -13,6 +13,9 @@ import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
 import { join } from "node:path";
 
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
+import { readTaskSessionHistory } from "../conversation.js";
+import { DurableTranscript, type DurableChildHistoryTranscript } from "../panel/durable-transcript.js";
 import { createTaskFastModeModelMatcher } from "../fast-mode.js";
 import {
   classifyModelFailover,
@@ -23,6 +26,10 @@ import type { AgentModelSpec } from "../helpers.js";
 import type {
   ChildBuiltinCommand,
   ChildBuiltinCommandResult,
+  ChildHistoryOption,
+  ChildHistoryPickerData,
+  ChildSessionInfo,
+  TaskSessionHistoryEntry,
 } from "../types.js";
 
 /** The subset of the pi-durable module the backend uses. */
@@ -455,6 +462,32 @@ async function findChild(
   }, handle.context);
   if (childId === undefined) return undefined;
   return handle.harness.conversation(childId, handle.context);
+}
+
+/**
+ * True while this task's run still owns the child conversation: the request
+ * is admitting, or it is running with a live, non-terminal harness task. This
+ * is the admission predicate `configureActiveDurableChild` applies atomically
+ * with its change; compact re-checks it before admitting a task of its own.
+ */
+async function durableChildRunActive(
+  handle: DurableHarnessHandle,
+  conversation: import("@earendil-works/pi-durable").Conversation,
+  taskId: string,
+): Promise<boolean> {
+  return conversation.commit(async (tx) => {
+    const runs = await tx.doc(handle.runsDoc, conversation.id);
+    const requestId = runs.activeByTask[taskId];
+    const run = requestId ? runs.byRequestId[requestId] : undefined;
+    if (!run || run.taskId !== taskId) return false;
+    if (run.status === "admitting") return true;
+    if (run.status !== "running") return false;
+    const live = await tx.doc(handle.module.LiveDoc, conversation.id);
+    if (!live.run) return false;
+    const task = await tx.task(live.run.taskId);
+    return !!task && !task.abortRequested &&
+      task.state.status !== "completing" && task.state.status !== "terminal";
+  }, handle.context);
 }
 
 /** Apply an agent change only while this task still owns its child run. */
@@ -1230,6 +1263,12 @@ export async function runDurableTask(input: {
   // child state exists, exactly as before failover existed.
   if (!input.modelSpecs?.length && attempts[0]?.error) throw attempts[0].error;
   const primary = attempts.find((attempt) => attempt.ref !== undefined);
+  if (!primary && attempts.every((attempt) => attempt.error === undefined)) {
+    // Do not persist an owner mapping for an ownerless conversation when no
+    // model can possibly submit the initial durable request. Once a submission
+    // exists, recovery remains conservative and never replays it here.
+    throw new Error("No model available for durable subagent execution");
+  }
   const childId = await findOrCreateChild(
     handle,
     durableOwnerKey(input.taskId),
@@ -1603,23 +1642,15 @@ export async function steerDurableTask(
   return admitted ? null : `Durable task ${taskId} is no longer running; steering was not admitted.`;
 }
 
-const DURABLE_THINKING_LEVELS: readonly DurableThinkingLevel[] = [
-  "off",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-];
-
 function durableThinkingLevels(
   model: import("@earendil-works/pi-ai").Model<import("@earendil-works/pi-ai").Api> | undefined,
 ): DurableThinkingLevel[] {
-  if (!model?.reasoning) return ["off"];
-  return DURABLE_THINKING_LEVELS.filter(
-    (level) => model.thinkingLevelMap?.[level] !== null,
-  );
+  if (!model) return ["off"];
+  // Pi's canonical rule: a non-reasoning model supports only `off`; `xhigh`
+  // and `max` are accepted only when `thinkingLevelMap` explicitly maps them,
+  // and every other level is accepted unless it is explicitly mapped to null.
+  // Delegating keeps the durable clamp identical to the parent session's.
+  return getSupportedThinkingLevels(model);
 }
 
 function durableModelForArgument(
@@ -1639,10 +1670,135 @@ function durableModelForArgument(
   ) as import("@earendil-works/pi-ai").Model<import("@earendil-works/pi-ai").Api> | undefined;
 }
 
+type DurableHistoryEntry = TaskSessionHistoryEntry;
+
+function historyOption(entry: DurableHistoryEntry): ChildHistoryOption {
+  return {
+    taskId: entry.id,
+    agentType: entry.agentType,
+    description: entry.description,
+    sessionName: entry.sessionName,
+    status: entry.status,
+    ...(entry.cwd ? { cwd: entry.cwd } : {}),
+    startedAt: entry.startedAt,
+    ...(typeof entry.completedAt === "number" ? { completedAt: entry.completedAt } : {}),
+  };
+}
+
+async function scopedDurableHistory(
+  handle: DurableHarnessHandle,
+  piDir: string,
+  currentTaskId: string,
+): Promise<{ current: DurableHistoryEntry; entries: DurableHistoryEntry[] }> {
+  const history = readTaskSessionHistory(piDir);
+  const current = history.find((entry) => entry.id === currentTaskId);
+  if (!current || current.backend !== "durable" || current.runtime === "claude") {
+    throw new Error(`No durable child history is attributed to task ${currentTaskId}.`);
+  }
+  const children = await handle.harness.snapshot(handle.children, handle.context);
+  const mappedConversationId = (entry: DurableHistoryEntry): string | undefined => {
+    if (entry.backend !== "durable" || entry.runtime === "claude") return undefined;
+    const owned = children?.byOwner[durableOwnerKey(entry.id)];
+    if (!owned || owned.conversationId === undefined) return undefined;
+    const conversationId = String(owned.conversationId);
+    // A missing legacy field may be recovered only from the task-id-specific
+    // durable owner map. Any recorded value remains an assertion to verify.
+    if (
+      entry.conversationId !== undefined &&
+      (typeof entry.conversationId !== "string" || entry.conversationId !== conversationId)
+    ) return undefined;
+    return conversationId;
+  };
+  const currentConversationId = mappedConversationId(current);
+  // The current task must be a valid entrypoint, but owner session/leaf metadata
+  // intentionally does not narrow this project-database browsing history.
+  if (currentConversationId === undefined) {
+    throw new Error(`Durable ownership metadata does not match task ${currentTaskId}.`);
+  }
+  const entries = history.flatMap((entry) => {
+    const conversationId = mappedConversationId(entry);
+    return conversationId === undefined ? [] : [{ ...entry, conversationId }];
+  });
+  return {
+    current: { ...current, conversationId: currentConversationId },
+    entries,
+  };
+}
+
+/**
+ * Read a selected durable task's transcript for browsing, verifying its
+ * project task-history entry against the durable byOwner mapping. This is a
+ * snapshot read only: no task is resumed, steered, or adopted into active maps.
+ */
+export async function readDurableTaskHistoryTranscript(
+  piDir: string,
+  currentTaskId: string,
+  selectedTaskId: string,
+  options: {
+    databasePath?: string;
+    models?: DurableModelsFactory;
+    modelRegistry?: DurableRuntimeModelRegistry;
+  } = {},
+): Promise<DurableChildHistoryTranscript> {
+  const handle = await openDurableHarness(piDir, options);
+  const { entries } = await scopedDurableHistory(handle, piDir, currentTaskId);
+  const selected = entries.find((entry) => entry.id === selectedTaskId);
+  if (!selected?.conversationId) {
+    throw new Error(`Durable child task ${selectedTaskId} is not in this task's attributed history.`);
+  }
+  const conversation = await handle.harness.conversation(selected.conversationId as unknown as ConversationId, handle.context);
+  if (!conversation) throw new Error(`Durable child conversation for task ${selectedTaskId} is unavailable.`);
+  const stream = await handle.module.watchEvents(handle.harness, conversation.id, handle.context);
+  try {
+    const transcript = new DurableTranscript(stream.snapshot);
+    return {
+      option: historyOption(selected),
+      items: transcript.items(),
+      agent: transcript.agentState(),
+      metadata: transcript.usageMetadata(),
+    };
+  } finally {
+    try {
+      await stream.stop();
+    } catch {
+      // A static snapshot is already captured; watcher cleanup must not hide it.
+    }
+  }
+}
+
+/**
+ * Read one durable child selected from /agents' parent-session-scoped history.
+ * The owner check narrows the caller-facing list; the ordinary reader below is
+ * still used with the selected task as its entrypoint, so its durable byOwner
+ * mapping check remains authoritative and cannot be bypassed by this adapter.
+ */
+export async function readDurableTaskHistoryTranscriptForOwner(
+  piDir: string,
+  ownerSessionId: string,
+  selectedTaskId: string,
+  options: {
+    databasePath?: string;
+    models?: DurableModelsFactory;
+    modelRegistry?: DurableRuntimeModelRegistry;
+  } = {},
+): Promise<DurableChildHistoryTranscript> {
+  const selected = readTaskSessionHistory(piDir).find((entry) => entry.id === selectedTaskId);
+  if (
+    !ownerSessionId ||
+    !selected ||
+    selected.ownerSessionId !== ownerSessionId ||
+    selected.backend !== "durable" ||
+    selected.runtime === "claude"
+  ) {
+    throw new Error(`Durable child task ${selectedTaskId} is not attributed to this parent session.`);
+  }
+  return readDurableTaskHistoryTranscript(piDir, selectedTaskId, selectedTaskId, options);
+}
+
 /**
  * Run one child-scoped control against the durable child conversation. The
  * active-run check prevents a stale task row from mutating a settled child;
- * no operation reaches the parent's session or command dispatcher.
+ * read-only session/history browsing remains available after settlement.
  */
 export async function executeDurableChildBuiltinCommand(
   piDir: string,
@@ -1661,21 +1817,26 @@ export async function executeDurableChildBuiltinCommand(
     const conversation = await findChild(handle, taskId);
     if (!conversation) return failure(`No durable child conversation for task ${taskId}.`);
 
-    const active = await conversation.commit(async (tx) => {
-      const runs = await tx.doc(handle.runsDoc, conversation.id);
-      const requestId = runs.activeByTask[taskId];
-      const run = requestId ? runs.byRequestId[requestId] : undefined;
-      if (!run || run.taskId !== taskId) return false;
-      if (run.status === "admitting") return true;
-      if (run.status !== "running") return false;
-      const live = await tx.doc(handle.module.LiveDoc, conversation.id);
-      if (!live.run) return false;
-      const task = await tx.task(live.run.taskId);
-      return !!task && !task.abortRequested &&
-        task.state.status !== "completing" && task.state.status !== "terminal";
-    }, handle.context);
-    if (!active) {
+    const active = await durableChildRunActive(handle, conversation, taskId);
+    if (!active && !(
+      (command.name === "session" || command.name === "resume") && !command.argument
+    )) {
       return failure(`Durable task ${taskId} is no longer active; its child transcript is read-only.`);
+    }
+
+    if (command.name === "resume") {
+      if (command.argument) return failure("Use /resume without an argument to browse durable child history.");
+      const { entries } = await scopedDurableHistory(handle, piDir, taskId);
+      const historyPicker: ChildHistoryPickerData = {
+        currentTaskId: taskId,
+        sessions: entries
+          .map(historyOption)
+          .sort((left, right) => right.startedAt - left.startedAt || left.taskId.localeCompare(right.taskId)),
+      };
+      return {
+        ...info("Choose a mapped durable child transcript from this project's database; execution and task ownership are unchanged."),
+        historyPicker,
+      };
     }
 
     const agent = await conversation.agent(handle.context);
@@ -1686,9 +1847,22 @@ export async function executeDurableChildBuiltinCommand(
       if (!command.argument) {
         const current = agent.model ? `${agent.model.provider}/${agent.model.modelId}` : "none";
         const choices = models.map((model) => `${model.provider}/${model.id}`);
-        return info(
-          `Child model: ${current}. Set with /model <provider/model>. Available: ${choices.join(", ") || "none"}.`,
-        );
+        return {
+          ...info(
+            `Child model: ${current}. Set with /model <provider/model>. Available: ${choices.join(", ") || "none"}.`,
+          ),
+          selector: {
+            kind: "model",
+            models: models.map((model) => ({
+              provider: model.provider,
+              id: model.id,
+              name: model.name || model.id,
+            })),
+            ...(agent.model
+              ? { currentModel: { provider: agent.model.provider, id: agent.model.modelId } }
+              : {}),
+          },
+        };
       }
       const model = durableModelForArgument(handle, command.argument);
       if (!model || (model.type !== undefined && model.type !== "chat")) {
@@ -1719,9 +1893,16 @@ export async function executeDurableChildBuiltinCommand(
         : undefined;
       const levels = durableThinkingLevels(model);
       if (!command.argument) {
-        return info(
-          `Child thinking level: ${agent.thinkingLevel}. Available: ${levels.join(", ")}. Set with /thinking <level>.`,
-        );
+        return {
+          ...info(
+            `Child thinking level: ${agent.thinkingLevel}. Available: ${levels.join(", ")}. Set with /thinking <level>.`,
+          ),
+          selector: {
+            kind: "thinking",
+            currentLevel: agent.thinkingLevel as DurableThinkingLevel,
+            levels,
+          },
+        };
       }
       const level = parseDurableThinkingLevel(command.argument);
       if (!level || !levels.includes(level)) {
@@ -1742,19 +1923,85 @@ export async function executeDurableChildBuiltinCommand(
     }
 
     if (command.name === "session") {
-      const [context, usage] = await Promise.all([
+      const [context, usageState] = await Promise.all([
         conversation.context(handle.context),
-        readConversationUsage(handle, conversation.id),
+        handle.harness.snapshot(handle.usageDoc, conversation.id, handle.context),
       ]);
+      const counts = {
+        scope: "current context" as const,
+        userMessages: 0,
+        assistantMessages: 0,
+        toolCalls: 0,
+        toolResults: 0,
+        totalMessages: 0,
+      };
+      for (const message of context.messages) {
+        counts.totalMessages++;
+        if (message.role === "user") counts.userMessages++;
+        else if (message.role === "assistant") {
+          counts.assistantMessages++;
+          if (Array.isArray(message.content)) {
+            counts.toolCalls += message.content.filter((block) => block.type === "toolCall").length;
+          }
+        } else if (message.role === "toolResult") counts.toolResults++;
+      }
+      const usageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+      let usageEntries = 0;
+      for (const bucket of [usageState?.models, usageState?.tools]) {
+        for (const usage of Object.values(bucket ?? {})) {
+          if (
+            !usage ||
+            ![usage.input, usage.output, usage.cacheRead, usage.cacheWrite, usage.cost?.total]
+              .every((value) => typeof value === "number" && Number.isFinite(value))
+          ) continue;
+          usageTotals.input += usage.input;
+          usageTotals.output += usage.output;
+          usageTotals.cacheRead += usage.cacheRead;
+          usageTotals.cacheWrite += usage.cacheWrite;
+          usageTotals.cost += usage.cost.total;
+          usageEntries++;
+        }
+      }
       const model = agent.model
         ? `${agent.model.provider}/${agent.model.modelId}`
-        : "none";
-      return info([
-        `Durable child conversation ${String(conversation.id)}`,
-        `Model: ${model}; thinking: ${agent.thinkingLevel}; cwd: ${agent.cwd ?? "(default)"}`,
-        `Context messages: ${context.messages.length}`,
-        `Tokens: ${usage.totals.totalTokens} total (${usage.totals.inputTokens} input, ${usage.totals.outputTokens} output); cost: $${usage.totals.costTotal.toFixed(4)}`,
-      ].join("\n"));
+        : undefined;
+      const sessionInfo: ChildSessionInfo = {
+        sessionId: String(conversation.id),
+        storagePath: options.databasePath ?? durableDatabasePath(piDir),
+        ...(model ? { model } : {}),
+        ...(agent.thinkingLevel ? { thinkingLevel: agent.thinkingLevel } : {}),
+        ...(agent.cwd ? { cwd: agent.cwd } : {}),
+        counts,
+        ...(usageEntries > 0
+          ? {
+              tokens: {
+                input: usageTotals.input,
+                output: usageTotals.output,
+                cacheRead: usageTotals.cacheRead,
+                cacheWrite: usageTotals.cacheWrite,
+                total: usageTotals.input + usageTotals.output + usageTotals.cacheRead + usageTotals.cacheWrite,
+              },
+              cost: usageTotals.cost,
+            }
+          : {}),
+      };
+      return { ...info(`Showing session information for durable child ${String(conversation.id)}.`), sessionInfo };
+    }
+
+    if (command.name === "compact") {
+      // Conversation.compact() admits its task in a separate commit, so the
+      // same admission predicate configure applies atomically is re-checked
+      // here. A run that settles in the window is accepted: the manual
+      // compaction is then conversation-owned, may finish after this view
+      // closes, and its progress is not visible in the panel. Settlement waits
+      // for conversation idle, so manual compaction can delay task completion.
+      if (!(await durableChildRunActive(handle, conversation, taskId))) {
+        return failure(`Durable task ${taskId} settled before the child compaction was admitted; its transcript is read-only.`);
+      }
+      await conversation.compact(command.argument || undefined, handle.context);
+      return info(
+        `Compaction admitted for durable child task ${taskId}; it may finish after this view closes, and its progress is not shown in the panel. Task completion may be delayed until compaction finishes.`,
+      );
     }
 
     return failure(`/${command.name} is not implemented for durable child sessions.`);

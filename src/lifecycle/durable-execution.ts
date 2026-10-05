@@ -52,6 +52,7 @@ import type { TaskWidgetController } from "./widget.js";
 import { DurableTranscript, type DurableChildAgent } from "../panel/durable-transcript.js";
 import { isProcessAliveOrUnknown } from "../process.js";
 import type { TranscriptItem } from "../panel/transcript.js";
+import type { ChildUsageMetadata } from "../panel/child-metadata.js";
 import { startSdkBackgroundTask } from "../subagent/sdkBackground.js";
 import { ignoreStaleExtensionCtx } from "../stale-ctx.js";
 import { completionDeliveryId, sendCompletionNotice } from "./completion.js";
@@ -122,6 +123,7 @@ export async function resumeDurableAfterRestart(deps: {
     toolUses: number,
     /** The child conversation's own `pi.agent` state, when it has one. */
     agent?: DurableChildAgent,
+    metadata?: ChildUsageMetadata,
   ) => void;
   onTaskWatchError?: (
     taskId: string,
@@ -219,6 +221,7 @@ export async function resumeDurableAfterRestart(deps: {
           transcript.items(),
           transcript.toolCallCount(),
           transcript.agentState(),
+          transcript.usageMetadata(),
         );
       },
       onEvents: (taskId, events) => {
@@ -229,6 +232,7 @@ export async function resumeDurableAfterRestart(deps: {
           transcript.apply(events),
           transcript.toolCallCount(),
           transcript.agentState(),
+          transcript.usageMetadata(),
         );
       },
       onWatchError: (taskId, error) => {
@@ -515,7 +519,13 @@ export async function executeDurableTask({
   const updateTranscript = (items: readonly TranscriptItem[], toolUses: number) => {
     const task = backgroundTasks.get(id) ?? foregroundTasks.get(id);
     if (task) task.toolUses = toolUses;
-    taskWidget.setLiveTranscript(id, items, toolUses, progressTranscript?.agentState());
+    taskWidget.setLiveTranscript(
+      id,
+      items,
+      toolUses,
+      progressTranscript?.agentState(),
+      progressTranscript?.usageMetadata(),
+    );
   };
   const showProgressFailure = () => {
     if (progressFailureShown) return;
@@ -553,7 +563,9 @@ export async function executeDurableTask({
    * flight: a crash during a fallback attempt must recover that attempt, not
    * the settled primary it replaced.
    */
+  let historyRequestId = requestId;
   const noteAttemptRequestId = (attemptRequestId: string) => {
+    historyRequestId = attemptRequestId;
     try {
       upsertTaskSessionHistory(piDir, {
         ...historyBase,
@@ -594,6 +606,16 @@ export async function executeDurableTask({
       onSubmitted: (childConversationId) => {
         const task = backgroundTasks.get(id) ?? foregroundTasks.get(id);
         if (task) task.conversationId = childConversationId;
+        historyBase.conversationId = childConversationId;
+        try {
+          upsertTaskSessionHistory(piDir, {
+            ...historyBase,
+            status: "running",
+            durableRequestId: historyRequestId,
+          });
+        } catch {
+          // Best-effort attribution; a settled completion writes it again.
+        }
       },
     }).then((result) => ({ output: result.answer, usage: result.usage }));
 

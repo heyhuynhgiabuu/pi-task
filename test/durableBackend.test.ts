@@ -1425,6 +1425,41 @@ test("runDurableTask answers, reuses the child on rerun, rejects idle steering, 
   }
 });
 
+test("a no-model admission failure does not leave a mapped child that can poison later control", async () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-durable-no-model-child-"));
+  const models = createModels();
+  models.getAllModels = () => [];
+  models.getModel = () => undefined;
+  const modelFactory = () => models;
+  let handle: Awaited<ReturnType<typeof openDurableHarness>> | undefined;
+  try {
+    await assert.rejects(
+      runDurableTask({
+        piDir,
+        taskId: "no-model-child",
+        task: "This cannot be admitted without a model.",
+        models: modelFactory,
+      }),
+      /No model available for durable subagent execution/,
+    );
+    handle = await openDurableHarness(piDir, { models: modelFactory });
+    const children = await handle.harness.snapshot(handle.children, handle.context);
+    assert.equal(
+      children?.byOwner["pi-task:no-model-child"],
+      undefined,
+      "a failed no-model attempt must not persist an owner mapping for an unusable conversation",
+    );
+    assert.match(
+      (await steerDurableTask(piDir, "no-model-child", "Follow up.")) ?? "",
+      /No durable child conversation/,
+      "control cannot target an orphaned conversation after no_model",
+    );
+  } finally {
+    if (handle) await handle.harness.close(handle.context);
+    rmSync(piDir, { recursive: true, force: true });
+  }
+});
+
 test("foreground durable work registers and opens its task view until the result is ready", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-task-durable-foreground-view-"));
   const foregroundTasks = new Map<string, import("../src/types.js").BackgroundTask>();
@@ -1432,6 +1467,7 @@ test("foreground durable work registers and opens its task view until the result
   let closedTaskId: string | undefined;
   let submittedRequestId: string | undefined;
   let registeredWhileRunning = false;
+  let attributedBeforeSettlement = false;
   let finishedTask: import("../src/types.js").BackgroundTask | undefined;
   const liveTranscriptUpdates: (readonly { type: string; text?: string }[])[] = [];
   try {
@@ -1473,6 +1509,10 @@ test("foreground durable work registers and opens its task view until the result
       runTask: async (input) => {
         submittedRequestId = input.requestId;
         registeredWhileRunning = foregroundTasks.has("t-foreground-view");
+        input.onSubmitted?.("durable-foreground-child");
+        attributedBeforeSettlement = readTaskSessionHistory(join(root, ".pi")).find(
+          (entry) => entry.id === "t-foreground-view",
+        )?.conversationId === "durable-foreground-child";
         input.onSnapshot?.({
           type: "snapshot",
           entries: [],
@@ -1519,6 +1559,7 @@ test("foreground durable work registers and opens its task view until the result
     assert.equal(closedTaskId, "t-foreground-view", "the task view closes when the synchronous call settles");
     assert.equal(foregroundTasks.has("t-foreground-view"), false, "active row is removed after settlement");
     assert.equal(submittedRequestId, "pi-task:t-foreground-view:call:call-foreground-view");
+    assert.equal(attributedBeforeSettlement, true, "submission admission immediately persists the child conversation identity");
     assert.equal(finishedTask?.status, "done", "finished task is retained with its outcome");
     assert.equal(finishedTask?.backend, "durable");
     assert.equal(finishedTask?.toolUses, 1, "live tool-call events update the foreground activity count");
@@ -1532,6 +1573,11 @@ test("foreground durable work registers and opens its task view until the result
       (entry) => entry.id === "t-foreground-view",
     );
     assert.equal(foregroundHistory?.backend, "durable", "foreground task history preserves backend identity");
+    assert.equal(
+      foregroundHistory?.conversationId,
+      "durable-foreground-child",
+      "the durable conversation attribution survives the terminal history upsert",
+    );
     assert.equal(
       foregroundHistory?.durableRequestId,
       "pi-task:t-foreground-view:call:call-foreground-view",
@@ -1809,6 +1855,85 @@ test("foreground task control latches cancellation before durable submission adm
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+for (const outcome of ["done", "failed"] as const) {
+  test(`durable background ${outcome} history preserves the admitted conversation id`, async () => {
+    const root = mkdtempSync(join(tmpdir(), `pi-task-durable-history-attribution-${outcome}-`));
+    const piDir = join(root, ".pi");
+    const taskId = `t-history-attribution-${outcome}`;
+    const models = createModels();
+    const faux = fauxProvider({ models: [{ id: "faux-1" }] });
+    models.setProvider(faux.provider);
+    faux.setResponses([outcome === "done"
+      ? fauxAssistantMessage("<status>success</status>\n<summary>Finished.</summary>")
+      : fauxAssistantMessage("", {
+          stopReason: "error",
+          errorMessage: "synthetic durable failure",
+        })]);
+    const modelFactory = () => models;
+    let admittedConversationId: string | undefined;
+    let attributedAtAdmission = false;
+    let handle: Awaited<ReturnType<typeof openDurableHarness>> | undefined;
+    try {
+      handle = await openDurableHarness(piDir, { models: modelFactory });
+      await executeDurableTask({
+        id: taskId,
+        agent: {
+          name: "general",
+          description: "General task",
+          body: "",
+          source: "project",
+          path: "test-agent.md",
+        },
+        description: "Preserve durable history attribution",
+        sessionName: `task-${taskId}`,
+        prompt: "Finish the task.",
+        cwd: root,
+        ctx: { modelRegistry: {} } as never,
+        pi: { sendMessage: () => {} } as never,
+        piDir,
+        artifactsDir: join(piDir, "artifacts"),
+        isBackground: true,
+        backgroundTasks: new Map(),
+        foregroundTasks: new Map(),
+        deliveryGuard: new DeliveryGuard(),
+        taskWidget: { noteTaskFinished: () => {}, setLiveTranscript: () => {} } as never,
+        clearTaskWidgetIfIdle: () => {},
+        ensureTaskWidget: () => {},
+        enqueueDelivery: (delivery) => delivery(),
+        runTask: (input) => runDurableTask({
+          ...input,
+          models: modelFactory,
+          onSubmitted: (conversationId) => {
+            admittedConversationId = conversationId;
+            input.onSubmitted?.(conversationId);
+            attributedAtAdmission = readTaskSessionHistory(piDir).find(
+              (entry) => entry.id === taskId,
+            )?.conversationId === conversationId;
+          },
+        }),
+      });
+
+      const terminalStatus = outcome === "done" ? "done" : "failed";
+      let history = readTaskSessionHistory(piDir).find((entry) => entry.id === taskId);
+      for (let waited = 0; waited < 2_000 && history?.status !== terminalStatus; waited += 10) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        history = readTaskSessionHistory(piDir).find((entry) => entry.id === taskId);
+      }
+      assert.equal(attributedAtAdmission, true, "admission persists the known durable child identity");
+      assert.ok(admittedConversationId, "the durable child was admitted");
+      assert.equal(history?.status, terminalStatus, "the detached lifecycle settled as requested");
+      assert.equal(
+        history?.conversationId,
+        admittedConversationId,
+        `${terminalStatus} history keeps the durable child identity written at admission`,
+      );
+    } finally {
+      if (handle) await handle.harness.close(handle.context);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
 
 test("durable background completion receipt carries its usage ledger", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-task-durable-receipt-"));

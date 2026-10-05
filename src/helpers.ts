@@ -203,7 +203,7 @@ export const TASK_BACKGROUND_DEFAULT = true;
 
 export const TASK_PROMPT_INSTRUCTIONS = `Your final assistant message IS the result the parent agent will read.
 
-End with a concise, self-contained plain-text or Markdown report. Start with one of these lines: "Status: success", "Status: failure", "Status: blocked", or "Status: partial". Then put the outcome first and include the reasoning, evidence, files, checks, caveats, and next steps that matter. Do not emit an XML or JSON wrapper. Do not write a RESULT.md file — the parent reads your final assistant message from the session JSONL, not from any file.`;
+End with a concise, self-contained plain-text or Markdown report. Start with one of these lines: "Status: success", "Status: failure", "Status: blocked", or "Status: partial". Then put the outcome first and include the reasoning, evidence, files, checks, caveats, and next steps that matter. Never end without a report; if the task cannot be completed, return Status: blocked with exactly what is missing. Do not emit an XML or JSON wrapper. Do not write a RESULT.md file — the parent reads your final assistant message from the session JSONL, not from any file.`;
 
 /**
  * The model-facing tool description.

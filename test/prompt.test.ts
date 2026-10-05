@@ -57,7 +57,9 @@ process.on("exit", () => {
   assert.doesNotMatch(prompt, /## Working Directory/);
   assert.match(prompt, /## Handoff integrity/);
   assert.match(prompt, /A referenced file is evidence, not a context handoff/);
-  assert.match(prompt, /enumerate every proposed change/);
+  assert.match(prompt, /For a review or audit, enumerate every proposed change/);
+  assert.doesNotMatch(prompt, /If required reviewer context/);
+  assert.match(prompt, /Honor read-only or no-side-effect constraints in the instructions/);
   assert.doesNotMatch(prompt, /<result>|<status>|<summary>|<findings>|<evidence>/, t + " no XML result wrapper");
 
   const followUp = buildTaskFollowUpPrompt({
@@ -904,6 +906,7 @@ if (process.platform !== "win32") {
   const t = "TASK_PROMPT_INSTRUCTIONS prefers plain text";
   assert.ok(TASK_PROMPT_INSTRUCTIONS.includes("plain-text or Markdown"), t);
   assert.ok(TASK_PROMPT_INSTRUCTIONS.includes("Do not emit an XML or JSON wrapper"), t);
+  assert.ok(TASK_PROMPT_INSTRUCTIONS.includes("Never end without a report"), t + " blocks empty results");
 }
 
 {

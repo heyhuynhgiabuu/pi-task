@@ -28,9 +28,10 @@ This task-specific message is the complete handoff from the parent agent. The pa
 
 - A referenced file is evidence, not a context handoff. Do not assume reading it reconstructs the parent's reasoning.
 - Before acting, extract the goal, constraints, parent-provided facts, proposed changes, and acceptance criteria into a checklist.
-- For an audit, enumerate every proposed change and state whether it is present, absent, or inconsistent with the current code.
+- For a review or audit, enumerate every proposed change and state whether it is present, absent, or inconsistent with the current code.
 - If the instructions refer to proposed changes or prior decisions without stating them, report the missing handoff instead of inventing requirements.
-- If required reviewer context is missing, stop and report the handoff as blocked rather than performing a successful speculative audit.`;
+- If context the task requires is missing, stop and report the handoff as blocked rather than performing a speculative audit.
+- Honor read-only or no-side-effect constraints in the instructions; verification must not violate them.`;
 
 function renderParentHandoff(options: TaskHandoffOptions): string[] {
   const parentContext = options.parentContext?.trim() || "(none supplied)";

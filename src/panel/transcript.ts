@@ -8,6 +8,8 @@
 
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
+import type { ChildSessionInfo } from "../types.js";
+import type { ChildUsageMetadata } from "./child-metadata.js";
 
 export const MAX_TRANSCRIPT_ITEMS = 400;
 
@@ -70,14 +72,23 @@ export interface TranscriptReadResult {
   found: boolean;
   /** Absent when the session recorded neither a model nor a thinking level. */
   meta?: ChildSessionMeta;
+  /** Identity and billed usage parsed from this child session file only. */
+  sessionInfo?: ChildSessionInfo;
+  /** Cumulative usage and latest trustworthy context measured from this child file. */
+  childMetadata?: ChildUsageMetadata;
 }
 
 interface JsonlEntry {
   type?: string;
+  id?: string;
+  parentId?: string | null;
   timestamp?: string;
+  cwd?: string;
+  name?: string;
   provider?: string;
   modelId?: string;
   thinkingLevel?: string;
+  usage?: unknown;
   message?: {
     role?: string;
     content?: unknown;
@@ -86,6 +97,7 @@ interface JsonlEntry {
     details?: unknown;
     isError?: boolean;
     stopReason?: string;
+    usage?: unknown;
   };
 }
 
@@ -207,6 +219,58 @@ export function readTaskTranscript(
   return readTaskSessionFile(file);
 }
 
+interface SessionUsageTotals {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cost: number;
+}
+
+function addSessionUsage(totals: SessionUsageTotals, value: unknown): boolean {
+  if (!isRecord(value) || !isRecord(value.cost)) return false;
+  const fields = [value.input, value.output, value.cacheRead, value.cacheWrite, value.cost.total];
+  if (!fields.every((field) => typeof field === "number" && Number.isFinite(field))) return false;
+  totals.input += value.input as number;
+  totals.output += value.output as number;
+  totals.cacheRead += value.cacheRead as number;
+  totals.cacheWrite += value.cacheWrite as number;
+  totals.cost += value.cost.total as number;
+  return true;
+}
+
+function promptTokensOf(value: unknown): number | undefined {
+  if (!isRecord(value)) return undefined;
+  const fields = [value.input, value.cacheRead, value.cacheWrite];
+  if (!fields.every((field) => typeof field === "number" && Number.isFinite(field) && field >= 0)) {
+    return undefined;
+  }
+  return (value.input as number) + (value.cacheRead as number) + (value.cacheWrite as number);
+}
+
+/** Use the final file entry's parent chain to avoid borrowing a compacted abandoned branch. */
+function activeSessionBranch(entries: readonly JsonlEntry[]): JsonlEntry[] {
+  if (entries.length === 0) return [];
+  const hasCompleteTree = entries.every(
+    (entry) => typeof entry.id === "string" && Object.prototype.hasOwnProperty.call(entry, "parentId"),
+  );
+  if (!hasCompleteTree) return [...entries];
+  const byId = new Map(entries.map((entry) => [entry.id!, entry]));
+  let current = entries.at(-1)!;
+  const branch: JsonlEntry[] = [];
+  const visited = new Set<string>();
+  while (current && typeof current.id === "string" && !visited.has(current.id)) {
+    visited.add(current.id);
+    branch.unshift(current);
+    if (current.parentId === null) return branch;
+    if (typeof current.parentId !== "string") return [...entries];
+    const parent = byId.get(current.parentId);
+    if (!parent) return [...entries];
+    current = parent;
+  }
+  return branch.length > 0 ? branch : [...entries];
+}
+
 /**
  * Parse one exact session JSONL. The transcript view uses this for SDK tasks
  * whose live session path is captured when the child session opens — scanning
@@ -219,6 +283,18 @@ export function readTaskSessionFile(file: string): TranscriptReadResult {
   const items: TranscriptItem[] = [];
   const pendingTools = new Map<string, TranscriptItem & { type: "tool" }>();
   const meta: ChildSessionMeta = {};
+  const usage: SessionUsageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+  let hasUsage = false;
+  let sessionId: string | undefined;
+  let sessionName: string | undefined;
+  let cwd: string | undefined;
+  let userMessages = 0;
+  let assistantMessages = 0;
+  let toolCalls = 0;
+  let toolResults = 0;
+  let totalMessages = 0;
+  let latestCacheHitRate: number | undefined;
+  const contextEntries: JsonlEntry[] = [];
 
   const content = readFileSync(file, "utf-8");
   for (const rawLine of content.split("\n")) {
@@ -229,6 +305,20 @@ export function readTaskSessionFile(file: string): TranscriptReadResult {
       entry = JSON.parse(line) as JsonlEntry;
     } catch {
       continue;
+    }
+    if (entry.type === "session") {
+      if (typeof entry.id === "string" && entry.id) sessionId = entry.id;
+      if (typeof entry.cwd === "string" && entry.cwd) cwd = entry.cwd;
+      continue;
+    }
+    contextEntries.push(entry);
+    if (entry.type === "session_info") {
+      if (typeof entry.name === "string" && entry.name) sessionName = entry.name;
+      continue;
+    }
+    if (entry.type === "usage" || entry.type === "branch_summary" || entry.type === "compaction") {
+      hasUsage = addSessionUsage(usage, entry.usage) || hasUsage;
+      if (entry.type !== "usage") continue;
     }
     if (entry.type === "model_change") {
       const modelId = entry.modelId?.trim();
@@ -246,6 +336,17 @@ export function readTaskSessionFile(file: string): TranscriptReadResult {
     if (entry.type !== "message" || !entry.message) continue;
     const msg = entry.message;
     const timestamp = entry.timestamp ?? "";
+    totalMessages++;
+    hasUsage = addSessionUsage(usage, msg.usage) || hasUsage;
+    if (msg.role === "user") userMessages++;
+    else if (msg.role === "assistant") {
+      assistantMessages++;
+      toolCalls += extractToolCalls(msg.content).length;
+      const promptTokens = promptTokensOf(msg.usage);
+      latestCacheHitRate = promptTokens !== undefined && promptTokens > 0 && isRecord(msg.usage)
+        ? ((msg.usage.cacheRead as number) / promptTokens) * 100
+        : undefined;
+    } else if (msg.role === "toolResult") toolResults++;
 
     if (msg.role === "user") {
       const text = stripAnsiCodes(extractText(msg.content));
@@ -301,6 +402,20 @@ export function readTaskSessionFile(file: string): TranscriptReadResult {
     }
   }
 
+  // The latest assistant usage on the active branch is only a valid current
+  // context measurement after the most recent compaction/reset/context edit.
+  let contextTokens: number | null = null;
+  for (const current of activeSessionBranch(contextEntries)) {
+    if (current.type === "compaction" || current.type === "reset" || current.type === "context_edit") {
+      contextTokens = null;
+      continue;
+    }
+    if (current.type !== "message" || current.message?.role !== "assistant") continue;
+    if (current.message.stopReason === "aborted" || current.message.stopReason === "error") continue;
+    const promptTokens = promptTokensOf(current.message.usage);
+    if (promptTokens !== undefined && promptTokens > 0) contextTokens = promptTokens;
+  }
+
   // Keep the latest items (live view tails the conversation).
   if (items.length > MAX_TRANSCRIPT_ITEMS) {
     items.splice(0, items.length - MAX_TRANSCRIPT_ITEMS);
@@ -309,6 +424,40 @@ export function readTaskSessionFile(file: string): TranscriptReadResult {
     items,
     found: true,
     ...(meta.model === undefined && meta.thinkingLevel === undefined ? {} : { meta }),
+    sessionInfo: {
+      ...(sessionId ? { sessionId } : {}),
+      ...(sessionName ? { sessionName } : {}),
+      storagePath: file,
+      ...(meta.model ? { model: meta.model } : {}),
+      ...(meta.thinkingLevel ? { thinkingLevel: meta.thinkingLevel } : {}),
+      ...(cwd ? { cwd } : {}),
+      counts: {
+        scope: "session",
+        userMessages,
+        assistantMessages,
+        toolCalls,
+        toolResults,
+        totalMessages,
+      },
+      ...(hasUsage
+        ? {
+            tokens: {
+              input: usage.input,
+              output: usage.output,
+              cacheRead: usage.cacheRead,
+              cacheWrite: usage.cacheWrite,
+              total: usage.input + usage.output + usage.cacheRead + usage.cacheWrite,
+            },
+            cost: usage.cost,
+          }
+        : {}),
+    },
+    childMetadata: {
+      ...(meta.model === undefined ? {} : { model: meta.model }),
+      usageTotals: { ...usage },
+      ...(latestCacheHitRate === undefined ? {} : { latestCacheHitRate }),
+      contextUsage: { tokens: contextTokens },
+    },
   };
 }
 

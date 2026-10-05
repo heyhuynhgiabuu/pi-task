@@ -1,5 +1,14 @@
-import type { AgentEvent, SnapshotEvent } from "@earendil-works/pi-durable";
+import {
+  CompactionEntry,
+  ResetEntry,
+  type AgentEvent,
+  type EntryRecord,
+  type SnapshotEvent,
+  type UsageState,
+} from "@earendil-works/pi-durable";
 import type { Message } from "@earendil-works/pi-ai";
+import type { ChildHistoryOption } from "../types.js";
+import type { ChildUsageMetadata } from "./child-metadata.js";
 import { MAX_TRANSCRIPT_ITEMS, type TranscriptItem } from "./transcript.js";
 
 type ToolTranscriptItem = Extract<TranscriptItem, { type: "tool" }>;
@@ -11,6 +20,40 @@ type ContentBlock =
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function usageParts(value: unknown): {
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
+  cost: number;
+} | undefined {
+  if (!isRecord(value) || !isRecord(value.cost)) return undefined;
+  const fields = [value.input, value.output, value.cacheRead, value.cacheWrite, value.cost.total];
+  if (!fields.every((field) => typeof field === "number" && Number.isFinite(field) && field >= 0)) {
+    return undefined;
+  }
+  return {
+    input: value.input as number,
+    output: value.output as number,
+    cacheRead: value.cacheRead as number,
+    cacheWrite: value.cacheWrite as number,
+    cost: value.cost.total as number,
+  };
+}
+
+function addUsage(
+  total: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number },
+  value: unknown,
+): void {
+  const usage = usageParts(value);
+  if (!usage) return;
+  total.input += usage.input;
+  total.output += usage.output;
+  total.cacheRead += usage.cacheRead;
+  total.cacheWrite += usage.cacheWrite;
+  total.cost += usage.cost;
 }
 
 /**
@@ -126,6 +169,14 @@ export interface DurableChildAgent {
   cwd?: string;
 }
 
+/** Read-only durable task history hydration; contains no lifecycle controls. */
+export interface DurableChildHistoryTranscript {
+  option: ChildHistoryOption;
+  items: TranscriptItem[];
+  agent: DurableChildAgent;
+  metadata?: ChildUsageMetadata;
+}
+
 /**
  * Projects pi-durable snapshots and committed event batches into the task
  * panel's transcript format. Partial assistant text and running tool output
@@ -140,6 +191,10 @@ export class DurableTranscript {
   private countedToolCalls = new Set<string>();
   private toolCallTotal = 0;
   private agent: DurableChildAgent = {};
+  private usageState: UsageState = { models: {}, tools: {} };
+  private latestCacheHitRate: number | undefined;
+  private contextTokens: number | null = null;
+  private compactionInProgress = false;
   private partialAssistantIndex: number | undefined;
   private partialTextBlocks = new Map<number, string>();
   private partialThinkingBlocks = new Map<number, string>();
@@ -161,11 +216,40 @@ export class DurableTranscript {
     return { ...this.agent };
   }
 
+  /** Cumulative child usage plus the most recently measured prompt context. */
+  usageMetadata(): ChildUsageMetadata {
+    const usageTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+    for (const usage of Object.values(this.usageState.models ?? {})) addUsage(usageTotals, usage);
+    for (const usage of Object.values(this.usageState.tools ?? {})) addUsage(usageTotals, usage);
+    return {
+      ...(this.agent.model === undefined ? {} : { model: this.agent.model }),
+      usageTotals,
+      ...(this.latestCacheHitRate === undefined
+        ? {}
+        : { latestCacheHitRate: this.latestCacheHitRate }),
+      contextUsage: { tokens: this.contextTokens },
+    };
+  }
+
   apply(events: readonly AgentEvent[]): TranscriptItem[] {
     for (const event of events) {
       switch (event.type) {
         case "snapshot":
           this.replaceSnapshot(event);
+          break;
+        case "usage_changed":
+          this.usageState = event.usage;
+          break;
+        case "compaction_start":
+          this.compactionInProgress = true;
+          this.contextTokens = null;
+          break;
+        case "compaction_end":
+          this.compactionInProgress = false;
+          this.contextTokens = null;
+          break;
+        case "entry_appended":
+          this.observeEntryMetadata(event.entry);
           break;
         case "agent_changed":
           this.setAgentState(event.agent);
@@ -174,10 +258,14 @@ export class DurableTranscript {
           if (event.message.role === "assistant") this.writePartialAssistant(event.message, true);
           break;
         case "message_update":
+          if (!this.compactionInProgress) this.observeAssistantUsage(event.usage);
           this.applyMessageChanges(event.changes);
           break;
         case "message_end":
-          for (const message of event.entry.model ?? []) this.appendMessage(message, true);
+          for (const message of event.entry.model ?? []) {
+            this.observeMessageMetadata(message);
+            this.appendMessage(message, true);
+          }
           break;
         case "tool_execution_start":
           this.observeToolCall(event.toolCallId);
@@ -239,19 +327,26 @@ export class DurableTranscript {
 
   private replaceSnapshot(snapshot: SnapshotEvent): void {
     this.setAgentState(snapshot.agent);
+    this.usageState = snapshot.usage ?? { models: {}, tools: {} };
+    this.latestCacheHitRate = undefined;
+    this.contextTokens = null;
+    this.compactionInProgress = false;
     this.transcript = [];
     this.toolIndexes.clear();
     this.snapshotToolCalls.clear();
     this.clearPartialAssistant();
     for (const entry of snapshot.entries) {
+      this.observeEntryMetadata(entry);
       for (const message of entry.model ?? []) {
         this.rememberSnapshotToolCalls(message);
+        this.observeMessageMetadata(message);
         this.appendMessage(message);
       }
     }
     if (snapshot.generation?.message) {
       const message = snapshot.generation.message as Message;
       this.rememberSnapshotToolCalls(message);
+      this.observeMessageMetadata(message);
       this.writePartialAssistant(message);
     }
     for (const slot of snapshot.tools) {
@@ -276,6 +371,31 @@ export class DurableTranscript {
       if (!this.countedToolCalls.has(toolCallId)) this.toolCallTotal++;
     }
     this.trim();
+  }
+
+  private observeEntryMetadata(entry: EntryRecord): void {
+    if (entry.kind === CompactionEntry.kind || entry.kind === ResetEntry.kind) {
+      this.contextTokens = null;
+      return;
+    }
+    for (const message of entry.model ?? []) this.observeMessageMetadata(message);
+  }
+
+  private observeMessageMetadata(message: Message): void {
+    if (message.role === "assistant") this.observeAssistantUsage(message.usage, message.stopReason);
+  }
+
+  private observeAssistantUsage(value: unknown, stopReason?: string): void {
+    if (this.compactionInProgress) return;
+    const usage = usageParts(value);
+    if (!usage) return;
+    const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
+    this.latestCacheHitRate = promptTokens > 0
+      ? (usage.cacheRead / promptTokens) * 100
+      : undefined;
+    if (promptTokens > 0 && stopReason !== "aborted" && stopReason !== "error") {
+      this.contextTokens = promptTokens;
+    }
   }
 
   private rememberSnapshotToolCalls(message: Message): void {

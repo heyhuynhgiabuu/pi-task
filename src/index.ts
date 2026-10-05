@@ -126,6 +126,7 @@ import {
 import {
   abortDurableTask,
   executeDurableChildBuiltinCommand,
+  readDurableTaskHistoryTranscript,
   steerDurableTask,
   type DurableRuntimeModelRegistry,
 } from "./subagent/durable.js";
@@ -134,6 +135,7 @@ import { resolveTaskCwd } from "./task-cwd.js";
 import { serializeTaskAdmission } from "./task-admission.js";
 import { handleTaskControl } from "./task-control-api.js";
 import { registerTaskSessionReplacementGuard } from "./lifecycle/session-switch-guard.js";
+import { readPersistedAgentHistoryTranscript } from "./lifecycle/agent-history.js";
 import {
   parseTaskControlRequest,
   parseTaskStartRequest,
@@ -238,10 +240,18 @@ export default function (pi: ExtensionAPI) {
         ? { level: "info", message: `Sent ${childCommandText} to the child Pi session.` }
         : { level: "error", message: result.reason };
     },
-    canReplaceSession: () =>
-      foregroundTasks.size === 0 &&
-      backgroundTasks.size === 0 &&
-      !completionDeliveryQueue.hasPending(),
+    readAgentHistory: () => readTaskSessionHistory(extensionPiDir),
+    readAgentHistoryTranscript: (entry, ownerSessionId) =>
+      readPersistedAgentHistoryTranscript(extensionPiDir, ownerSessionId, entry, {
+        modelRegistry: runtimeModelRegistry,
+      }),
+    readDurableChildHistory: async (_task, currentTaskId, selectedTaskId) =>
+      readDurableTaskHistoryTranscript(
+        extensionPiDir,
+        currentTaskId,
+        selectedTaskId,
+        { modelRegistry: runtimeModelRegistry },
+      ),
     stopTask: async (taskId, task) => {
       if (task.backend === "durable") {
         return abortDurableTask(extensionPiDir, taskId, {
@@ -430,8 +440,8 @@ export default function (pi: ExtensionAPI) {
           });
           taskWidget.ensureTaskWidget(ctx);
         },
-        onTaskProgress: (taskId, items, toolUses, agent) => {
-          taskWidget.setLiveTranscript(taskId, items, toolUses, agent);
+        onTaskProgress: (taskId, items, toolUses, agent, metadata) => {
+          taskWidget.setLiveTranscript(taskId, items, toolUses, agent, metadata);
         },
         onTaskWatchError: (taskId, items, toolUses) => {
           if (recoveredWatchErrors.has(taskId)) return;
@@ -1387,7 +1397,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("agents", {
-    description: "Open a Pi-native snapshot of a subagent transcript",
+    description: "Browse this session's subagent transcripts read-only",
     handler: async (_args, ctx) => {
       if (await taskWidget.openAgentSwitcher(ctx)) return;
       ctx.ui.notify("/agents requires Pi's interactive TUI.", "warning");

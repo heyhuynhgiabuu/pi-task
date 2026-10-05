@@ -3,7 +3,7 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
 import { formatMs } from "../helpers.js";
 import {
@@ -20,6 +20,8 @@ import type {
   ChildBuiltinCommand,
   ChildBuiltinCommandBackend,
   ChildBuiltinCommandResult,
+  ChildSessionInfo,
+  TaskSessionHistoryEntry,
 } from "../types.js";
 import {
   isPanelFocused,
@@ -41,7 +43,12 @@ import {
   type TranscriptItem,
 } from "../panel/transcript.js";
 import type { TaskContextInfo } from "../panel/task-context.js";
-import type { DurableChildAgent } from "../panel/durable-transcript.js";
+import type { ChildUsageMetadata } from "../panel/child-metadata.js";
+import type { AgentHistoryTranscript } from "./agent-history.js";
+import type {
+  DurableChildAgent,
+  DurableChildHistoryTranscript,
+} from "../panel/durable-transcript.js";
 import {
   CustomEditor,
   getSelectListTheme,
@@ -63,7 +70,6 @@ import {
   type TaskTranscriptPane,
 } from "../panel/task-pane.js";
 import {
-  createTaskTranscriptSessionView,
   findTaskTranscriptViewLink,
   hasTaskTranscriptViewMarker,
   readPersistedPiSessionId,
@@ -159,16 +165,49 @@ export interface TaskWidgetControllerDeps {
     taskId: string,
     command: ChildBuiltinCommand,
   ) => ChildBuiltinCommandResult | Promise<ChildBuiltinCommandResult>;
+  /** Read the append-only project task history; the controller scopes it by owner session id. */
+  readAgentHistory?: () => TaskSessionHistoryEntry[];
+  /** Read one immutable transcript only after revalidating its parent-session ownership. */
+  readAgentHistoryTranscript?: (
+    entry: TaskSessionHistoryEntry,
+    ownerSessionId: string,
+  ) => Promise<AgentHistoryTranscript | undefined>;
+  /** Read one project-database durable transcript as an immutable browsing snapshot. */
+  readDurableChildHistory?: (
+    currentTask: BackgroundTask,
+    currentTaskId: string,
+    selectedTaskId: string,
+  ) => Promise<DurableChildHistoryTranscript | undefined>;
   /** Stop a running task's terminal resource; error message or null on success. */
   stopTask: (taskId: string, task: BackgroundTask) => string | null | Promise<string | null>;
   /** Current parent prompt/extension command descriptors; bodies stay in Pi's resource loader. */
   getCommands?: () => SlashCommandInfo[];
   /** Test seam for an isolated prompt resource directory. */
   getPromptAgentDir?: () => string;
-  /** Whether a Pi session can be replaced without discarding task lifecycle state. */
-  canReplaceSession?: () => boolean;
   /** Clock for linger/ordering logic (test seam; defaults to Date.now). */
   now?: () => number;
+}
+
+interface ParentSessionIdentity {
+  ownerSessionId?: string;
+  parentSessionPath?: string;
+  parentSessionId?: string;
+  viewLink?: NonNullable<ReturnType<typeof findTaskTranscriptViewLink>>;
+  invalidViewLink: boolean;
+}
+
+function readParentSessionIdentity(ctx: ExtensionContext): ParentSessionIdentity {
+  const manager = ctx.sessionManager;
+  const entries = typeof manager?.getBranch === "function" ? manager.getBranch() : [];
+  const header = typeof manager?.getHeader === "function" ? manager.getHeader() : null;
+  const viewLink = findTaskTranscriptViewLink(entries, header);
+  return {
+    ownerSessionId: viewLink?.parentSessionId ?? header?.id,
+    parentSessionPath: viewLink?.parentSessionPath,
+    parentSessionId: viewLink?.parentSessionId,
+    viewLink,
+    invalidViewLink: hasTaskTranscriptViewMarker(entries) && !viewLink,
+  };
 }
 
 export interface TaskWidgetController {
@@ -200,7 +239,10 @@ export interface TaskWidgetController {
     items: readonly TranscriptItem[],
     toolUses?: number,
     agent?: DurableChildAgent,
+    metadata?: ChildUsageMetadata,
   ): void;
+  /** Replace an SDK child's in-memory usage/context snapshot without rereading its session file. */
+  setLiveMetadata(taskId: string, metadata: ChildUsageMetadata): void;
   requestRender(): void;
   clearTaskWidgetIfIdle(): void;
   /** Latest extension context the widget was registered with (may be null). */
@@ -234,14 +276,33 @@ export function createTaskWidgetController(
   let agentsCommandContext: ExtensionCommandContext | undefined;
   let agentsParentSessionPath: string | undefined;
   let agentsParentSessionId: string | undefined;
+  let agentsOwnerSessionId: string | undefined;
+  let agentHistoryLoaded = false;
+  const agentHistoryEntries = new Map<string, TaskSessionHistoryEntry>();
+  /** Persisted child backing is deliberately separate from lifecycle task maps. */
+  const historicalTasks = new Map<string, BackgroundTask>();
+  const historicalTranscripts = new Map<string, AgentHistoryTranscript>();
+  const historicalSelections = new Set<string>();
+  const childDrafts = new Map<string, string>();
+  /** Shared by /agents activation and child-arrow reads to suppress stale completions. */
+  let activationToken = 0;
+  let pendingChildNavigation:
+    | { token: number; sourceTaskId: string; generation: number; cancelled: boolean }
+    | undefined;
   const now = () => deps?.now?.() ?? Date.now();
   const finishedTasks = new Map<string, FinishedTask>();
   const liveTranscripts = new Map<
     string,
     { items: TranscriptItem[]; revision: number; agent?: DurableChildAgent }
   >();
-  /** Child session metadata (model/thinking) memoized by transcript signature. */
-  const sessionMetaCache = new Map<string, { sig: string; meta?: ChildSessionMeta }>();
+  /** Child session facts parsed once per JSONL signature; renders only stat the file. */
+  const sessionMetaCache = new Map<string, {
+    sig: string;
+    meta?: ChildSessionMeta;
+    usage?: ChildUsageMetadata;
+  }>();
+  /** Live SDK/durable stats are keyed by child id and never borrowed from the parent session. */
+  const liveChildMetadata = new Map<string, ChildUsageMetadata>();
   const stoppingTaskIds = new Set<string>();
   let activePane: TaskTranscriptPane | undefined;
   /** The mounted overlay component, so closing the view stops its timers. */
@@ -266,23 +327,34 @@ export function createTaskWidgetController(
    * signature the transcript pane uses, so an open panel re-reads only when the
    * child's session actually grows.
    */
-  function sessionMetaFor(taskId: string, task: BackgroundTask): ChildSessionMeta | undefined {
+  function sessionMetadataFor(taskId: string, task: BackgroundTask): {
+    meta?: ChildSessionMeta;
+    usage?: ChildUsageMetadata;
+  } | undefined {
     try {
       const sig = transcriptSig(taskId);
       const cached = sessionMetaCache.get(taskId);
-      if (cached && cached.sig === sig) return cached.meta;
+      if (cached && cached.sig === sig) return cached;
       const result =
         task.backend === "sdk" && task.sessionPath
           ? readTaskSessionFile(task.sessionPath)
           : readTaskTranscript(transcriptDir(taskId, task), task.sessionName);
-      const meta = result.found ? result.meta : undefined;
-      sessionMetaCache.set(taskId, { sig, meta });
-      return meta;
+      const entry = {
+        sig,
+        ...(result.found && result.meta ? { meta: result.meta } : {}),
+        ...(result.found && result.childMetadata ? { usage: result.childMetadata } : {}),
+      };
+      sessionMetaCache.set(taskId, entry);
+      return entry;
     } catch {
       // A hostile/unreadable session dir must degrade to "no metadata", never
       // break the render pass.
       return undefined;
     }
+  }
+
+  function sessionMetaFor(taskId: string, task: BackgroundTask): ChildSessionMeta | undefined {
+    return sessionMetadataFor(taskId, task)?.meta;
   }
 
   /**
@@ -293,9 +365,13 @@ export function createTaskWidgetController(
   function childContext(taskId: string): TaskContextInfo | undefined {
     const task = findTask(taskId);
     if (!task) return undefined;
-    const durableAgent = liveTranscripts.get(taskId)?.agent;
-    const meta = durableAgent ? undefined : sessionMetaFor(taskId, task);
-    const rows = allRows();
+    const historical = historicalSelections.has(taskId)
+      ? historicalTranscripts.get(taskId)
+      : undefined;
+    const durableAgent = historical?.agent ?? liveTranscripts.get(taskId)?.agent;
+    const liveMetadata = historical ? undefined : liveChildMetadata.get(taskId);
+    const meta = durableAgent || historical ? undefined : sessionMetaFor(taskId, task);
+    const rows = historicalSelections.has(taskId) ? agentRows() : allRows();
     const index = rows.findIndex((row) => row.id === taskId);
     const end = rows[index]?.finishedAt ?? now();
     return {
@@ -303,16 +379,69 @@ export function createTaskWidgetController(
       agentType: task.agentType,
       description: task.description,
       status: task.status,
-      phaseLabel: activityFor(taskId, task)?.label,
+      phaseLabel: historicalSelections.has(taskId) ? undefined : activityFor(taskId, task)?.label,
       backend: task.backend,
       runtime: task.runtime,
       cwd: durableAgent?.cwd ?? task.cwd ?? widgetCtx?.cwd,
-      model: durableAgent?.model ?? meta?.model ?? task.comparisonModel,
+      model: durableAgent?.model ?? historical?.metadata?.model ?? liveMetadata?.model ?? meta?.model ?? task.comparisonModel,
       thinkingLevel: durableAgent?.thinkingLevel ?? meta?.thinkingLevel,
       elapsedMs: Math.max(0, end - task.startedAt),
       toolUses: task.toolUses,
       taskIndex: index >= 0 ? index + 1 : undefined,
       taskCount: rows.length,
+    };
+  }
+
+  function childContextWindow(modelRef: string | undefined): number | undefined {
+    if (!modelRef || !widgetCtx?.modelRegistry) return undefined;
+    const separator = modelRef.indexOf("/");
+    if (separator <= 0 || separator === modelRef.length - 1) return undefined;
+    try {
+      // The parent's registry is consulted only as an exact catalog lookup for
+      // this child's recorded provider/model; the parent's active model is never used.
+      const model = widgetCtx.modelRegistry.find(
+        modelRef.slice(0, separator),
+        modelRef.slice(separator + 1),
+      );
+      const contextWindow = model?.contextWindow;
+      return typeof contextWindow === "number" && Number.isFinite(contextWindow) && contextWindow > 0
+        ? contextWindow
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  function childMetadataFor(taskId: string): ChildUsageMetadata | undefined {
+    const task = findTask(taskId);
+    if (!task || task.runtime === "claude") return undefined;
+    const historical = historicalSelections.has(taskId)
+      ? historicalTranscripts.get(taskId)
+      : undefined;
+    const durable = historical ? undefined : liveTranscripts.get(taskId);
+    const live = historical ? undefined : liveChildMetadata.get(taskId);
+    const cached = historical || live || durable?.agent
+      ? undefined
+      : sessionMetadataFor(taskId, task);
+    const model = historical?.metadata?.model ?? historical?.agent?.model ?? live?.model ?? durable?.agent?.model ?? cached?.meta?.model ?? task.comparisonModel;
+    const source = historical?.metadata ?? live ?? cached?.usage;
+    const contextWindow = source?.contextUsage?.contextWindow ?? childContextWindow(model);
+    return {
+      ...(model === undefined ? {} : { model }),
+      usageTotals: source?.usageTotals ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 },
+      ...(source?.latestCacheHitRate === undefined
+        ? {}
+        : { latestCacheHitRate: source.latestCacheHitRate }),
+      contextUsage: {
+        tokens: source?.contextUsage?.tokens ?? null,
+        ...(contextWindow === undefined ? {} : { contextWindow }),
+      },
+      ...(source?.usingSubscription === undefined
+        ? {}
+        : { usingSubscription: source.usingSubscription }),
+      ...(source?.autoCompactionEnabled === undefined
+        ? {}
+        : { autoCompactionEnabled: source.autoCompactionEnabled }),
     };
   }
 
@@ -398,16 +527,160 @@ export function createTaskWidgetController(
     return rows;
   }
 
+  function agentRows(): TaskPanelRow[] {
+    const rows = new Map<string, TaskPanelRow>();
+    for (const [id, entry] of agentHistoryEntries) {
+      const finishedAt = entry.status === "running"
+        ? undefined
+        : (typeof entry.completedAt === "number" ? entry.completedAt : entry.startedAt);
+      rows.set(id, {
+        id,
+        agentType: entry.agentType,
+        description: entry.description,
+        status: entry.status,
+        startedAt: entry.startedAt,
+        finishedAt,
+      });
+    }
+    const ownerSessionId = agentsOwnerSessionId;
+    // With the persisted-history provider wired, unknown ownership is never
+    // enough to attribute a process-local row to this parent. Standalone
+    // controllers without a history source retain their pre-existing local
+    // behavior; persisted legacy records are always hidden.
+    const belongsToCurrentOwner = (task: BackgroundTask) => deps?.readAgentHistory
+      ? !!ownerSessionId && task.ownerSessionId === ownerSessionId
+      : ownerSessionId
+        ? task.ownerSessionId === ownerSessionId
+        : task.ownerSessionId === undefined;
+    const pushRuntime = (id: string, task: BackgroundTask, finishedAt?: number) => {
+      if (!belongsToCurrentOwner(task)) return;
+      const terminal = task.status !== undefined && task.status !== "running";
+      const settledAt = finishedAt ?? (terminal ? task.completedAt ?? task.startedAt : undefined);
+      rows.set(id, {
+        id,
+        agentType: task.agentType,
+        description: task.description ?? "",
+        status: settledAt !== undefined ? (task.status ?? "done") : "running",
+        startedAt: task.startedAt,
+        finishedAt: settledAt,
+        activity: latestActivity(task),
+      });
+    };
+    for (const [id, task] of foregroundTasks) pushRuntime(id, task);
+    for (const [id, task] of backgroundTasks) {
+      if (!foregroundTasks.has(id)) pushRuntime(id, task);
+    }
+    for (const [id, finished] of retainedFinishedRows()) pushRuntime(id, finished.task, finished.finishedAt);
+    return [...rows.values()];
+  }
+
+  function focusedAgentRows(): TaskPanelRow[] {
+    return orderPanelRows(agentRows(), now(), true);
+  }
+
   function panelRows(): TaskPanelRow[] {
-    return orderPanelRows(allRows(), now(), isPanelFocused(panelState));
+    const rows = agentsSwitcher ? focusedAgentRows() : allRows();
+    return orderPanelRows(rows, now(), agentsSwitcher || isPanelFocused(panelState));
+  }
+
+  function taskFromHistory(entry: TaskSessionHistoryEntry): BackgroundTask {
+    return {
+      agentType: entry.agentType,
+      sessionName: entry.sessionName,
+      originalPane: null,
+      description: entry.description,
+      startedAt: entry.startedAt,
+      toolUses: 0,
+      turns: 0,
+      recentCalls: [],
+      dir: entry.dir,
+      ...(entry.cwd ? { cwd: entry.cwd } : {}),
+      ...(entry.backend ? { backend: entry.backend } : {}),
+      ...(entry.runtime ? { runtime: entry.runtime } : {}),
+      ...(entry.sessionRef ? { sessionPath: entry.sessionRef } : {}),
+      ...(entry.conversationId ? { conversationId: entry.conversationId } : {}),
+      ...(entry.claudeSessionId ? { claudeSessionId: entry.claudeSessionId } : {}),
+      ...(entry.ownerSessionId ? { ownerSessionId: entry.ownerSessionId } : {}),
+      ...(entry.ownerLeafId !== undefined ? { ownerLeafId: entry.ownerLeafId } : {}),
+      status: entry.status,
+      ...(typeof entry.completedAt === "number" ? { completedAt: entry.completedAt } : {}),
+    };
+  }
+
+  function isScopedHistoryEntry(value: unknown, ownerSessionId: string): value is TaskSessionHistoryEntry {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const entry = value as Partial<TaskSessionHistoryEntry>;
+    return typeof entry.id === "string" && entry.id.length > 0 &&
+      entry.ownerSessionId === ownerSessionId &&
+      typeof entry.agentType === "string" && entry.agentType.length > 0 &&
+      typeof entry.description === "string" &&
+      typeof entry.sessionName === "string" &&
+      typeof entry.startedAt === "number" && Number.isFinite(entry.startedAt) &&
+      ["running", "done", "cancelled", "aborted", "failed", "timeout"].includes(String(entry.status));
+  }
+
+  function loadAgentHistory(ownerSessionId: string | undefined, ctx: Pick<ExtensionContext, "ui">): void {
+    const sameOwner = agentsOwnerSessionId === ownerSessionId;
+    agentHistoryLoaded = true;
+    const viewedHistoryId = panelState.viewTaskId && historicalSelections.has(panelState.viewTaskId)
+      ? panelState.viewTaskId
+      : undefined;
+    agentHistoryEntries.clear();
+    historicalTasks.clear();
+    if (!sameOwner) {
+      historicalTranscripts.clear();
+      historicalSelections.clear();
+    }
+    if (viewedHistoryId && sameOwner) historicalSelections.add(viewedHistoryId);
+    agentsOwnerSessionId = ownerSessionId;
+    if (!ownerSessionId) {
+      // No stable owner means there is no safe persisted-history query. Keep
+      // the current in-memory picker usable without replacing unrelated TUI
+      // command feedback with a warning; unknown-owner history is omitted.
+      return;
+    }
+    if (!deps?.readAgentHistory) return;
+    try {
+      for (const entry of deps.readAgentHistory()) {
+        if (!isScopedHistoryEntry(entry, ownerSessionId)) continue;
+        agentHistoryEntries.set(entry.id, entry);
+        historicalTasks.set(entry.id, taskFromHistory(entry));
+      }
+      for (const selectedId of historicalSelections) {
+        if (agentHistoryEntries.has(selectedId)) continue;
+        historicalSelections.delete(selectedId);
+        historicalTranscripts.delete(selectedId);
+      }
+    } catch (error) {
+      historicalSelections.clear();
+      historicalTranscripts.clear();
+      notifyCommandContext(
+        ctx,
+        `Persisted /agents history is unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        "warning",
+      );
+    }
+  }
+
+  function advanceActivationToken(): number {
+    activationToken++;
+    if (pendingChildNavigation) pendingChildNavigation.cancelled = true;
+    pendingChildNavigation = undefined;
+    return activationToken;
+  }
+
+  function isCurrentParent(ownerSessionId: string, ctx: ExtensionContext): boolean {
+    const identity = readParentSessionIdentity(ctx);
+    return !identity.invalidViewLink && identity.ownerSessionId === ownerSessionId;
+  }
+
+  function childDraftKey(ownerSessionId: string | undefined, taskId: string): string {
+    return `${ownerSessionId ?? ""}\u0000${taskId}`;
   }
 
   function findTask(id: string): BackgroundTask | undefined {
-    return (
-      foregroundTasks.get(id) ??
-      backgroundTasks.get(id) ??
-      finishedTasks.get(id)?.task
-    );
+    if (historicalSelections.has(id)) return historicalTasks.get(id);
+    return foregroundTasks.get(id) ?? backgroundTasks.get(id) ?? finishedTasks.get(id)?.task;
   }
 
   function transcriptDir(taskId: string, task: BackgroundTask): string {
@@ -422,6 +695,9 @@ export function createTaskWidgetController(
     try {
       const task = findTask(taskId);
       if (!task) return [];
+      if (historicalSelections.has(taskId)) {
+        return historicalTranscripts.get(taskId)?.items ?? [];
+      }
       const live = task.backend === "durable" ? liveTranscripts.get(taskId) : undefined;
       if (live) return live.items;
       // SDK children capture the exact session file when the session opens;
@@ -450,11 +726,34 @@ export function createTaskWidgetController(
     }
   }
 
+  /** Read only the selected Pi child's persisted JSONL; Claude has no Pi session. */
+  function persistedChildSessionInfo(taskId: string, task: BackgroundTask): ChildSessionInfo | undefined {
+    if (task.runtime === "claude") return undefined;
+    try {
+      let read = task.backend === "sdk" && task.sessionPath
+        ? readTaskSessionFile(task.sessionPath)
+        : { found: false as const, items: [] as TranscriptItem[] };
+      if (!read.found) read = readTaskTranscript(transcriptDir(taskId, task), task.sessionName);
+      if (!read.found || !read.sessionInfo) return undefined;
+      return {
+        ...read.sessionInfo,
+        ...(read.sessionInfo.sessionName || !task.sessionName ? {} : { sessionName: task.sessionName }),
+        ...(read.sessionInfo.cwd || !task.cwd ? {} : { cwd: task.cwd }),
+      };
+    } catch {
+      return undefined;
+    }
+  }
+
   /** Cheap signature: the session JSONL's mtime+size, or live activity count. */
   function transcriptSig(taskId: string): string {
     try {
       const task = findTask(taskId);
       if (!task) return "";
+      if (historicalSelections.has(taskId)) {
+        const history = historicalTranscripts.get(taskId);
+        return history ? `history:${taskId}:${history.items.length}` : "history:unavailable";
+      }
       const live = task.backend === "durable" ? liveTranscripts.get(taskId) : undefined;
       if (live) return `durable:${live.revision}`;
       if (task.backend === "sdk" && task.sessionPath) {
@@ -505,7 +804,11 @@ export function createTaskWidgetController(
           !retainedIds.has(id) &&
           !foregroundTasks.has(id) &&
           !backgroundTasks.has(id)
-        ) liveTranscripts.delete(id);
+        ) {
+          liveTranscripts.delete(id);
+          liveChildMetadata.delete(id);
+          sessionMetaCache.delete(id);
+        }
       }
       finishedTasks.clear();
       for (const entry of retained) {
@@ -524,22 +827,35 @@ export function createTaskWidgetController(
   // Generation guard: a stale overlay's cleanup must not clobber a newer
   // view opened after fast close/reopen sequences.
   let viewGeneration = 0;
+  let viewNotice:
+    | { taskId: string; generation: number; message: string; level: "info" | "warning" | "error" }
+    | undefined;
   let transcriptOverlayDone: ((result?: unknown) => void) | undefined;
   let transcriptTicker: ReturnType<typeof setInterval> | undefined;
 
   /** Returns false when no widget context or task is available to render. */
   function openView(taskId: string): boolean {
     const ctx = widgetCtx;
+    const identity = ctx ? readParentSessionIdentity(ctx) : undefined;
+    const ownerSessionId = identity && !identity.invalidViewLink ? identity.ownerSessionId : undefined;
+    if (ctx && identity && !identity.invalidViewLink && (!agentHistoryLoaded || agentsOwnerSessionId !== identity.ownerSessionId)) {
+      loadAgentHistory(identity.ownerSessionId, ctx);
+    }
+    advanceActivationToken();
+    if (historicalTasks.has(taskId) && historicalTranscripts.has(taskId)) {
+      historicalSelections.add(taskId);
+    }
     const task = findTask(taskId);
     if (!ctx || !task) return false;
     if (panelState.viewTaskId === taskId) return true;
+    const readOnlyHistory = historicalSelections.has(taskId);
     closeView();
     panelState = { selection: null, viewTaskId: taskId };
     syncAnimationTicker();
     const generation = ++viewGeneration;
     overlayOpen = true;
     const childCwd = task.cwd ?? ctx.cwd;
-    const builtinBackend: ChildBuiltinCommandBackend = task.comparisonIndex !== undefined
+    const builtinBackend: ChildBuiltinCommandBackend = readOnlyHistory || task.runtime === "claude" || task.comparisonIndex !== undefined
       ? "none"
       : task.backend === "durable"
         ? "durable"
@@ -553,7 +869,7 @@ export function createTaskWidgetController(
       // Suggestions degrade to child-local prompts if the host command API is stale.
     }
     const promptTemplatesPromise: Promise<ChildPromptTemplateService | undefined> =
-      task.runtime === "claude"
+      readOnlyHistory || task.runtime === "claude"
         ? Promise.resolve(undefined)
         : loadChildPromptTemplates({
             cwd: childCwd,
@@ -583,6 +899,7 @@ export function createTaskWidgetController(
     }
     /** Phase of the viewed child, for the working row and the repaint policy. */
     const viewedActivity = () => {
+      if (readOnlyHistory) return undefined;
       const viewed = findTask(taskId);
       return viewed ? activityFor(taskId, viewed) : undefined;
     };
@@ -620,18 +937,53 @@ export function createTaskWidgetController(
               keybindings,
               displaySettings?.editorPaddingX,
             );
-            activeOverlay = new TaskTranscriptOverlay({
+            const draftKey = childDraftKey(ownerSessionId, taskId);
+            const savedDraft = childDrafts.get(draftKey);
+            if (savedDraft !== undefined) editor.setText(savedDraft);
+            editor.onChange = (text) => childDrafts.set(draftKey, text);
+            let overlayForView: TaskTranscriptOverlay | undefined;
+            activeOverlay = overlayForView = new TaskTranscriptOverlay({
               pane,
               host: {
                 taskId,
                 onSteer: (text: string) =>
                   steerViewedTask(taskId, text, promptTemplatesPromise, generation, ctx, builtinBackend),
+                readOnly: () => readOnlyHistory,
+                notice: () => {
+                  const current = viewNotice;
+                  return current?.taskId === taskId && current.generation === generation
+                    ? { message: current.message, level: current.level }
+                    : undefined;
+                },
+                onResumeHistory: (historyTaskId: string) =>
+                  browseDurableChildHistory(
+                    taskId,
+                    historyTaskId,
+                    generation,
+                    ctx,
+                    tui,
+                    theme,
+                    displaySettings?.outputPad ?? 1,
+                  ),
+                onNavigateSibling: (direction, stillEligible) =>
+                  navigateChildSibling(
+                    direction,
+                    taskId,
+                    task,
+                    generation,
+                    ownerSessionId,
+                    ctx,
+                    overlayForView,
+                    stillEligible,
+                  ),
+                onCancelSiblingNavigation: () => cancelChildSiblingNavigation(taskId, generation),
                 onClose: () => done(undefined),
                 requestRender,
                 // The viewed child's live phase drives the animated working row.
                 activity: viewedActivity,
-                // Compact child status row + footer, from recorded facts only.
+                // Child status, usage metadata, and identity are scoped to this task id.
                 context: () => childContext(taskId),
+                childMetadata: () => childMetadataFor(taskId),
               },
               theme,
               editor,
@@ -688,6 +1040,7 @@ export function createTaskWidgetController(
         if (panelState.viewTaskId === taskId) {
           panelState = { ...panelState, viewTaskId: null, selection: null };
         }
+        if (!agentsSwitcher) historicalSelections.delete(taskId);
         overlayOpen = false;
         clearTaskWidgetIfIdle();
       });
@@ -696,7 +1049,11 @@ export function createTaskWidgetController(
   }
 
   function closeView(): void {
+    advanceActivationToken();
+    const closingTaskId = panelState.viewTaskId;
     panelState = { ...panelState, viewTaskId: null, selection: null };
+    if (closingTaskId && !agentsSwitcher) historicalSelections.delete(closingTaskId);
+    viewNotice = undefined;
     syncAnimationTicker();
     const done = transcriptOverlayDone;
     transcriptOverlayDone = undefined;
@@ -712,6 +1069,10 @@ export function createTaskWidgetController(
   }
 
   function openTaskView(taskId: string): void {
+    if (foregroundTasks.has(taskId) || backgroundTasks.has(taskId)) {
+      historicalSelections.delete(taskId);
+      historicalTranscripts.delete(taskId);
+    }
     openView(taskId);
   }
 
@@ -729,7 +1090,7 @@ export function createTaskWidgetController(
   }
 
   function notifyCommandContext(
-    ctx: ExtensionCommandContext,
+    ctx: Pick<ExtensionContext, "ui">,
     message: string,
     level: "info" | "warning" | "error",
   ): void {
@@ -757,110 +1118,102 @@ export function createTaskWidgetController(
     }
   }
 
-  function switchToTaskSession(
-    taskId: string,
+  function activationIsCurrent(token: number, ownerSessionId: string, ctx: ExtensionContext): boolean {
+    return token === activationToken && (!widgetCtx || widgetCtx === ctx) && isCurrentParent(ownerSessionId, ctx);
+  }
+
+  async function activateHistoricalTask(
+    entry: TaskSessionHistoryEntry,
+    ownerSessionId: string,
+    token: number,
     ctx: ExtensionCommandContext,
     restoreOverlayId: string | null,
-    originalParentSessionPath?: string,
-    originalParentSessionId?: string,
-  ): void {
-    const task = findTask(taskId);
-    if (!task) {
-      notifyCommandContext(ctx, `Task ${taskId} is no longer available.`, "warning");
+  ): Promise<void> {
+    if (!deps?.readAgentHistoryTranscript) {
+      notifyCommandContext(ctx, `The persisted transcript for child #${entry.id} is unavailable in this host.`, "warning");
       if (restoreOverlayId) openView(restoreOverlayId);
       return;
     }
-    if (!ctx.model) {
-      notifyCommandContext(ctx, "Select a model before opening a task transcript.", "warning");
-      if (restoreOverlayId) openView(restoreOverlayId);
-      return;
-    }
-    if (deps?.canReplaceSession && !deps.canReplaceSession()) {
-      // Replacing the Pi session now would abort a live task and discard its
-      // handles, but the transcript itself is still viewable. Degrade to the
-      // live overlay for the selected task instead of refusing outright.
-      const opened = openView(taskId);
+    try {
+      const transcript = await deps.readAgentHistoryTranscript(entry, ownerSessionId);
+      if (!activationIsCurrent(token, ownerSessionId, ctx) || agentHistoryEntries.get(entry.id)?.ownerSessionId !== ownerSessionId) return;
+      if (!transcript || transcript.items.length === 0) {
+        notifyCommandContext(
+          ctx,
+          `No readable persisted transcript is available for child #${entry.id}; no substitute content was shown.`,
+          "warning",
+        );
+        if (restoreOverlayId) openView(restoreOverlayId);
+        return;
+      }
+      historicalTranscripts.set(entry.id, transcript);
+      historicalSelections.add(entry.id);
+      const historicalTask = historicalTasks.get(entry.id);
+      if (historicalTask && transcript.cwd) historicalTask.cwd = transcript.cwd;
+      ensureTaskWidget(ctx);
+      if (!openView(entry.id)) {
+        notifyCommandContext(
+          ctx,
+          `Could not open the persisted transcript view for child #${entry.id}.`,
+          "warning",
+        );
+        if (restoreOverlayId) openView(restoreOverlayId);
+      }
+    } catch (error) {
+      if (!activationIsCurrent(token, ownerSessionId, ctx)) return;
       notifyCommandContext(
         ctx,
-        opened
-          ? "A Pi session snapshot is unavailable while tasks or completion notices are pending; showing the live transcript instead. Use /task list to steer running tasks."
-          : "A Pi session snapshot is unavailable while tasks or completion notices are pending, and the live task view is not available. Use /task list.",
-        opened ? "info" : "warning",
-      );
-      return;
-    }
-
-    const parentSessionPath =
-      originalParentSessionPath ?? ctx.sessionManager.getSessionFile();
-    const parentSessionId =
-      originalParentSessionId ?? ctx.sessionManager.getHeader()?.id;
-    if (!parentSessionPath || !parentSessionId) {
-      notifyCommandContext(
-        ctx,
-        "Cannot open a child snapshot from an unsaved Pi session; there is no safe return path.",
+        `Could not read persisted transcript for child #${entry.id}: ${error instanceof Error ? error.message : String(error)}`,
         "warning",
       );
       if (restoreOverlayId) openView(restoreOverlayId);
-      return;
     }
-
-    const items = itemsFor(taskId);
-    const result = createTaskTranscriptSessionView({
-      taskId,
-      cwd: task.cwd ?? ctx.cwd,
-      sessionDir: dirname(parentSessionPath), // Keep generated sessions in Pi's trusted store, not task.dir.
-      parentSessionPath,
-      parentSessionId,
-      model: {
-        api: ctx.model.api,
-        provider: ctx.model.provider,
-        model: ctx.model.id,
-      },
-      items,
-    });
-    if (!result.ok) {
-      const detail =
-        result.error.kind === "empty-transcript"
-          ? "The transcript contains no readable messages."
-          : result.error.message;
-      notifyCommandContext(ctx, `Could not open task transcript: ${detail}`, "error");
-      if (restoreOverlayId) openView(restoreOverlayId);
-      return;
-    }
-
-    if (panelState.viewTaskId !== null) closeView();
-    void switchSession(
-      ctx,
-      result.sessionPath,
-      `Opened a snapshot of ${taskId}; use /agents → main to return. Use /task list for the live, steerable view.`,
-    ).then((switched) => {
-      if (!switched && restoreOverlayId) openView(restoreOverlayId);
-    });
   }
 
   function activateAgentTarget(taskId: string | null): void {
+    const token = advanceActivationToken();
     const ctx = agentsCommandContext;
     const parentSessionPath = agentsParentSessionPath;
     const parentSessionId = agentsParentSessionId;
+    const ownerSessionId = agentsOwnerSessionId;
     const restoreOverlayId = switcherRestoreOverlayId;
+    const runtimeCandidate = taskId
+      ? foregroundTasks.get(taskId) ?? backgroundTasks.get(taskId) ?? finishedTasks.get(taskId)?.task
+      : undefined;
+    const runtimeBelongsToOwner = runtimeCandidate && (ownerSessionId
+      ? runtimeCandidate.ownerSessionId === ownerSessionId
+      : runtimeCandidate.ownerSessionId === undefined);
+    const historyEntry = taskId && historicalTasks.has(taskId) && !runtimeBelongsToOwner
+      ? agentHistoryEntries.get(taskId)
+      : undefined;
     clearAgentSwitcherState();
     if (!ctx) {
       widgetCtx?.ui.notify("The /agents session context is no longer available.", "warning");
       return;
     }
+    if (taskId) {
+      if (historyEntry && ownerSessionId) {
+        void activateHistoricalTask(
+          historyEntry,
+          ownerSessionId,
+          token,
+          ctx,
+          restoreOverlayId,
+        );
+      } else {
+        historicalSelections.delete(taskId);
+        historicalTranscripts.delete(taskId);
+        ensureTaskWidget(ctx);
+        if (!openView(taskId)) {
+          notifyCommandContext(ctx, `Task ${taskId} could not be opened as a live overlay.`, "warning");
+          if (restoreOverlayId) openView(restoreOverlayId);
+        }
+      }
+      return;
+    }
     if (typeof ctx.switchSession !== "function") {
       notifyCommandContext(ctx, "/agents needs Pi's session-switch command API.", "warning");
       if (restoreOverlayId) openView(restoreOverlayId);
-      return;
-    }
-    if (taskId) {
-      switchToTaskSession(
-        taskId,
-        ctx,
-        restoreOverlayId,
-        parentSessionPath,
-        parentSessionId,
-      );
       return;
     }
     if (parentSessionPath) {
@@ -879,15 +1232,173 @@ export function createTaskWidgetController(
       if (panelState.viewTaskId !== null) closeView();
       void switchSession(ctx, parentSessionPath, "Returned to the parent conversation.").then(
         (switched) => {
-          if (!switched && restoreOverlayId) openView(restoreOverlayId);
+          if (switched) {
+            historicalSelections.clear();
+            historicalTranscripts.clear();
+          } else if (restoreOverlayId) {
+            openView(restoreOverlayId);
+          }
         },
       );
       return;
     }
+    historicalSelections.clear();
+    historicalTranscripts.clear();
     closeView();
   }
 
+  function cancelChildSiblingNavigation(taskId: string, generation: number): void {
+    const pending = pendingChildNavigation;
+    if (!pending || pending.sourceTaskId !== taskId || pending.generation !== generation) return;
+    advanceActivationToken();
+    if (viewNotice?.taskId === taskId && viewNotice.generation === generation && viewNotice.message.startsWith("Loading read-only child transcript")) {
+      viewNotice = undefined;
+      requestRender();
+    }
+  }
+
+  async function navigateChildSibling(
+    direction: -1 | 1,
+    sourceTaskId: string,
+    sourceTask: BackgroundTask,
+    generation: number,
+    ownerSessionId: string | undefined,
+    ctx: ExtensionContext,
+    sourceOverlay: TaskTranscriptOverlay | undefined,
+    stillEligible: () => boolean,
+  ): Promise<void> {
+    if (!ownerSessionId || !sourceOverlay || !stillEligible() || pendingChildNavigation) return;
+    const token = advanceActivationToken();
+    const pending = { token, sourceTaskId, generation, cancelled: false };
+    pendingChildNavigation = pending;
+    const isCurrent = () =>
+      pendingChildNavigation === pending &&
+      !pending.cancelled &&
+      activationToken === token &&
+      viewGeneration === generation &&
+      panelState.viewTaskId === sourceTaskId &&
+      widgetCtx === ctx &&
+      activeOverlay === sourceOverlay &&
+      findTask(sourceTaskId) === sourceTask &&
+      isCurrentParent(ownerSessionId, ctx) &&
+      stillEligible();
+    const warn = (message: string) => {
+      if (!isCurrent()) return;
+      viewNotice = { taskId: sourceTaskId, generation, message, level: "warning" };
+      requestRender();
+    };
+
+    try {
+      const rows = focusedAgentRows();
+      const sourceIndex = rows.findIndex((row) => row.id === sourceTaskId);
+      if (sourceIndex < 0) return;
+      const targetIndex = Math.max(0, Math.min(rows.length - 1, sourceIndex + direction));
+      if (targetIndex === sourceIndex) return;
+      const targetId = rows[targetIndex]!.id;
+      const runtimeTask = foregroundTasks.get(targetId) ?? backgroundTasks.get(targetId) ?? finishedTasks.get(targetId)?.task;
+      const runtimeBelongsToOwner = runtimeTask?.ownerSessionId === ownerSessionId;
+      if (runtimeTask && runtimeBelongsToOwner) {
+        if (!isCurrent()) return;
+        historicalSelections.delete(targetId);
+        historicalTranscripts.delete(targetId);
+        openView(targetId);
+        return;
+      }
+
+      const entry = agentHistoryEntries.get(targetId);
+      if (!entry || entry.ownerSessionId !== ownerSessionId) return;
+      if (!deps?.readAgentHistoryTranscript) {
+        warn(`Persisted transcript for child #${targetId} is unavailable in this host.`);
+        return;
+      }
+      viewNotice = {
+        taskId: sourceTaskId,
+        generation,
+        message: "Loading read-only child transcript…",
+        level: "info",
+      };
+      requestRender();
+      const transcript = await deps.readAgentHistoryTranscript(entry, ownerSessionId);
+      if (!isCurrent() || agentHistoryEntries.get(targetId) !== entry) return;
+      if (!transcript || transcript.items.length === 0) {
+        warn(`Historical child transcript #${targetId} could not be read.`);
+        return;
+      }
+      const historicalTask = historicalTasks.get(targetId);
+      if (!historicalTask) {
+        warn(`Historical child #${targetId} is no longer available for this parent session.`);
+        return;
+      }
+      historicalTranscripts.set(targetId, transcript);
+      historicalSelections.add(targetId);
+      if (transcript.cwd) historicalTask.cwd = transcript.cwd;
+      openView(targetId);
+    } catch (error) {
+      warn(`Could not read historical child transcript: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      if (pendingChildNavigation === pending) pendingChildNavigation = undefined;
+    }
+  }
+
   // ── Panel actions ─────────────────────────────────────────────────────────
+
+  function browseDurableChildHistory(
+    currentTaskId: string,
+    historyTaskId: string,
+    generation: number,
+    ctx: ExtensionContext,
+    tui: Parameters<typeof createTaskTranscriptPane>[0],
+    theme: Parameters<typeof createTaskTranscriptPane>[1],
+    outputPad: 0 | 1,
+  ): void {
+    const isCurrentView = () =>
+      generation === viewGeneration &&
+      panelState.viewTaskId === currentTaskId &&
+      widgetCtx === ctx;
+    const notify = (message: string, level: "info" | "warning" | "error") => {
+      if (!isCurrentView()) return;
+      viewNotice = { taskId: currentTaskId, generation, message, level };
+      requestRender();
+    };
+    if (!isCurrentView()) return;
+    const currentTask = findTask(currentTaskId);
+    if (!currentTask || currentTask.backend !== "durable") {
+      notify("Durable child history is unavailable for this task.", "error");
+      return;
+    }
+    if (!deps?.readDurableChildHistory) {
+      notify("Durable child history reading is unavailable in this host.", "error");
+      return;
+    }
+    viewNotice = { taskId: currentTaskId, generation, message: "Loading read-only child transcript…", level: "info" };
+    requestRender();
+    void (async () => {
+      const history = await deps.readDurableChildHistory!(currentTask, currentTaskId, historyTaskId);
+      if (!isCurrentView()) return;
+      if (!history) {
+        notify(`Durable child history #${historyTaskId} could not be read.`, "warning");
+        return;
+      }
+      const cwd = history.agent.cwd ?? history.option.cwd ?? "";
+      const pane = createTaskTranscriptPane(tui, theme, {
+        taskId: history.option.taskId,
+        cwd,
+        sig: () => `history:${history.option.taskId}:${history.items.length}`,
+        read: () => history.items,
+        outputPad,
+      });
+      viewNotice = undefined;
+      if (!activeOverlay?.openChildHistoryTranscript(pane, history.option, history.metadata)) {
+        pane.dispose();
+        notify("The historical child transcript view is unavailable.", "error");
+      }
+    })().catch((error: unknown) => {
+      notify(
+        `Could not read durable child history: ${error instanceof Error ? error.message : String(error)}`,
+        "error",
+      );
+    });
+  }
 
   function steerViewedTask(
     taskId: string,
@@ -903,7 +1414,8 @@ export function createTaskWidgetController(
       widgetCtx === ctx;
     const notify = (message: string, level: "info" | "warning" | "error") => {
       if (!isCurrentView()) return;
-      ignoreStaleExtensionCtx(() => ctx.ui.notify(message, level));
+      viewNotice = { taskId, generation, message, level };
+      requestRender();
     };
     if (!isCurrentView()) return;
     const task = findTask(taskId);
@@ -911,11 +1423,14 @@ export function createTaskWidgetController(
       notify("No task is open in the transcript view", "error");
       return;
     }
-    const activelyTracked = foregroundTasks.has(taskId) || backgroundTasks.has(taskId);
-    if (!activelyTracked || (task.status !== undefined && task.status !== "running")) {
-      notify("This task is no longer running; its transcript is read-only.", "warning");
-      return;
-    }
+    const taskIsRunning = () => {
+      const current = findTask(taskId);
+      return Boolean(
+        current &&
+        (foregroundTasks.has(taskId) || backgroundTasks.has(taskId)) &&
+        (current.status === undefined || current.status === "running"),
+      );
+    };
     void (async () => {
       if (task.runtime !== "claude" && text.trim().startsWith("/")) {
         let route: Awaited<ReturnType<typeof routeChildBuiltinCommand>>;
@@ -934,10 +1449,49 @@ export function createTaskWidgetController(
           return;
         }
         if (route?.kind === "supported") {
-          const result = await deps?.runChildBuiltinCommand?.(task, taskId, route.command);
+          const readOnlySession = route.command.name === "session" && !route.command.argument;
+          const readOnlyHistory =
+            route.command.name === "resume" && !route.command.argument && task.backend === "durable";
+          if (!readOnlySession && !readOnlyHistory && !taskIsRunning()) {
+            notify("This task is no longer running; its transcript is read-only.", "warning");
+            return;
+          }
+          let result: ChildBuiltinCommandResult | undefined;
+          if (readOnlySession && (task.backend !== "durable") && (task.backend !== "sdk" || !task.sdkCommand)) {
+            const sessionInfo = persistedChildSessionInfo(taskId, task);
+            result = sessionInfo
+              ? { level: "info", message: "Showing the child's persisted session information.", sessionInfo }
+              : { level: "error", message: "This child has no readable Pi session file; no session details are available." };
+          } else {
+            result = await deps?.runChildBuiltinCommand?.(task, taskId, route.command);
+          }
           if (!isCurrentView()) return;
           if (!result) {
             notify(`/${route.command.name} is not available for this child task.`, "error");
+          } else if (result.selector) {
+            if (!taskIsRunning()) {
+              notify("This task is no longer running; its transcript is read-only.", "warning");
+              return;
+            }
+            viewNotice = undefined;
+            if (!activeOverlay?.openChildSelector(result.selector)) {
+              notify("The child selector is unavailable in this view.", "error");
+            }
+          } else if (result.historyPicker) {
+            viewNotice = undefined;
+            if (!activeOverlay?.openChildHistoryPicker(result.historyPicker)) {
+              notify("The durable child-history picker is unavailable in this view.", "error");
+            }
+          } else if (readOnlySession && result.sessionInfo) {
+            viewNotice = undefined;
+            const sessionInfo: ChildSessionInfo = {
+              ...result.sessionInfo,
+              ...(result.sessionInfo.sessionName || !task.sessionName ? {} : { sessionName: task.sessionName }),
+              ...(result.sessionInfo.cwd || !task.cwd ? {} : { cwd: task.cwd }),
+            };
+            if (!activeOverlay?.openChildSessionInfo(sessionInfo)) {
+              notify("The child session information screen is unavailable in this view.", "error");
+            }
           } else {
             notify(result.message, result.level);
           }
@@ -945,6 +1499,10 @@ export function createTaskWidgetController(
         }
       }
 
+      if (!taskIsRunning()) {
+        notify("This task is no longer running; its transcript is read-only.", "warning");
+        return;
+      }
       let steeringText = text;
       if (task.runtime !== "claude" && promptTemplatesPromise) {
         const service = await promptTemplatesPromise;
@@ -964,6 +1522,10 @@ export function createTaskWidgetController(
         }
       }
       if (!isCurrentView()) return;
+      if (!taskIsRunning()) {
+        notify("This task is no longer running; its transcript is read-only.", "warning");
+        return;
+      }
       const error = await deps?.steerTask(task, taskId, steeringText);
       if (!isCurrentView()) return;
       if (error) notify(`Could not steer task: ${error}`, "error");
@@ -976,11 +1538,20 @@ export function createTaskWidgetController(
   }
 
   function stopTaskRow(taskId: string): void {
+    if (agentsSwitcher && agentHistoryEntries.has(taskId)) {
+      const runtime = foregroundTasks.get(taskId) ?? backgroundTasks.get(taskId) ?? finishedTasks.get(taskId)?.task;
+      const belongs = runtime && (agentsOwnerSessionId
+        ? runtime.ownerSessionId === agentsOwnerSessionId
+        : runtime.ownerSessionId === undefined);
+      if (!belongs) return;
+    }
     const task = foregroundTasks.get(taskId) ?? backgroundTasks.get(taskId);
     if (!task) {
       if (!finishedTasks.has(taskId)) return;
       finishedTasks.delete(taskId);
       liveTranscripts.delete(taskId);
+      liveChildMetadata.delete(taskId);
+      sessionMetaCache.delete(taskId);
       reconcileSelection();
       requestRender();
       return;
@@ -1097,7 +1668,7 @@ export function createTaskWidgetController(
           theme: widgetTheme,
           ...(agentsSwitcher
             ? {
-                hint: `Switch to: ${panelRows().length + 1} agents — ↑↓ select · enter switch · esc close`,
+                hint: `Switch to: ${panelRows().length + 1} agents — ↑↓ select · enter open · esc close`,
                 showTaskIds: true,
                 shownTaskId: switcherShownId,
               }
@@ -1138,8 +1709,9 @@ export function createTaskWidgetController(
     items: readonly TranscriptItem[],
     toolUses?: number,
     agent?: DurableChildAgent,
+    metadata?: ChildUsageMetadata,
   ): void {
-    const task = findTask(taskId);
+    const task = foregroundTasks.get(taskId) ?? backgroundTasks.get(taskId) ?? finishedTasks.get(taskId)?.task;
     if (!task || task.backend !== "durable") return;
     const retained = items.slice(-MAX_TRANSCRIPT_ITEMS);
     const previous = liveTranscripts.get(taskId);
@@ -1150,6 +1722,7 @@ export function createTaskWidgetController(
       revision: (previous?.revision ?? 0) + 1,
       ...(nextAgent === undefined ? {} : { agent: nextAgent }),
     });
+    if (metadata) liveChildMetadata.set(taskId, metadata);
     const calls = retained.filter((item): item is Extract<TranscriptItem, { type: "tool" }> => item.type === "tool");
     task.toolUses = toolUses ?? calls.length;
     task.recentCalls = calls.slice(-10).map((item) => {
@@ -1168,6 +1741,13 @@ export function createTaskWidgetController(
     });
     // The phase just changed (tool -> thinking/streaming or back).
     syncAnimationTicker();
+    requestRender();
+  }
+
+  function setLiveMetadata(taskId: string, metadata: ChildUsageMetadata): void {
+    const task = findTask(taskId);
+    if (!task || task.runtime === "claude") return;
+    liveChildMetadata.set(taskId, metadata);
     requestRender();
   }
 
@@ -1324,9 +1904,11 @@ export function createTaskWidgetController(
   }
 
   /**
-   * Open Pi's main/subagent switcher. Selecting a child creates a Pi-native
-   * transcript snapshot; selecting main from that snapshot returns to its
-   * parent session. The task overlay remains the live, steerable view.
+   * Open Pi's main/subagent switcher. Selecting a child opens it as an
+   * overlay: live children stay steerable and historical children open as
+   * read-only persisted transcripts. Selecting main returns from a legacy
+   * native snapshot session to its parent. The task overlay remains the
+   * live, steerable view.
    */
   async function openAgentSwitcher(targetCtx: ExtensionCommandContext): Promise<boolean> {
     if (targetCtx.mode !== "tui" || !targetCtx.hasUI) {
@@ -1335,14 +1917,11 @@ export function createTaskWidgetController(
       );
       return false;
     }
+    advanceActivationToken();
     ensureTaskWidget(targetCtx);
-    const sessionManager = targetCtx.sessionManager;
-    const sessionEntries =
-      typeof sessionManager?.getBranch === "function" ? sessionManager.getBranch() : [];
-    const sessionHeader =
-      typeof sessionManager?.getHeader === "function" ? sessionManager.getHeader() : null;
-    const viewLink = findTaskTranscriptViewLink(sessionEntries, sessionHeader);
-    if (hasTaskTranscriptViewMarker(sessionEntries) && !viewLink) {
+    const identity = readParentSessionIdentity(targetCtx);
+    const viewLink = identity.viewLink;
+    if (identity.invalidViewLink) {
       ignoreStaleExtensionCtx(() =>
         targetCtx.ui.notify(
           "This transcript snapshot has a missing or invalid parent Pi session; /agents cannot switch safely.",
@@ -1351,6 +1930,8 @@ export function createTaskWidgetController(
       );
       return false;
     }
+    const ownerSessionId = identity.ownerSessionId;
+    loadAgentHistory(ownerSessionId, targetCtx);
     const interruptedOverlayId = panelState.viewTaskId;
     agentsCommandContext = targetCtx;
     agentsParentSessionPath = viewLink?.parentSessionPath;
@@ -1371,7 +1952,7 @@ export function createTaskWidgetController(
     // when the picker is cancelled.
     if (interruptedOverlayId !== null) closeView();
     taskMonitorVisible = true;
-    const rows = orderPanelRows(allRows(), now(), true);
+    const rows = panelRows();
     const shown = switcherShownId;
     const idx = shown ? rows.findIndex((r) => r.id === shown) + 1 : 0;
     panelState = {
@@ -1424,7 +2005,15 @@ export function createTaskWidgetController(
     requestWidgetRender = null;
     finishedTasks.clear();
     liveTranscripts.clear();
+    liveChildMetadata.clear();
     sessionMetaCache.clear();
+    agentHistoryEntries.clear();
+    historicalTasks.clear();
+    historicalTranscripts.clear();
+    historicalSelections.clear();
+    childDrafts.clear();
+    agentHistoryLoaded = false;
+    pendingChildNavigation = undefined;
   }
 
   return {
@@ -1436,6 +2025,7 @@ export function createTaskWidgetController(
     openTaskView,
     closeTaskView,
     setLiveTranscript,
+    setLiveMetadata,
     requestRender,
     clearTaskWidgetIfIdle,
     getContext,

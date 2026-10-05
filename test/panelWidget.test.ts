@@ -488,7 +488,7 @@ test("hidden task monitor does not allow stopping an invisible row from the edit
 
 test("a finished durable transcript is read-only", () => {
   const finished = makeTask({ backend: "durable", status: "done" });
-  const { context, createEditor, notices } = createEditorTuiContext();
+  const { context, createEditor, notices, mountOverlay } = createEditorTuiContext();
   const steeringCalls: string[] = [];
   const controller = createTaskWidgetController(new Map(), new Map(), {
     steerTask: (_task, taskId) => { steeringCalls.push(taskId); return null; },
@@ -497,6 +497,7 @@ test("a finished durable transcript is read-only", () => {
   controller.noteTaskFinished("t-finished", finished, Date.now());
   controller.ensureTaskWidget(context);
   controller.openTaskView("t-finished");
+  const overlay = mountOverlay({ fg: (_style: string, text: string) => text });
   const editor = createEditor();
   assert.ok(editor);
 
@@ -504,7 +505,9 @@ test("a finished durable transcript is read-only", () => {
   editor.handleInput("\r");
 
   assert.deepEqual(steeringCalls, [], "finished transcript input must not submit a new child run");
-  assert.match(notices.at(-1)?.message ?? "", /read-only|no longer running/i);
+  assert.match(overlay.render(90).join("\n"), /read-only|no longer running/i);
+  assert.deepEqual(notices, [], "finished child-view errors stay out of the parent notification surface");
+  overlay.dispose();
   controller.dispose();
 });
 
@@ -1158,7 +1161,7 @@ test("empty transcript snapshots return a typed error", () => {
   }
 });
 
-test("agents keeps the original parent when switching between child snapshots", async () => {
+test("agents opens child selections as overlays without replacing the session", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-task-agents-session-"));
   try {
     const parent = SessionManager.create(root, join(root, "parent-sessions"));
@@ -1168,7 +1171,7 @@ test("agents keeps the original parent when switching between child snapshots", 
     assert.ok(parentPath);
     assert.ok(parentSessionId);
 
-    const { context, createEditor, notices } = createEditorTuiContext();
+    const { context, createEditor, notices, mountOverlay } = createEditorTuiContext();
     const switchedPaths: string[] = [];
     Object.assign(context, {
       cwd: root,
@@ -1188,8 +1191,8 @@ test("agents keeps the original parent when switching between child snapshots", 
 
     const taskAId = "t-native-view-a";
     const taskBId = "t-native-view-b";
-    const taskA = makeTask({ backend: "durable", cwd: root, dir: root, startedAt: 1000 });
-    const taskB = makeTask({ backend: "durable", cwd: root, dir: root, startedAt: 2000 });
+    const taskA = makeTask({ backend: "durable", cwd: root, dir: root, startedAt: 1000, ownerSessionId: parentSessionId });
+    const taskB = makeTask({ backend: "durable", cwd: root, dir: root, startedAt: 2000, ownerSessionId: parentSessionId });
     const controller = createTaskWidgetController(
       new Map(),
       new Map([[taskAId, taskA], [taskBId, taskB]]),
@@ -1209,54 +1212,21 @@ test("agents keeps the original parent when switching between child snapshots", 
     parentEditor.handleInput("\r");
     await Promise.resolve();
 
-    assert.equal(switchedPaths.length, 1, "the first child selection switches Pi sessions directly");
-    const childViewA = SessionManager.open(switchedPaths[0]!);
-    assert.deepEqual(
-      findTaskTranscriptViewLink(childViewA.getBranch(), childViewA.getHeader()),
-      { taskId: taskAId, parentSessionPath: parentPath, parentSessionId },
-    );
-    assert.ok(
-      notices.some((notice) => notice.message.includes("snapshot")),
-      "the fresh child context explains this is a transcript snapshot",
-    );
-
-    await controller.openAgentSwitcher({ ...context, sessionManager: childViewA });
-    const childAEditor = createEditor();
-    assert.ok(childAEditor);
-    childAEditor.handleInput("\x1b[B");
-    childAEditor.handleInput("\r");
-    await Promise.resolve();
-
-    assert.equal(switchedPaths.length, 2);
-    const childViewB = SessionManager.open(switchedPaths[1]!);
-    assert.deepEqual(
-      findTaskTranscriptViewLink(childViewB.getBranch(), childViewB.getHeader()),
-      { taskId: taskBId, parentSessionPath: parentPath, parentSessionId },
-      "a second child snapshot remains linked to the original parent, not snapshot A",
-    );
-
-    await controller.openAgentSwitcher({ ...context, sessionManager: childViewB });
-    const childBEditor = createEditor();
-    assert.ok(childBEditor);
-    childBEditor.handleInput("\x1b[A");
-    childBEditor.handleInput("\x1b[A");
-    childBEditor.handleInput("\r");
-    await Promise.resolve();
-    assert.deepEqual(switchedPaths, [switchedPaths[0], switchedPaths[1], parentPath]);
+    assert.deepEqual(switchedPaths, [], "child selection opens an overlay instead of replacing the Pi session");
+    const viewA = mountOverlay({ fg: (_style: string, text: string) => text }).render(100).join("\n");
+    assert.match(viewA, /t-native-view-a answer/, "the selected child opens as a live steerable transcript");
 
     await controller.openAgentSwitcher(context);
-    const parentAgainEditor = createEditor();
-    assert.ok(parentAgainEditor);
-    parentAgainEditor.handleInput("\x1b[B");
-    parentAgainEditor.handleInput("\r");
+    const secondPicker = createEditor();
+    assert.ok(secondPicker);
+    secondPicker.handleInput("\x1b[B");
+    secondPicker.handleInput("\x1b[B");
+    secondPicker.handleInput("\r");
     await Promise.resolve();
-    assert.equal(switchedPaths.length, 4);
-    const childViewAAgain = SessionManager.open(switchedPaths[3]!);
-    assert.deepEqual(
-      findTaskTranscriptViewLink(childViewAAgain.getBranch(), childViewAAgain.getHeader()),
-      { taskId: taskAId, parentSessionPath: parentPath, parentSessionId },
-      "selecting the same task again also returns to the original parent",
-    );
+
+    assert.deepEqual(switchedPaths, [], "the second child selection also stays on the overlay path");
+    const viewB = mountOverlay({ fg: (_style: string, text: string) => text }).render(100).join("\n");
+    assert.match(viewB, /t-native-view-b answer/, "the second child opens its own transcript");
     controller.dispose();
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -1264,7 +1234,7 @@ test("agents keeps the original parent when switching between child snapshots", 
 });
 
 for (const invalidParent of ["deleted", "malformed"] as const) {
-  test(`agents refuses to snapshot a ${invalidParent} parent session`, async () => {
+  test(`agents keeps opening live children when the parent session is ${invalidParent}`, async () => {
     const root = mkdtempSync(join(tmpdir(), `pi-task-${invalidParent}-parent-`));
     try {
       const parent = SessionManager.create(root, join(root, "parent-sessions"));
@@ -1274,7 +1244,7 @@ for (const invalidParent of ["deleted", "malformed"] as const) {
       if (invalidParent === "deleted") rmSync(parentPath);
       else writeFileSync(parentPath, "not a Pi session\n");
 
-      const { context, createEditor, notices } = createEditorTuiContext();
+      const { context, createEditor, notices, mountOverlay } = createEditorTuiContext();
       const switchedPaths: string[] = [];
       Object.assign(context, {
         cwd: root,
@@ -1286,9 +1256,11 @@ for (const invalidParent of ["deleted", "malformed"] as const) {
         },
       });
       const taskId = `t-${invalidParent}-parent`;
+      const ownerSessionId = parent.getHeader()?.id;
+      assert.ok(ownerSessionId);
       const controller = createTaskWidgetController(
         new Map(),
-        new Map([[taskId, makeTask({ backend: "durable", cwd: root, dir: root })]]),
+        new Map([[taskId, makeTask({ backend: "durable", cwd: root, dir: root, ownerSessionId })]]),
       );
       controller.setLiveTranscript(taskId, [
         { type: "user", text: "child prompt", timestamp: "" },
@@ -1303,7 +1275,9 @@ for (const invalidParent of ["deleted", "malformed"] as const) {
       await Promise.resolve();
 
       assert.deepEqual(switchedPaths, [], "invalid parent paths are never passed to Pi's switch API");
-      assert.ok(notices.some((notice) => notice.level === "error"));
+      const view = mountOverlay({ fg: (_style: string, text: string) => text }).render(80).join("\n");
+      assert.match(view, /child answer/, "live children open as overlays without needing the parent file");
+      assert.ok(!notices.some((notice) => notice.level === "error"));
       controller.dispose();
     } finally {
       rmSync(root, { recursive: true, force: true });
@@ -1514,10 +1488,10 @@ test("agents revalidates a snapshot parent immediately before returning", async 
   }
 });
 
-test("agents refuses to switch away from an unsaved parent session", async () => {
+test("agents opens live children read-write overlays even without a saved parent session", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-task-unsaved-parent-"));
   try {
-    const { context, createEditor, notices } = createEditorTuiContext();
+    const { context, createEditor, mountOverlay } = createEditorTuiContext();
     const switchedPaths: string[] = [];
     Object.assign(context, {
       cwd: root,
@@ -1529,9 +1503,11 @@ test("agents refuses to switch away from an unsaved parent session", async () =>
       },
     });
     const taskId = "t-unsaved-parent";
+    const ownerSessionId = context.sessionManager.getHeader()?.id;
+    assert.ok(ownerSessionId);
     const controller = createTaskWidgetController(
       new Map(),
-      new Map([[taskId, makeTask({ backend: "durable", cwd: root, dir: root })]]),
+      new Map([[taskId, makeTask({ backend: "durable", cwd: root, dir: root, ownerSessionId })]]),
     );
     controller.setLiveTranscript(taskId, [
       { type: "user", text: "child prompt", timestamp: "" },
@@ -1545,14 +1521,15 @@ test("agents refuses to switch away from an unsaved parent session", async () =>
     editor.handleInput("\r");
 
     assert.deepEqual(switchedPaths, [], "an unsaved parent is never replaced");
-    assert.ok(notices.some((notice) => notice.message.includes("safe return path")));
+    const view = mountOverlay({ fg: (_style: string, text: string) => text }).render(80).join("\n");
+    assert.match(view, /child answer/, "the live child still opens as a steerable overlay");
     controller.dispose();
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
 
-test("agents does not persist a snapshot when task state blocks session replacement", async () => {
+test("agents never writes a snapshot when task state blocks session replacement", async () => {
   initTheme();
   const root = mkdtempSync(join(tmpdir(), "pi-task-blocked-snapshot-"));
   try {
@@ -1573,11 +1550,12 @@ test("agents does not persist a snapshot when task state blocks session replacem
       },
     });
     const taskId = "t-blocked-snapshot";
+    const ownerSessionId = parent.getHeader()?.id;
+    assert.ok(ownerSessionId);
     const controller = createTaskWidgetController(
       new Map(),
-      new Map([[taskId, makeTask({ backend: "durable", cwd: root, dir: root })]]),
+      new Map([[taskId, makeTask({ backend: "durable", cwd: root, dir: root, ownerSessionId })]]),
       {
-        canReplaceSession: () => false,
         steerTask: () => null,
         stopTask: () => null,
       },
@@ -1600,12 +1578,10 @@ test("agents does not persist a snapshot when task state blocks session replacem
       1,
       "a rejected replacement does not leave an unreachable snapshot file",
     );
-    assert.ok(
-      notices.some(
-        (notice) =>
-          notice.level === "info" && notice.message.includes("showing the live transcript"),
-      ),
-      "a blocked snapshot explains the live fallback instead of only warning",
+    assert.deepEqual(
+      notices.filter((notice) => notice.message.includes("snapshot")),
+      [],
+      "no snapshot fallback messaging is needed because sessions are never replaced",
     );
     const view = mountOverlay({ fg: (_style: string, text: string) => text }).render(80).join("\n");
     assert.match(view, /child answer/, "the selected task opens as a live transcript");
@@ -1622,7 +1598,7 @@ for (const failure of [
     message: "This extension ctx is stale after session replacement",
   },
 ] as const) {
-  test(`agents warns when the blocked-snapshot live fallback hits ${failure.name}`, async () => {
+  test(`agents warns when the live overlay fallback hits ${failure.name}`, async () => {
   initTheme();
   const root = mkdtempSync(join(tmpdir(), "pi-task-blocked-no-view-"));
   try {
@@ -1644,11 +1620,12 @@ for (const failure of [
       throw new Error(failure.message);
     };
     const taskId = "t-blocked-no-view";
+    const ownerSessionId = parent.getHeader()?.id;
+    assert.ok(ownerSessionId);
     const controller = createTaskWidgetController(
       new Map(),
-      new Map([[taskId, makeTask({ backend: "durable", cwd: root, dir: root })]]),
+      new Map([[taskId, makeTask({ backend: "durable", cwd: root, dir: root, ownerSessionId })]]),
       {
-        canReplaceSession: () => false,
         steerTask: () => null,
         stopTask: () => null,
       },
@@ -1670,9 +1647,9 @@ for (const failure of [
       notices.some(
         (notice) =>
           notice.level === "warning" &&
-          notice.message.includes("live task view is not available"),
+          notice.message.includes("could not be opened"),
       ),
-      "an unrenderable fallback warns instead of claiming the transcript opened",
+      "an unrenderable overlay warns instead of claiming the transcript opened",
     );
     controller.dispose();
   } finally {
@@ -1704,7 +1681,7 @@ test("agents accepts a parent session containing a newer unknown entry kind", as
       })}\n`,
     );
 
-    const { context, createEditor, notices } = createEditorTuiContext();
+    const { context, createEditor, notices, mountOverlay } = createEditorTuiContext();
     const switchedPaths: string[] = [];
     Object.assign(context, {
       cwd: root,
@@ -1716,9 +1693,11 @@ test("agents accepts a parent session containing a newer unknown entry kind", as
       },
     });
     const taskId = "t-unknown-entry";
+    const ownerSessionId = parent.getHeader()?.id;
+    assert.ok(ownerSessionId);
     const controller = createTaskWidgetController(
       new Map(),
-      new Map([[taskId, makeTask({ backend: "durable", cwd: root, dir: root })]]),
+      new Map([[taskId, makeTask({ backend: "durable", cwd: root, dir: root, ownerSessionId })]]),
     );
     controller.setLiveTranscript(taskId, [
       { type: "user", text: "child prompt", timestamp: "" },
@@ -1732,11 +1711,9 @@ test("agents accepts a parent session containing a newer unknown entry kind", as
     editor.handleInput("\r");
     await Promise.resolve();
 
-    assert.equal(switchedPaths.length, 1, "a parent with an unknown entry kind still opens a snapshot");
-    assert.ok(
-      switchedPaths[0]!.startsWith(sessionDir),
-      "the snapshot is written into Pi's trusted session store",
-    );
+    assert.deepEqual(switchedPaths, [], "selection opens the overlay instead of a snapshot");
+    const view = mountOverlay({ fg: (_style: string, text: string) => text }).render(80).join("\n");
+    assert.match(view, /child answer/, "a parent with an unknown entry kind still opens the child transcript");
     assert.ok(!notices.some((notice) => notice.level === "error"));
     controller.dispose();
   } finally {

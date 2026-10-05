@@ -142,7 +142,7 @@ export class TaskOverlay implements Component {
       theme: this.theme,
       hint:
         this.mode === "agents"
-          ? `Switch to: ${rows.length + 1} agents — ↑↓ select · enter switch · esc close`
+          ? `Switch to: ${rows.length + 1} agents — ↑↓ select · enter open · esc close`
           : `tasks (${rows.length}) — ↑↓ select · enter open · x stop/dismiss · esc close`,
       ...(this.mode === "agents"
         ? { shownTaskId: this.getShownTaskId(), showTaskIds: true }

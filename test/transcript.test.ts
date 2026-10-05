@@ -218,6 +218,58 @@ test("readTaskTranscript records the child's own model and thinking level", () =
   assert.equal(meta?.thinkingLevel, "low", "the last thinking_level_change wins");
 });
 
+test("readTaskSessionFile exposes exact session identity, lifetime counts, cache usage, and cost", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-task-transcript-session-info-"));
+  const file = join(dir, "child.jsonl");
+  const usage = (input: number, output: number, cacheRead: number, cacheWrite: number, cost: number) => ({
+    input,
+    output,
+    cacheRead,
+    cacheWrite,
+    totalTokens: input + output,
+    cost: { input: cost / 2, output: cost / 2, cacheRead: 0, cacheWrite: 0, total: cost },
+  });
+  writeFileSync(file, [
+    JSON.stringify({ type: "session", id: "child-session-id", cwd: "/work/child" }),
+    JSON.stringify({ type: "session_info", name: "review child" }),
+    JSON.stringify({ type: "model_change", provider: "openai", modelId: "gpt-test" }),
+    JSON.stringify({ type: "thinking_level_change", thinkingLevel: "high" }),
+    JSON.stringify({ type: "message", message: { role: "user", content: "task" } }),
+    JSON.stringify({
+      type: "message",
+      message: {
+        role: "assistant",
+        content: [{ type: "toolCall", id: "call-1", name: "bash", arguments: { command: "true" } }],
+        usage: usage(10, 5, 2, 3, 0.015),
+      },
+    }),
+    JSON.stringify({
+      type: "message",
+      message: { role: "toolResult", toolCallId: "call-1", content: "done", usage: usage(1, 2, 4, 5, 0.005) },
+    }),
+  ].join("\n"));
+
+  const { sessionInfo } = readTaskSessionFile(file);
+  assert.deepEqual(sessionInfo, {
+    sessionId: "child-session-id",
+    sessionName: "review child",
+    storagePath: file,
+    model: "openai/gpt-test",
+    thinkingLevel: "high",
+    cwd: "/work/child",
+    counts: {
+      scope: "session",
+      userMessages: 1,
+      assistantMessages: 1,
+      toolCalls: 1,
+      toolResults: 1,
+      totalMessages: 3,
+    },
+    tokens: { input: 11, output: 7, cacheRead: 6, cacheWrite: 8, total: 32 },
+    cost: 0.02,
+  });
+});
+
 test("readTaskTranscript reports no metadata for a session that recorded none", () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-task-transcript-nometa-"));
   writeFileSync(

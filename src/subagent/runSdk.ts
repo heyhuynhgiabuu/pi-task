@@ -18,6 +18,7 @@ import type { AgentConfig, AgentModelSpec } from "../helpers.js";
 import type {
   ChildBuiltinCommand,
   ChildBuiltinCommandResult,
+  ChildSessionInfo,
 } from "../types.js";
 
 export interface RunSdkSubagentOptions {
@@ -183,9 +184,22 @@ export async function executeSdkChildBuiltinCommand(
           ? `${session.model.provider}/${session.model.id}`
           : "none";
         const choices = models.map((model) => `${model.provider}/${model.id}`);
-        return commandInfo(
-          `Child model: ${current}. Set with /model <provider/model>. Available: ${choices.join(", ") || "none"}.`,
-        );
+        return {
+          ...commandInfo(
+            `Child model: ${current}. Set with /model <provider/model>. Available: ${choices.join(", ") || "none"}.`,
+          ),
+          selector: {
+            kind: "model",
+            models: models.map((model) => ({
+              provider: model.provider,
+              id: model.id,
+              name: model.name || model.id,
+            })),
+            ...(session.model
+              ? { currentModel: { provider: session.model.provider, id: session.model.id } }
+              : {}),
+          },
+        };
       }
       const separator = command.argument.indexOf("/");
       const match = separator < 0
@@ -206,9 +220,16 @@ export async function executeSdkChildBuiltinCommand(
     if (command.name === "thinking") {
       const levels = session.getAvailableThinkingLevels();
       if (!command.argument) {
-        return commandInfo(
-          `Child thinking level: ${session.thinkingLevel}. Available: ${levels.join(", ") || "none"}. Set with /thinking <level>.`,
-        );
+        return {
+          ...commandInfo(
+            `Child thinking level: ${session.thinkingLevel}. Available: ${levels.join(", ") || "none"}. Set with /thinking <level>.`,
+          ),
+          selector: {
+            kind: "thinking",
+            currentLevel: session.thinkingLevel as import("../thinking.js").PiThinkingLevel,
+            levels: levels as import("../thinking.js").PiThinkingLevel[],
+          },
+        };
       }
       const requested = command.argument.toLowerCase();
       const level = levels.find((candidate) => candidate.toLowerCase() === requested);
@@ -236,13 +257,34 @@ export async function executeSdkChildBuiltinCommand(
       const stats = session.getSessionStats();
       const model = session.model
         ? `${session.model.provider}/${session.model.id}`
-        : "none";
-      return commandInfo([
-        `Child session ${stats.sessionId}`,
-        `Model: ${model}; thinking: ${session.thinkingLevel}; name: ${session.sessionManager.getSessionName() ?? "(unnamed)"}`,
-        `Messages: ${stats.totalMessages} total (${stats.userMessages} user, ${stats.assistantMessages} assistant); tools: ${stats.toolCalls} calls/${stats.toolResults} results`,
-        `Tokens: ${stats.tokens.total} total (${stats.tokens.input} input, ${stats.tokens.output} output); cost: $${stats.cost.toFixed(4)}`,
-      ].join("\n"));
+        : undefined;
+      const sessionInfo: ChildSessionInfo = {
+        sessionId: stats.sessionId,
+        ...(session.sessionManager.getSessionName()
+          ? { sessionName: session.sessionManager.getSessionName() }
+          : {}),
+        ...(stats.sessionFile ? { storagePath: stats.sessionFile } : {}),
+        ...(model ? { model } : {}),
+        ...(session.thinkingLevel ? { thinkingLevel: session.thinkingLevel } : {}),
+        ...(typeof session.sessionManager.getCwd === "function"
+          ? { cwd: session.sessionManager.getCwd() }
+          : {}),
+        counts: {
+          scope: "session",
+          userMessages: stats.userMessages,
+          assistantMessages: stats.assistantMessages,
+          toolCalls: stats.toolCalls,
+          toolResults: stats.toolResults,
+          totalMessages: stats.totalMessages,
+        },
+        tokens: { ...stats.tokens },
+        cost: stats.cost,
+        ...(stats.contextUsage ? { contextUsage: stats.contextUsage } : {}),
+      };
+      return {
+        ...commandInfo(`Showing session information for child ${stats.sessionId}.`),
+        sessionInfo,
+      };
     }
 
     return commandError(`/${command.name} is not implemented for SDK child sessions.`);

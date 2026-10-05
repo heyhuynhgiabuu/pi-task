@@ -135,11 +135,11 @@ export class TaskPanelEditor extends CustomEditor {
       if (matchesKey(data, "return")) {
         const text = (this.getExpandedText?.() ?? this.getText()).trim();
         if (!text) return;
-        if (text.startsWith("/")) {
-          // Built-in commands still act on the main session.
-          super.handleInput(data);
-          return;
-        }
+        // While a child is viewed every submitted prompt belongs to that child.
+        // In particular, letting slash text reach CustomEditor's onSubmit would
+        // dispatch it in the parent session (and open the parent's selectors).
+        // steerViewedTask routes supported/denied child built-ins and preserves
+        // unknown slash text as child steering.
         this.setText("");
         host.onSteer(text);
         return;

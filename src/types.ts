@@ -3,6 +3,7 @@ import type {
   ExecutionBackendKind,
   TerminalHandle,
 } from "./subagent/terminalBackend.js";
+import type { PiThinkingLevel } from "./thinking.js";
 export type { TerminalHandle, HerdrTerminalHandle } from "./subagent/terminalBackend.js";
 
 export type ExecutionBackend = ExecutionBackendKind;
@@ -14,9 +15,70 @@ export interface ChildBuiltinCommand {
   rawText: string;
 }
 
+export interface ChildModelOption {
+  provider: string;
+  id: string;
+  name: string;
+}
+
+/** Structured, child-owned data used by the transcript view's native selectors. */
+export type ChildBuiltinSelectorData =
+  | {
+      kind: "model";
+      models: ChildModelOption[];
+      currentModel?: { provider: string; id: string };
+    }
+  | {
+      kind: "thinking";
+      currentLevel: PiThinkingLevel;
+      levels: PiThinkingLevel[];
+    };
+
+export interface ChildHistoryOption {
+  taskId: string;
+  agentType: string;
+  description: string;
+  sessionName: string;
+  status: string;
+  cwd?: string;
+  startedAt: number;
+  completedAt?: number;
+}
+
+export interface ChildHistoryPickerData {
+  sessions: ChildHistoryOption[];
+  currentTaskId: string;
+}
+
+export interface ChildSessionInfo {
+  sessionId?: string;
+  sessionName?: string;
+  storagePath?: string;
+  model?: string;
+  thinkingLevel?: string;
+  cwd?: string;
+  counts?: {
+    scope: "session" | "current context";
+    userMessages: number;
+    assistantMessages: number;
+    toolCalls: number;
+    toolResults: number;
+    totalMessages: number;
+  };
+  tokens?: { input: number; output: number; cacheRead: number; cacheWrite: number; total: number };
+  cost?: number;
+  contextUsage?: { tokens: number | null; contextWindow: number; percent: number | null };
+}
+
 export interface ChildBuiltinCommandResult {
   message: string;
   level: "info" | "warning" | "error";
+  /** Present only for a no-argument child /model or /thinking selector request. */
+  selector?: ChildBuiltinSelectorData;
+  /** Sourced child-owned data for read-only /session, never inferred from the parent. */
+  sessionInfo?: ChildSessionInfo;
+  /** Durable task-attributed history only; selecting it browses, never resumes execution. */
+  historyPicker?: ChildHistoryPickerData;
 }
 
 export type ChildBuiltinCommandBackend = "durable" | "sdk" | "terminal" | "none";

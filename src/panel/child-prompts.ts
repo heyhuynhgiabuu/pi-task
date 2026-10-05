@@ -51,10 +51,11 @@ function loadNativePromptApis(): Promise<NativePromptApis> {
 
 /**
  * Pi 1.0.2 dispatches three private debug commands absent from its exported
- * command list. `/llama` is documented in this release's docs but is absent
- * from both the list and the interactive dispatcher. Reserve all four names
- * rather than letting a prompt template make them look like supported Pi
- * controls in a child editor.
+ * command list. `/llama` is registered by Pi's built-in llama.cpp extension
+ * through `registerCommand`, so it is also absent from the exported list and
+ * from child views that load no extensions. Reserve all four names rather than
+ * letting a prompt template make them look like supported Pi controls in a
+ * child editor.
  */
 const EXTRA_RESERVED_BUILTINS = [
   "debug",
@@ -65,8 +66,8 @@ const EXTRA_RESERVED_BUILTINS = [
 
 const CHILD_BUILTIN_NAMES: Record<ChildBuiltinCommandBackend, readonly string[]> = {
   sdk: ["model", "thinking", "name", "session"],
-  durable: ["model", "thinking", "session"],
-  terminal: ["thinking", "name"],
+  durable: ["model", "thinking", "session", "compact", "resume"],
+  terminal: ["thinking", "name", "session"],
   none: [],
 };
 
@@ -76,8 +77,8 @@ function childBuiltinDescription(
 ): { description: string; argumentHint?: string } {
   if (name === "model") {
     return {
-      description: "Set or inspect the child session model (does not change the parent)",
-      argumentHint: "<provider/model>",
+      description: "Select or set the child session model without changing parent defaults",
+      argumentHint: "[provider/model]",
     };
   }
   if (name === "thinking") {
@@ -87,8 +88,8 @@ function childBuiltinDescription(
           argumentHint: "<level>",
         }
       : {
-          description: "Set or inspect the child session thinking level",
-          argumentHint: "<level>",
+          description: "Select or set a thinking level supported by this child model",
+          argumentHint: "[level]",
         };
   }
   if (name === "name") {
@@ -104,6 +105,15 @@ function childBuiltinDescription(
   }
   if (name === "session") {
     return { description: "Show this child session's information and statistics" };
+  }
+  if (name === "compact") {
+    return {
+      description: "Compact this child session's context (runs in the background; progress is not shown here)",
+      argumentHint: "[instructions]",
+    };
+  }
+  if (name === "resume" && backend === "durable") {
+    return { description: "Browse task-attributed durable child transcripts in this project's database without resuming execution" };
   }
   return { description: `Run /${name} in this child session` };
 }
@@ -146,18 +156,13 @@ function unsupportedBuiltinMessage(
     return `/quit is never forwarded from a child editor. ${stop}`;
   }
   if (name === "compact") {
-    return backend === "durable"
-      ? "/compact is unavailable for durable child tasks because pi-durable has no atomic active-task-only compaction admission; a command could outlive the task view."
-      : "/compact is unavailable for this child task: compaction can interrupt its one-shot runner, and the task API cannot safely guarantee continuation.";
+    return "/compact is unavailable for this child task: compaction can interrupt its one-shot runner, and the task API cannot safely guarantee continuation.";
   }
   if (name === "model" && backend === "terminal") {
-    return "/model is unavailable for terminal children because the task view cannot safely inspect the child model catalog or operate Pi's hidden model selector.";
+    return "/model is unavailable for terminal children: steering an exact provider/model would work, but any mismatch opens Pi's model selector inside the hidden child TUI.";
   }
   if (name === "name" && backend === "durable") {
     return "/name is unavailable for durable children because pi-durable exposes no session display-name API.";
-  }
-  if (name === "session" && backend === "terminal") {
-    return "/session is unavailable for terminal children because Pi renders its statistics in the child TUI, which the transcript overlay hides, and no terminal session-stats API is exposed.";
   }
   if (backend === "none") {
     return "Built-in controls are unavailable for this comparison transcript; its SDK runner does not expose a mutable child session handle.";
@@ -172,7 +177,7 @@ function unsupportedBuiltinMessage(
     return `/${name} is an undocumented Pi 1.0.2 dispatcher command and is not exposed in child task views.`;
   }
   if (name === "llama") {
-    return "/llama is mentioned in the Pi 1.0.2 slash-command docs but is absent from the installed command list and interactive dispatcher; it is not available in child views.";
+    return "/llama is provided by Pi's built-in llama.cpp extension and requires its interactive UI, which is not exposed by child task views.";
   }
   return `/${name} is not supported by the ${backend} child-task controls. Available child controls: ${CHILD_BUILTIN_NAMES[backend].map((item) => `/${item}`).join(", ") || "none"}.`;
 }

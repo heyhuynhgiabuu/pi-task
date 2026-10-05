@@ -173,9 +173,9 @@ test("child built-in routing and autocomplete expose only verified backend comma
   const durable = await availableChildBuiltinCommands("durable");
   const names = (commands: readonly { name: string }[]) => commands.map(({ name }) => name);
 
-  assert.deepEqual(names(terminal), ["thinking", "name"]);
+  assert.deepEqual(names(terminal), ["thinking", "name", "session"]);
   assert.deepEqual(names(sdk), ["model", "thinking", "name", "session"]);
-  assert.deepEqual(names(durable), ["model", "thinking", "session"]);
+  assert.deepEqual(names(durable), ["model", "thinking", "session", "compact", "resume"]);
   assert.ok(terminal.every((command) => command.description?.includes("child")));
 
   assert.deepEqual(await routeChildBuiltinCommand("/model openai/gpt-test", "sdk"), {
@@ -186,6 +186,21 @@ test("child built-in routing and autocomplete expose only verified backend comma
     kind: "supported",
     command: { name: "thinking", argument: "high", rawText: "/thinking high" },
   });
+  assert.deepEqual(await routeChildBuiltinCommand("/session", "terminal"), {
+    kind: "supported",
+    command: { name: "session", argument: "", rawText: "/session" },
+  }, "terminal Pi children expose read-only session information from their own transcript file");
+  assert.ok((await availableChildBuiltinCommands("terminal")).some(({ name }) => name === "session"));
+  assert.deepEqual(await routeChildBuiltinCommand("/compact keep the failing test names", "durable"), {
+    kind: "supported",
+    command: {
+      name: "compact",
+      argument: "keep the failing test names",
+      rawText: "/compact keep the failing test names",
+    },
+  });
+  assert.equal((await routeChildBuiltinCommand("/resume", "durable"))?.kind, "supported");
+  assert.equal((await routeChildBuiltinCommand("/resume", "sdk"))?.kind, "unsupported", "SDK /resume cannot switch the parent session");
   assert.equal(
     (await routeChildBuiltinCommand("/model\topenai/example", "sdk"))?.command.argument,
     "openai/example",
@@ -202,8 +217,10 @@ test("child built-in routing and autocomplete expose only verified backend comma
     ["/share", "durable", /private session data/i],
     ["/export", "terminal", /private session data/i],
     ["/quit", "terminal", /never forwarded/i],
-    ["/compact", "durable", /atomic active-task-only/i],
-    ["/session", "terminal", /overlay hides/i],
+    ["/compact", "sdk", /one-shot runner/i],
+    ["/model", "terminal", /any mismatch opens Pi's model selector/],
+    ["/llama", "durable", /llama\.cpp extension/i],
+    ["/llama", "terminal", /requires its interactive UI/i],
   ] as const) {
     const denied = await routeChildBuiltinCommand(text, backend);
     assert.equal(denied?.kind, "unsupported", `${text} is explicitly denied`);

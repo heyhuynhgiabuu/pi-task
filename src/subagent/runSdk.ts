@@ -1,8 +1,24 @@
-import type { ExtensionContext, ModelRuntime, SettingsManager } from "@earendil-works/pi-coding-agent";
+import type {
+  AgentSession,
+  ExtensionContext,
+  ModelRuntime,
+  SettingsManager,
+} from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
 import { isChildProjectTrusted } from "../panel/child-prompts.js";
 import { createTaskFastModeInlineExtension } from "../fast-mode.js";
-import type { AgentConfig } from "../helpers.js";
+import {
+  assistantOutputProduced,
+  errorMessageOf,
+  failoverExhaustedError,
+  planModelChain,
+  shouldRetrySdkWithNextModel,
+} from "../model-failover.js";
+import type { AgentConfig, AgentModelSpec } from "../helpers.js";
+import type {
+  ChildBuiltinCommand,
+  ChildBuiltinCommandResult,
+} from "../types.js";
 
 export interface RunSdkSubagentOptions {
   prompt: string;
@@ -10,6 +26,8 @@ export interface RunSdkSubagentOptions {
   cwd: string;
   ctx: ExtensionContext;
   model?: string;
+  /** Ordered frontmatter models; failover only before any assistant output. */
+  modelChain?: AgentModelSpec[];
   thinkingLevel?: string;
   tools?: string[];
   excludeTools?: string[];
@@ -25,7 +43,7 @@ export interface RunSdkSubagentOptions {
    * Called with the AgentSession after creation but before prompt().
    * Return an unsubscribe function that will be called on cleanup.
    */
-  onSession?: (session: any) => () => void;
+  onSession?: (session: AgentSession) => () => void;
 }
 
 export function buildSdkResourceLoaderOptions(options: {
@@ -143,6 +161,96 @@ export class SdkSubagentInterruptedError extends Error {
   }
 }
 
+function commandInfo(message: string): ChildBuiltinCommandResult {
+  return { level: "info", message };
+}
+
+function commandError(message: string): ChildBuiltinCommandResult {
+  return { level: "error", message };
+}
+
+/** Run a verified child-session command against this SDK task's own AgentSession. */
+export async function executeSdkChildBuiltinCommand(
+  session: AgentSession,
+  command: ChildBuiltinCommand,
+): Promise<ChildBuiltinCommandResult> {
+  try {
+    if (command.name === "model") {
+      const scoped = session.scopedModels.map(({ model }) => model);
+      const models = scoped.length > 0 ? scoped : [...session.modelRuntime.getAvailableSnapshot()];
+      if (!command.argument) {
+        const current = session.model
+          ? `${session.model.provider}/${session.model.id}`
+          : "none";
+        const choices = models.map((model) => `${model.provider}/${model.id}`);
+        return commandInfo(
+          `Child model: ${current}. Set with /model <provider/model>. Available: ${choices.join(", ") || "none"}.`,
+        );
+      }
+      const separator = command.argument.indexOf("/");
+      const match = separator < 0
+        ? models.find((model) => model.id === command.argument || model.name === command.argument)
+        : models.find((model) =>
+            model.provider === command.argument.slice(0, separator) &&
+            model.id === command.argument.slice(separator + 1)
+          );
+      if (!match) {
+        return commandError(
+          `Unknown child model "${command.argument}". Use /model to list available child models.`,
+        );
+      }
+      await session.setModel(match, { persist: false });
+      return commandInfo(`Child model set to ${match.provider}/${match.id}.`);
+    }
+
+    if (command.name === "thinking") {
+      const levels = session.getAvailableThinkingLevels();
+      if (!command.argument) {
+        return commandInfo(
+          `Child thinking level: ${session.thinkingLevel}. Available: ${levels.join(", ") || "none"}. Set with /thinking <level>.`,
+        );
+      }
+      const requested = command.argument.toLowerCase();
+      const level = levels.find((candidate) => candidate.toLowerCase() === requested);
+      if (!level) {
+        return commandError(
+          `Unknown thinking level "${command.argument}". Available child levels: ${levels.join(", ") || "none"}.`,
+        );
+      }
+      session.setThinkingLevel(level, { persist: false });
+      return commandInfo(`Child thinking level set to ${level}.`);
+    }
+
+    if (command.name === "name") {
+      const current = session.sessionManager.getSessionName();
+      if (!command.argument) {
+        return current
+          ? commandInfo(`Child session name: ${current}`)
+          : commandError("Usage: /name <name>");
+      }
+      session.setSessionName(command.argument);
+      return commandInfo(`Child session name set to ${session.sessionManager.getSessionName() ?? command.argument}.`);
+    }
+
+    if (command.name === "session") {
+      const stats = session.getSessionStats();
+      const model = session.model
+        ? `${session.model.provider}/${session.model.id}`
+        : "none";
+      return commandInfo([
+        `Child session ${stats.sessionId}`,
+        `Model: ${model}; thinking: ${session.thinkingLevel}; name: ${session.sessionManager.getSessionName() ?? "(unnamed)"}`,
+        `Messages: ${stats.totalMessages} total (${stats.userMessages} user, ${stats.assistantMessages} assistant); tools: ${stats.toolCalls} calls/${stats.toolResults} results`,
+        `Tokens: ${stats.tokens.total} total (${stats.tokens.input} input, ${stats.tokens.output} output); cost: $${stats.cost.toFixed(4)}`,
+      ].join("\n"));
+    }
+
+    return commandError(`/${command.name} is not implemented for SDK child sessions.`);
+  } catch (error) {
+    return commandError(error instanceof Error ? error.message : String(error));
+  }
+}
+
 export function getFinalAssistantResult(messages: readonly unknown[]): SdkAssistantResult {
   let finalAssistant: Record<string, unknown> | undefined;
   for (const candidate of messages) {
@@ -219,19 +327,6 @@ export async function runSdkSubagent(options: RunSdkSubagentOptions): Promise<{
   sessionId?: string;
   sessionPath?: string;
 }> {
-  const requestedModel = options.model ?? options.agent.model;
-  const model = await resolveSdkModel(
-    options.ctx,
-    requestedModel,
-  );
-  if (!model) {
-    throw new Error(
-      requestedModel
-        ? `Model "${requestedModel}" is not available in the model registry`
-        : "No model available for SDK subagent execution",
-    );
-  }
-
   const { createAgentSession, DefaultResourceLoader, getAgentDir, SettingsManager } =
     await import("@earendil-works/pi-coding-agent");
   if (activeSdkRuns === 0) {
@@ -239,9 +334,18 @@ export async function runSdkSubagent(options: RunSdkSubagentOptions): Promise<{
   }
   activeSdkRuns += 1;
   process.env.PI_TASK_TOOL_DISABLED = "1";
-  let session: any;
-  let unsubSession: (() => void) | undefined;
-  try {
+
+  /**
+   * One fresh AgentSession attempt. Failover always starts a new session: the
+   * SDK cannot reopen a failed one, and a clean restart is only attempted
+   * before any assistant output exists.
+   */
+  const runAttempt = async (
+    model: Awaited<ReturnType<typeof resolveSdkModel>>,
+    thinkingLevel: string | undefined,
+    deadline: number | undefined,
+    state: { hadAssistantOutput: boolean; explicitModelChange: boolean },
+  ): Promise<{ output: string; sessionId?: string; sessionPath?: string }> => {
     const agentDir = getAgentDir();
     const modelRuntime = await createSdkChildModelRuntime(options.ctx, agentDir);
     const settingsManager = SettingsManager.create(options.cwd, agentDir, {
@@ -266,61 +370,133 @@ export async function runSdkSubagent(options: RunSdkSubagentOptions): Promise<{
 
     await resourceLoader.reload();
 
-    ({ session } = await createAgentSession({
-      cwd: options.cwd,
-      agentDir,
-      modelRuntime: modelRuntime ?? undefined,
-      model,
-      thinkingLevel: options.thinkingLevel as any,
-      tools: options.tools,
-      excludeTools: options.excludeTools,
-      resourceLoader,
-    }));
-    if (options.sessionName && typeof session.setSessionName === "function") {
-      session.setSessionName(options.sessionName);
-    }
-
-    // Subscribe to tool execution events before prompt()
-    if (options.onSession) {
-      unsubSession = options.onSession(session);
-    }
-
-    let interruption: SdkSubagentInterruptedError | undefined;
-    let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-    const interrupt = (kind: "cancelled" | "timeout") => {
-      interruption ??= new SdkSubagentInterruptedError(kind);
-      try {
-        void Promise.resolve(session.abort?.()).catch(() => {
-          // The prompt promise still resolves/rejects through the SDK lifecycle.
-        });
-      } catch {
-        // The prompt promise still resolves/rejects through the SDK lifecycle.
-      }
-    };
-    const onAbort = () => interrupt("cancelled");
-    if (options.signal?.aborted) onAbort();
-    else options.signal?.addEventListener("abort", onAbort, { once: true });
-    const armedTimeoutMs = armableTimeoutMs(options.timeoutMs);
-    if (armedTimeoutMs !== undefined) {
-      timeoutHandle = setTimeout(() => interrupt("timeout"), armedTimeoutMs);
-    }
+    let session: AgentSession | undefined;
+    let unsubSession: (() => void) | undefined;
     try {
-      if (interruption) throw interruption;
-      await session.prompt(options.prompt);
-      if (interruption) throw interruption;
-    } finally {
-      if (timeoutHandle) clearTimeout(timeoutHandle);
-      options.signal?.removeEventListener("abort", onAbort);
-    }
+      ({ session } = await createAgentSession({
+        cwd: options.cwd,
+        agentDir,
+        modelRuntime: modelRuntime ?? undefined,
+        model,
+        thinkingLevel: thinkingLevel as any,
+        tools: options.tools,
+        excludeTools: options.excludeTools,
+        resourceLoader,
+      }));
+      const childSession = session;
+      if (!childSession) throw new Error("SDK child session was not created.");
+      if (options.sessionName) childSession.setSessionName(options.sessionName);
 
-    const sessionId = session.sessionId;
-    const sessionPath = session.sessionFile;
-    const result = getFinalAssistantResult(session.messages);
-    if ("error" in result) throw new Error(result.error);
-    return { output: result.output, sessionId, sessionPath };
+      // Subscribe to tool execution events before prompt()
+      if (options.onSession) {
+        unsubSession = options.onSession(childSession);
+      }
+
+      let interruption: SdkSubagentInterruptedError | undefined;
+      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+      const interrupt = (kind: "cancelled" | "timeout") => {
+        interruption ??= new SdkSubagentInterruptedError(kind);
+        try {
+          void Promise.resolve(childSession.abort()).catch(() => {
+            // The prompt promise still resolves/rejects through the SDK lifecycle.
+          });
+        } catch {
+          // The prompt promise still resolves/rejects through the SDK lifecycle.
+        }
+      };
+      const onAbort = () => interrupt("cancelled");
+      if (options.signal?.aborted) onAbort();
+      else options.signal?.addEventListener("abort", onAbort, { once: true });
+      const remainingMs = deadline === undefined
+        ? undefined
+        : Math.max(0, deadline - Date.now());
+      const armedTimeoutMs = armableTimeoutMs(remainingMs);
+      if (armedTimeoutMs !== undefined) {
+        timeoutHandle = setTimeout(() => interrupt("timeout"), armedTimeoutMs);
+      }
+      try {
+        if (interruption) throw interruption;
+        await childSession.prompt(options.prompt);
+        if (interruption) throw interruption;
+      } finally {
+        if (timeoutHandle) clearTimeout(timeoutHandle);
+        options.signal?.removeEventListener("abort", onAbort);
+      }
+
+      const sessionId = childSession.sessionId;
+      const sessionPath = childSession.sessionFile;
+      const result = getFinalAssistantResult(childSession.messages);
+      if ("error" in result) throw new Error(result.error);
+      return { output: result.output, sessionId, sessionPath };
+    } catch (error) {
+      state.hadAssistantOutput = assistantOutputProduced(session?.messages ?? []);
+      const current = session?.model;
+      state.explicitModelChange = current !== undefined && model !== undefined &&
+        (current.provider !== model.provider || current.id !== model.id);
+      throw error;
+    } finally {
+      unsubSession?.();
+      session?.dispose?.();
+    }
+  };
+
+  try {
+    const chain = planModelChain(options.modelChain);
+    const attempts: AgentModelSpec[] = chain.length > 0
+      ? chain
+      : [{ model: options.model ?? options.agent.model ?? "" }];
+    // The timeout covers the whole chain, not each retry.
+    const deadline = options.timeoutMs !== undefined && Number.isFinite(options.timeoutMs)
+      ? Date.now() + Math.max(0, options.timeoutMs)
+      : undefined;
+    let firstError: Error | undefined;
+    const trail: string[] = [];
+    for (let index = 0; index < attempts.length; index++) {
+      const spec = attempts[index]!;
+      const requestedModel = spec.model;
+      const model = await resolveSdkModel(options.ctx, requestedModel);
+      if (!model) {
+        const failure = new Error(
+          requestedModel
+            ? `Model "${requestedModel}" is not available in the model registry`
+            : "No model available for SDK subagent execution",
+        );
+        firstError ??= failure;
+        trail.push(`${requestedModel ?? "(default)"}: ${failure.message}`);
+        if (index + 1 < attempts.length) continue;
+        if (trail.length > 1 && firstError) throw failoverExhaustedError(firstError, trail);
+        throw failure;
+      }
+
+      const state = { hadAssistantOutput: false, explicitModelChange: false };
+      try {
+        return await runAttempt(
+          model,
+          spec.thinking ?? options.thinkingLevel,
+          deadline,
+          state,
+        );
+      } catch (error) {
+        if (error instanceof SdkSubagentInterruptedError) throw error;
+        const failure = error instanceof Error ? error : new Error(errorMessageOf(error));
+        firstError ??= failure;
+        trail.push(`${requestedModel}: ${failure.message}`);
+        if (
+          shouldRetrySdkWithNextModel({
+            error,
+            hadAssistantOutput: state.hadAssistantOutput,
+            explicitModelChange: state.explicitModelChange,
+            remaining: attempts.length - index - 1,
+          })
+        ) {
+          continue;
+        }
+        if (trail.length > 1 && firstError) throw failoverExhaustedError(firstError, trail);
+        throw error;
+      }
+    }
+    throw firstError ?? new Error("No model available for SDK subagent execution");
   } finally {
-    unsubSession?.();
-    session?.dispose?.();
     activeSdkRuns -= 1;
     if (activeSdkRuns <= 0) {
       activeSdkRuns = 0;

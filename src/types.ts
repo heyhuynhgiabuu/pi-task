@@ -7,6 +7,20 @@ export type { TerminalHandle, HerdrTerminalHandle } from "./subagent/terminalBac
 
 export type ExecutionBackend = ExecutionBackendKind;
 
+/** One native Pi built-in routed within the child editor, never to the parent session. */
+export interface ChildBuiltinCommand {
+  name: string;
+  argument: string;
+  rawText: string;
+}
+
+export interface ChildBuiltinCommandResult {
+  message: string;
+  level: "info" | "warning" | "error";
+}
+
+export type ChildBuiltinCommandBackend = "durable" | "sdk" | "terminal" | "none";
+
 /** A completion callback may suppress delivery when its owning conversation is no longer active. */
 export type CompletionDeliveryOutcome = "suppressed";
 
@@ -59,6 +73,10 @@ export interface BackgroundTask {
   /** SDK child steering: queues `text` into the live child session
    * (process-local, never persisted). Returns an error message or null. */
   sdkSteer?: (text: string) => string | null | Promise<string | null>;
+  /** Child-session Pi controls; process-local and removed when the SDK run settles. */
+  sdkCommand?: (
+    command: ChildBuiltinCommand,
+  ) => ChildBuiltinCommandResult | Promise<ChildBuiltinCommandResult>;
   status?: "running" | "done" | "cancelled" | "aborted" | "failed" | "timeout";
   phase?: string;
   result?: string;

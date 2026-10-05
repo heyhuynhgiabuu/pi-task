@@ -532,6 +532,38 @@ export async function executeDurableTask({
       progressTranscript?.toolCallCount() ?? 0,
     );
   };
+  const historyBase = {
+    id,
+    agentType: agent.name,
+    description,
+    sessionName,
+    startedAt,
+    piDir,
+    dir: artifactsDir,
+    cwd,
+    conversationId,
+    background: isBackground,
+    backend: "durable" as const,
+    durableRequestId: requestId,
+    ...owner,
+    ownerPid: process.pid,
+  };
+  /**
+   * Keep the history's exact submission identity on the attempt currently in
+   * flight: a crash during a fallback attempt must recover that attempt, not
+   * the settled primary it replaced.
+   */
+  const noteAttemptRequestId = (attemptRequestId: string) => {
+    try {
+      upsertTaskSessionHistory(piDir, {
+        ...historyBase,
+        status: "running",
+        durableRequestId: attemptRequestId,
+      });
+    } catch {
+      // Best-effort; the in-flight attempt still settles normally.
+    }
+  };
   const run = () =>
     (runTaskOverride ?? runDurableTask)({
       piDir,
@@ -543,6 +575,8 @@ export async function executeDurableTask({
       sessionModel,
       fast,
       thinkingLevel: parseDurableThinkingLevel(agent.thinking),
+      modelSpecs: agent.modelSpecs,
+      onRequestId: noteAttemptRequestId,
       modelRegistry: ctx.modelRegistry,
       signal: runnerAbortController.signal,
       onSnapshot: (snapshot) => {
@@ -686,22 +720,6 @@ export async function executeDurableTask({
   // Foreground: the tool call waits for the child's answer, like the SDK
   // backend, but the run is durable — a parent crash resumes it instead of
   // losing it, and a later run of the same task id returns the same child.
-  const historyBase = {
-    id,
-    agentType: agent.name,
-    description,
-    sessionName,
-    startedAt,
-    piDir,
-    dir: artifactsDir,
-    cwd,
-    conversationId,
-    background: false,
-    backend: "durable" as const,
-    durableRequestId: requestId,
-    ...owner,
-    ownerPid: process.pid,
-  };
   upsertTaskSessionHistory(piDir, { ...historyBase, status: "running" });
   const foregroundTask: BackgroundTask = {
     dir: artifactsDir,

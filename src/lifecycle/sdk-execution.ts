@@ -22,6 +22,7 @@ import type { DeliveryGuard } from "../panel/delivery.js";
 import { durableParentOf } from "./ownership.js";
 import type { TaskWidgetController } from "./widget.js";
 import {
+  executeSdkChildBuiltinCommand,
   SdkSubagentInterruptedError,
   runSdkSubagent,
 } from "../subagent/runSdk.js";
@@ -140,6 +141,7 @@ export async function executeSdkTask({
                 (error: unknown) =>
                   error instanceof Error ? error.message : String(error),
               );
+            task.sdkCommand = (command) => executeSdkChildBuiltinCommand(session, command);
           }
 
           let unsubscribeSessionReady: (() => void) | undefined;
@@ -170,6 +172,7 @@ export async function executeSdkTask({
         cwd,
         ctx,
         model: agent.model,
+        modelChain: agent.modelSpecs,
         thinkingLevel: agent.thinking,
         tools: toolSelection.tools,
         excludeTools: toolSelection.excludeTools,
@@ -185,7 +188,10 @@ export async function executeSdkTask({
     } finally {
       // The child session is disposed once the run settles; drop the steering
       // callback so the disposed session is not retained by the task row.
-      if (task) task.sdkSteer = undefined;
+      if (task) {
+        task.sdkSteer = undefined;
+        task.sdkCommand = undefined;
+      }
     }
   };
 

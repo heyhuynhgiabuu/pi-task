@@ -18,6 +18,7 @@ import {
   ToolExecutionComponent,
 } from "@earendil-works/pi-coding-agent";
 import { createTaskWidgetController } from "../src/lifecycle/widget.js";
+import { DurableTranscript } from "../src/panel/durable-transcript.js";
 import { TaskTranscriptOverlay } from "../src/panel/task-transcript-overlay.js";
 import { createTaskTranscriptPane } from "../src/panel/task-pane.js";
 import {
@@ -935,6 +936,57 @@ test("child panel footer prefers the live durable agent state over session metad
     const afterWatchError = overlay.render(140).join("\n");
     assert.match(afterWatchError, /deepseek-flash/, "the model survives an update without agent state");
     assert.match(afterWatchError, /thinking high/, "the thinking level survives too");
+  } finally {
+    controller.dispose();
+  }
+});
+
+test("child panel footer shows the failover model, not the stale primary", () => {
+  initTheme();
+  const task = makeTask({ backend: "durable", cwd: "/tmp/child-cwd" });
+  const { context, mountOverlay } = createTuiContext();
+  const controller = createTaskWidgetController(new Map([["t-failover-footer", task]]), new Map());
+  controller.ensureTaskWidget(context);
+
+  const transcript = new DurableTranscript({
+    type: "snapshot",
+    entries: [],
+    tools: [],
+    compactions: [],
+    inbox: [],
+    agent: {
+      model: { provider: "openai-codex", modelId: "gpt-6-luna" },
+      thinkingLevel: "max",
+    },
+    usage: {
+      models: {},
+      tools: {},
+      totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costTotal: 0 },
+    },
+  } as never);
+  // A failover configure commit reaches the live view as an agent_changed event.
+  transcript.apply([{
+    type: "agent_changed",
+    agent: {
+      model: { provider: "opencode-go", modelId: "deepseek-flash" },
+      thinkingLevel: "max",
+    },
+  } as never]);
+  controller.setLiveTranscript(
+    "t-failover-footer",
+    transcript.items(),
+    0,
+    transcript.agentState(),
+  );
+  controller.openTaskView("t-failover-footer");
+  const overlay = mountOverlay({ fg: (_style: string, text: string) => text });
+  initTheme();
+
+  try {
+    const view = overlay.render(140).join("\n");
+    assert.match(view, /deepseek-flash/, "the footer shows the model actually running");
+    assert.doesNotMatch(view, /gpt-6-luna/, "the stale primary model is gone");
+    assert.match(view, /thinking max/, "the fallback model's thinking level is shown");
   } finally {
     controller.dispose();
   }

@@ -21,6 +21,7 @@ import {
   abortDurableTask,
   durableRequestId,
   DurableTaskCancelledError,
+  executeDurableChildBuiltinCommand,
   openDurableHarness,
   resumeDurableTasks,
   runDurableTask,
@@ -161,6 +162,31 @@ const makeRuntimeModelRegistry = (
     find: (provider, modelId) => models.getModel(provider, modelId),
     streamSimple: (model, context, options) => models.streamSimple(model, context, options),
   };
+};
+
+/**
+ * A faux Pi model registry with a `primary`/`fallback` pair that records the
+ * model id of every provider call, so failover order is observable.
+ */
+const makeFailoverRegistry = (
+  steps: (string | import("@earendil-works/pi-ai").AssistantMessage)[],
+) => {
+  const models = createModels();
+  const faux = fauxProvider({ models: [{ id: "primary" }, { id: "fallback" }] });
+  models.setProvider(faux.provider);
+  faux.setResponses(steps.map((step) =>
+    typeof step === "string" ? fauxAssistantMessage(step) : step
+  ));
+  const calls: string[] = [];
+  const registry: DurableRuntimeModelRegistry = {
+    getAll: () => models.getAllModels() as never,
+    find: (provider, modelId) => models.getModel(provider, modelId),
+    streamSimple: (model, context, options) => {
+      calls.push(model.id);
+      return models.streamSimple(model, context, options);
+    },
+  };
+  return { models, faux, calls, registry };
 };
 
 test("PI_TASK_BACKEND=durable selects the durable backend when the packages exist", () => {
@@ -3129,6 +3155,338 @@ test("durable thinking levels accept only canonical Pi values", () => {
   assert.equal(parseDurableThinkingLevel(undefined), undefined);
   assert.equal(parseDurableThinkingLevel(""), undefined);
   assert.equal(parseDurableThinkingLevel("disable"), undefined);
+});
+
+test("durable failover reconfigures the same child conversation and resubmits", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-durable-failover-"));
+  const piDir = join(root, ".pi");
+  const databasePath = join(root, "durable.sqlite");
+  const quotaFailure = fauxAssistantMessage("", {
+    stopReason: "error",
+    errorMessage: "Monthly usage limit reached",
+  });
+  const { registry, calls, faux } = makeFailoverRegistry([quotaFailure, "Fallback answer."]);
+  const provider = faux.provider.id;
+  let handle: Awaited<ReturnType<typeof openDurableHarness>> | undefined;
+  let conversationId: string | undefined;
+  const events: { type?: string }[] = [];
+  try {
+    const result = await runDurableTask({
+      piDir,
+      databasePath,
+      taskId: "t-failover-resubmit",
+      task: "Answer the question.",
+      modelSpecs: [
+        { model: `${provider}/primary`, thinking: "max" },
+        { model: `${provider}/fallback`, thinking: "max" },
+      ],
+      modelRegistry: registry,
+      onSubmitted: (id) => { conversationId = id; },
+      onEvents: (batch) => { events.push(...(batch as unknown as { type?: string }[])); },
+    });
+    assert.equal(result.answer, "Fallback answer.");
+    assert.deepEqual(calls, ["primary", "fallback"], "strict frontmatter order, one call per model");
+
+    handle = await openDurableHarness(piDir, { databasePath });
+    const conversation = await handle.harness.conversation(conversationId as never, handle.context);
+    assert.ok(conversation, "the fallback reuses the primary's child conversation");
+    assert.deepEqual(
+      (await conversation.agent(handle.context)).model,
+      { provider, modelId: "fallback" },
+      "the same conversation is configured to the fallback before resubmission",
+    );
+    const context = await conversation.context(handle.context);
+    assert.equal(
+      context.messages.filter((message) => message.role === "user").length,
+      2,
+      "both attempts are submitted into the same conversation",
+    );
+    assert.ok(
+      events.some((event) => event.type === "agent_changed"),
+      "the configure commit reaches the live transcript (footer) stream",
+    );
+  } finally {
+    if (handle) await handle.harness.close(handle.context);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("durable admission re-points a reused child at the frontmatter primary", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-durable-repin-"));
+  const piDir = join(root, ".pi");
+  const databasePath = join(root, "durable.sqlite");
+  const { registry, calls, faux } = makeFailoverRegistry(["Primary answer.", "Reversed answer."]);
+  const provider = faux.provider.id;
+  let handle: Awaited<ReturnType<typeof openDurableHarness>> | undefined;
+  try {
+    const first = await runDurableTask({
+      piDir,
+      databasePath,
+      taskId: "t-failover-repin",
+      task: "First request.",
+      modelSpecs: [{ model: `${provider}/primary` }],
+      modelRegistry: registry,
+    });
+    assert.equal(first.answer, "Primary answer.");
+
+    const second = await runDurableTask({
+      piDir,
+      databasePath,
+      taskId: "t-failover-repin",
+      task: "Second request.",
+      requestId: "pi-task:t-failover-repin:call:second",
+      modelSpecs: [{ model: `${provider}/fallback` }, { model: `${provider}/primary` }],
+      modelRegistry: registry,
+    });
+    assert.equal(second.answer, "Reversed answer.");
+    assert.equal(second.conversationId, first.conversationId, "the child conversation is reused");
+    assert.deepEqual(
+      calls,
+      ["primary", "fallback"],
+      "admission configures the reversed frontmatter primary before submitting",
+    );
+
+    handle = await openDurableHarness(piDir, { databasePath });
+    const conversation = await handle.harness.conversation(
+      second.conversationId as never,
+      handle.context,
+    );
+    assert.ok(conversation);
+    assert.deepEqual((await conversation.agent(handle.context)).model, {
+      provider,
+      modelId: "fallback",
+    });
+  } finally {
+    if (handle) await handle.harness.close(handle.context);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("durable failover exhaustion surfaces the original error after each model once", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-durable-failover-exhausted-"));
+  const piDir = join(root, ".pi");
+  const databasePath = join(root, "durable.sqlite");
+  const primaryFailure = fauxAssistantMessage("", {
+    stopReason: "error",
+    errorMessage: "Monthly usage limit reached",
+  });
+  const fallbackFailure = fauxAssistantMessage("", {
+    stopReason: "error",
+    errorMessage: "FreeUsageLimitError: weekly limit",
+  });
+  const { registry, calls, faux } = makeFailoverRegistry([
+    primaryFailure,
+    fallbackFailure,
+    "This third response must never run.",
+  ]);
+  const provider = faux.provider.id;
+  try {
+    await assert.rejects(
+      runDurableTask({
+        piDir,
+        databasePath,
+        taskId: "t-failover-exhausted",
+        task: "Fail on every configured model.",
+        modelSpecs: [
+          { model: `${provider}/primary` },
+          { model: `${provider}/fallback` },
+          { model: `${provider}/primary` },
+        ],
+        modelRegistry: registry,
+      }),
+      (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        assert.match(
+          message,
+          /Monthly usage limit reached/,
+          "the original error stays the primary message",
+        );
+        assert.match(
+          message,
+          /FreeUsageLimitError: weekly limit/,
+          "the last attempt's provider error is preserved",
+        );
+        return true;
+      },
+    );
+    assert.deepEqual(calls, ["primary", "fallback"], "a duplicate model is never retried");
+    assert.equal(faux.getPendingResponseCount(), 1, "the unclaimed third response was never consumed");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("durable cancellation never fails over to the next model", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-durable-failover-cancel-"));
+  const piDir = join(root, ".pi");
+  const databasePath = join(root, "durable.sqlite");
+  const { registry, calls, faux } = makeFailoverRegistry(["This answer must not be used."]);
+  const provider = faux.provider.id;
+  let releaseResult!: () => void;
+  let resultReached!: () => void;
+  const gate = new Promise<void>((resolve) => { releaseResult = resolve; });
+  const started = new Promise<void>((resolve) => { resultReached = resolve; });
+  const originalStreamSimple = registry.streamSimple;
+  registry.streamSimple = (model, context, options) => {
+    const stream = originalStreamSimple(model, context, options);
+    const result = stream.result.bind(stream);
+    stream.result = async () => {
+      resultReached();
+      await gate;
+      return result();
+    };
+    return stream;
+  };
+  const controller = new AbortController();
+  let run: ReturnType<typeof runDurableTask> | undefined;
+  try {
+    run = runDurableTask({
+      piDir,
+      databasePath,
+      taskId: "t-failover-cancel",
+      task: "Cancel before any answer.",
+      modelSpecs: [{ model: `${provider}/primary` }, { model: `${provider}/fallback` }],
+      modelRegistry: registry,
+      signal: controller.signal,
+    });
+    await started;
+    controller.abort();
+    releaseResult();
+    await assert.rejects(run, DurableTaskCancelledError);
+    assert.deepEqual(calls, ["primary"], "cancellation never advances the chain");
+  } finally {
+    releaseResult();
+    if (run) await run.catch(() => undefined);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a steering successor failure never advances the durable model chain", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-durable-failover-steer-"));
+  const piDir = join(root, ".pi");
+  const databasePath = join(root, "durable.sqlite");
+  const steeringFailure = fauxAssistantMessage("", {
+    stopReason: "error",
+    errorMessage: "permanent follow-up failure",
+  });
+  const { registry, calls, faux } = makeFailoverRegistry([
+    "Initial answer.",
+    steeringFailure,
+    "The fallback must not run.",
+  ]);
+  const provider = faux.provider.id;
+  let releaseFirst!: () => void;
+  let firstStarted!: () => void;
+  const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const firstReached = new Promise<void>((resolve) => { firstStarted = resolve; });
+  const originalStreamSimple = registry.streamSimple;
+  let streamCount = 0;
+  registry.streamSimple = (model, context, options) => {
+    const stream = originalStreamSimple(model, context, options);
+    if (streamCount++ === 0) {
+      const result = stream.result.bind(stream);
+      stream.result = async () => {
+        firstStarted();
+        await firstGate;
+        return result();
+      };
+    }
+    return stream;
+  };
+  let run: ReturnType<typeof runDurableTask> | undefined;
+  try {
+    run = runDurableTask({
+      piDir,
+      databasePath,
+      taskId: "t-failover-steer",
+      task: "Answer before steering.",
+      modelSpecs: [{ model: `${provider}/primary` }, { model: `${provider}/fallback` }],
+      modelRegistry: registry,
+    });
+    await firstReached;
+    assert.equal(
+      await steerDurableTask(piDir, "t-failover-steer", "Refine the answer.", { databasePath }),
+      null,
+    );
+    releaseFirst();
+    await assert.rejects(run, /permanent follow-up failure/i);
+    assert.deepEqual(
+      calls,
+      ["primary", "primary"],
+      "the steering successor stays on the current model and never advances the chain",
+    );
+  } finally {
+    releaseFirst();
+    if (run) await run.catch(() => undefined);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an explicit child /model change owns a durable failure instead of the chain", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-durable-failover-model-command-"));
+  const piDir = join(root, ".pi");
+  const databasePath = join(root, "durable.sqlite");
+  const primaryFailure = fauxAssistantMessage("", {
+    stopReason: "error",
+    errorMessage: "Monthly usage limit reached",
+  });
+  const { registry, calls, faux } = makeFailoverRegistry([
+    primaryFailure,
+    "The fallback must not run.",
+  ]);
+  const provider = faux.provider.id;
+  let releaseFirst!: () => void;
+  let firstStarted!: () => void;
+  const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const firstReached = new Promise<void>((resolve) => { firstStarted = resolve; });
+  const originalStreamSimple = registry.streamSimple;
+  let streamCount = 0;
+  registry.streamSimple = (model, context, options) => {
+    const stream = originalStreamSimple(model, context, options);
+    if (streamCount++ === 0) {
+      const result = stream.result.bind(stream);
+      stream.result = async () => {
+        firstStarted();
+        await firstGate;
+        return result();
+      };
+    }
+    return stream;
+  };
+  let run: ReturnType<typeof runDurableTask> | undefined;
+  try {
+    run = runDurableTask({
+      piDir,
+      databasePath,
+      taskId: "t-failover-explicit-model",
+      task: "Fail after an explicit model change.",
+      modelSpecs: [{ model: `${provider}/primary` }, { model: `${provider}/fallback` }],
+      modelRegistry: registry,
+    });
+    await firstReached;
+    const update = await executeDurableChildBuiltinCommand(
+      piDir,
+      "t-failover-explicit-model",
+      {
+        name: "model",
+        argument: `${provider}/fallback`,
+        rawText: `/model ${provider}/fallback`,
+      },
+      { databasePath, modelRegistry: registry },
+    );
+    assert.equal(update.level, "info", update.message);
+    releaseFirst();
+    await assert.rejects(run, /Monthly usage limit reached/);
+    assert.deepEqual(
+      calls,
+      ["primary"],
+      "the explicit /model change owns the failure; the chain does not advance",
+    );
+  } finally {
+    releaseFirst();
+    if (run) await run.catch(() => undefined);
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("durable models adapter injects an opencode routing session id", () => {

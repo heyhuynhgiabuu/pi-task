@@ -14,6 +14,16 @@ import { statSync } from "node:fs";
 import { join } from "node:path";
 
 import { createTaskFastModeModelMatcher } from "../fast-mode.js";
+import {
+  classifyModelFailover,
+  failoverExhaustedError,
+  planModelChain,
+} from "../model-failover.js";
+import type { AgentModelSpec } from "../helpers.js";
+import type {
+  ChildBuiltinCommand,
+  ChildBuiltinCommandResult,
+} from "../types.js";
 
 /** The subset of the pi-durable module the backend uses. */
 type DurableModule = typeof import("@earendil-works/pi-durable");
@@ -32,7 +42,17 @@ type DurableRunRecord =
       strandedSteeringReason?: string;
     }
   | { taskId: string; status: "done"; answer: EntryId; usageJson?: string }
-  | { taskId: string; status: "failed"; reason: string }
+  | {
+      taskId: string;
+      status: "failed";
+      reason: string;
+      /** Harness submission verdict (`model_error`, `no_model`, ...) when known. */
+      submissionReason?: string;
+      /** Provider/harness detail for a model failure, when known. */
+      detail?: string;
+      /** The failed input was a steering successor: never advance the model chain. */
+      steering?: boolean;
+    }
   | { taskId: string; status: "cancelled"; reason: string };
 
 type DurableRunState = {
@@ -437,6 +457,37 @@ async function findChild(
   return handle.harness.conversation(childId, handle.context);
 }
 
+/** Apply an agent change only while this task still owns its child run. */
+async function configureActiveDurableChild(
+  handle: DurableHarnessHandle,
+  conversation: import("@earendil-works/pi-durable").Conversation,
+  taskId: string,
+  change: import("@earendil-works/pi-durable").AgentChange,
+): Promise<boolean> {
+  return conversation.commit(async (tx) => {
+    const runs = await tx.doc(handle.runsDoc, conversation.id);
+    const requestId = runs.activeByTask[taskId];
+    const run = requestId ? runs.byRequestId[requestId] : undefined;
+    if (!run || run.taskId !== taskId) return false;
+    if (run.status === "admitting") {
+      await handle.module.configure(tx, conversation.id, change);
+      return true;
+    }
+    if (run.status !== "running") return false;
+    const live = await tx.doc(handle.module.LiveDoc, conversation.id);
+    if (!live.run) return false;
+    const task = await tx.task(live.run.taskId);
+    if (
+      !task ||
+      task.abortRequested ||
+      task.state.status === "completing" ||
+      task.state.status === "terminal"
+    ) return false;
+    await handle.module.configure(tx, conversation.id, change);
+    return true;
+  }, handle.context);
+}
+
 export type DurableAdmissionState =
   | { kind: "admitted" }
   | {
@@ -761,12 +812,22 @@ function describeUnansweredSubmission(record: DurableSubmissionRecord): string {
   return `${record.reason}${detail}`;
 }
 
-/** Reserve one parent request before it can accept any transcript steering. */
+/**
+ * Reserve one parent request before it can accept any transcript steering.
+ * An optional `configure` change is applied in the same commit that admits
+ * the request, so a failover resubmit can never run under the previous
+ * model/thinking level (and a reused child is re-pointed at the frontmatter
+ * primary at admission).
+ */
 async function reserveDurableRun(
   handle: DurableHarnessHandle,
   conversation: import("@earendil-works/pi-durable").Conversation,
   taskId: string,
   requestId: string,
+  configure?: {
+    model?: { provider: string; modelId: string };
+    thinkingLevel?: DurableThinkingLevel;
+  },
 ): Promise<DurableRunReservation> {
   return conversation.commit(async (tx) => {
     const runs = await tx.doc(handle.runsDoc, conversation.id);
@@ -794,7 +855,19 @@ async function reserveDurableRun(
       runs.byRequestId[requestId] = { taskId, status: "admitting", ownerPid: process.pid };
     }
     runs.activeByTask[taskId] = requestId;
-    return copyDurableRunRecord(runs.byRequestId[requestId]!);
+    const current = runs.byRequestId[requestId]!;
+    if (
+      current.status === "admitting" &&
+      (configure?.model !== undefined || configure?.thinkingLevel !== undefined)
+    ) {
+      await handle.module.configure(tx, conversation.id, {
+        ...(configure?.model !== undefined ? { model: configure.model } : {}),
+        ...(configure?.thinkingLevel !== undefined
+          ? { thinkingLevel: configure.thinkingLevel }
+          : {}),
+      });
+    }
+    return copyDurableRunRecord(current);
   }, handle.context);
 }
 
@@ -968,10 +1041,17 @@ async function settleDurableRun(
           reason: `Durable submission ${aborted.requestId ?? aborted.id} was aborted.`,
         };
       } else if (failedSubmission) {
+        const steering = failedSubmission.requestId !== undefined &&
+          failedSubmission.requestId !== requestId;
         terminal = {
           taskId,
           status: "failed",
           reason: `durable subagent failed: ${describeUnansweredSubmission(failedSubmission)}`,
+          submissionReason: failedSubmission.reason,
+          ...(typeof failedSubmission.detail === "string"
+            ? { detail: failedSubmission.detail }
+            : {}),
+          ...(steering ? { steering: true } : {}),
         };
       } else if (current.status === "running" && current.strandedSteeringReason) {
         terminal = { taskId, status: "failed", reason: current.strandedSteeringReason };
@@ -1013,6 +1093,96 @@ async function settleDurableRun(
   }
 }
 
+/** One planned model attempt in a durable failover chain. */
+interface DurableAttemptPlan {
+  /** Display label: resolved `provider/modelId` or the raw frontmatter spec. */
+  label: string;
+  ref?: { provider: string; modelId: string };
+  /** Resolution failure (unknown/unparseable model); no submission was made. */
+  error?: Error;
+  thinkingLevel?: DurableThinkingLevel;
+}
+
+function toError(value: unknown): Error {
+  return value instanceof Error ? value : new Error(String(value));
+}
+
+/**
+ * The ordered attempt plan for one durable run. A frontmatter `models:` list
+ * yields one attempt per distinct resolvable model; legacy callers keep the
+ * single explicit/session/default model. Resolution failures are captured so
+ * a broken primary can still fall over to a working fallback, and are thrown
+ * before any child state exists when no chain was configured.
+ */
+function buildDurableAttempts(
+  input: {
+    model?: string;
+    sessionModel?: { provider: string; modelId: string };
+    modelSpecs?: AgentModelSpec[];
+    thinkingLevel?: DurableThinkingLevel;
+  },
+  handle: DurableHarnessHandle,
+): DurableAttemptPlan[] {
+  const specs = planModelChain(input.modelSpecs);
+  if (specs.length > 0) {
+    const attempts: DurableAttemptPlan[] = [];
+    const seen = new Set<string>();
+    for (const spec of specs) {
+      let ref: { provider: string; modelId: string } | undefined;
+      let error: Error | undefined;
+      try {
+        ref = parseAgentModel(spec.model, handle.models);
+      } catch (cause) {
+        error = toError(cause);
+      }
+      const key = ref ? `${ref.provider}/${ref.modelId}` : `unresolved:${spec.model}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      attempts.push({
+        label: ref ? `${ref.provider}/${ref.modelId}` : spec.model,
+        ...(ref !== undefined ? { ref } : {}),
+        ...(error !== undefined ? { error } : {}),
+        thinkingLevel: parseDurableThinkingLevel(spec.thinking) ?? input.thinkingLevel,
+      });
+    }
+    return attempts;
+  }
+  const label =
+    input.model ??
+    (input.sessionModel
+      ? `${input.sessionModel.provider}/${input.sessionModel.modelId}`
+      : "default model");
+  try {
+    const ref = parseAgentModel(input.model, handle.models) ??
+      input.sessionModel ??
+      defaultModelRef(handle);
+    return [
+      {
+        label,
+        ...(ref !== undefined ? { ref } : {}),
+        thinkingLevel: input.thinkingLevel,
+      },
+    ];
+  } catch (cause) {
+    return [{ label, error: toError(cause), thinkingLevel: input.thinkingLevel }];
+  }
+}
+
+/**
+ * Request id for a fallback attempt. It keeps the `pi-task:<taskId>:call:`
+ * shape so legacy recovery can still attribute the submission to its task.
+ */
+function durableFallbackRequestId(
+  baseRequestId: string,
+  taskId: string,
+  index: number,
+): string {
+  if (baseRequestId.startsWith("pi-task:") && baseRequestId.includes(":call:")) {
+    return `${baseRequestId}:fallback:${index}`;
+  }
+  return durableRequestId(taskId, `fallback-${index}`);
+}
+
 /** Run a durable subagent: find-before-create, exactly-once by task id. */
 export async function runDurableTask(input: {
   piDir: string;
@@ -1030,6 +1200,13 @@ export async function runDurableTask(input: {
   requestId?: string;
   /** Agent frontmatter thinking level; without it the child runs at the harness default. */
   thinkingLevel?: DurableThinkingLevel;
+  /**
+   * Ordered frontmatter models. Each model is attempted at most once per run;
+   * only a clear provider/model failure advances to the next entry.
+   */
+  modelSpecs?: AgentModelSpec[];
+  /** Called with each attempt's request id before it is submitted (recovery identity). */
+  onRequestId?: (requestId: string) => void;
   /** Mirror the parent's fast mode onto the child's Codex requests. */
   fast?: boolean;
   /** Called once the submission is durably admitted, before it settles. */
@@ -1048,16 +1225,18 @@ export async function runDurableTask(input: {
     modelRegistry: input.modelRegistry,
     fast: input.fast,
   });
+  const attempts = buildDurableAttempts(input, handle);
+  // Legacy (non-chain) callers fail on an invalid explicit model before any
+  // child state exists, exactly as before failover existed.
+  if (!input.modelSpecs?.length && attempts[0]?.error) throw attempts[0].error;
+  const primary = attempts.find((attempt) => attempt.ref !== undefined);
   const childId = await findOrCreateChild(
     handle,
     durableOwnerKey(input.taskId),
     {
-      model:
-        parseAgentModel(input.model, handle.models) ??
-        input.sessionModel ??
-        defaultModelRef(handle),
+      model: primary?.ref,
       cwd: input.cwd,
-      thinkingLevel: input.thinkingLevel,
+      thinkingLevel: primary?.thinkingLevel,
     },
   );
   const conversation = (await handle.harness.conversation(childId, handle.context))!;
@@ -1114,121 +1293,229 @@ export async function runDurableTask(input: {
   const onAbort = () => requestAbort();
   input.signal?.addEventListener("abort", onAbort, { once: true });
 
-  const requestId = input.requestId ?? durableOwnerKey(input.taskId);
-  try {
-    if (input.signal?.aborted) throw new DurableTaskCancelledError();
-    const reservation = await reserveDurableRun(
-      handle,
-      conversation,
-      input.taskId,
-      requestId,
-    );
-    if (abortRequested || input.signal?.aborted) {
-      if (reservation.status === "admitting") {
-        const released = await releaseUnadmittedDurableRun(
-          input.piDir,
-          input.taskId,
-          requestId,
-          process.pid,
-          {
-            databasePath: input.databasePath,
-            models: input.models,
-            modelRegistry: input.modelRegistry,
-          },
-        );
-        if (!released && await handle.hasSubmission(childId, requestId)) {
-          submissionAdmitted = true;
-          requestAbort();
-          if (abortPromise) await abortPromise;
-          if (abortFailure !== undefined) {
-            throw new Error("durable subagent cancellation failed", { cause: abortFailure });
-          }
-        }
-      }
-      throw new DurableTaskCancelledError();
-    }
-    if (reservation.status === "busy") {
-      throw new Error(`Durable task ${input.taskId} already has another active request.`);
-    }
-    if (isTerminalDurableRun(reservation)) {
-      if (input.signal?.aborted) throw new DurableTaskCancelledError();
-      input.onSubmitted?.(String(childId));
-      if (reservation.status === "failed") throw new Error(reservation.reason);
-      if (reservation.status === "cancelled") {
-        throw new DurableTaskCancelledError(reservation.reason);
-      }
-      const answer = await settledAnswerText(handle, conversation, reservation.answer);
-      const usage = parseDurableUsage(reservation.usageJson) ??
-        await readConversationUsage(handle, childId);
-      return { conversationId: String(childId), answer, usage };
-    }
-
-    let submission: import("@earendil-works/pi-durable").Submission;
+  const baseRequestId = input.requestId ?? durableOwnerKey(input.taskId);
+  let firstError: Error | undefined;
+  const trail: string[] = [];
+  /**
+   * Record a failed attempt. Returns (and lets the loop advance) only when
+   * the failure is a clear model/provider error and another model remains;
+   * otherwise it throws the original error, or the original error plus the
+   * attempt trail once a fallback was actually used.
+   */
+  const failAttempt = (
+    attempt: DurableAttemptPlan,
+    failure: Error,
+    canFallback: boolean,
+    hasNext: boolean,
+  ): void => {
+    firstError ??= failure;
+    trail.push(`${attempt.label}: ${failure.message}`);
+    if (canFallback && hasNext) return;
+    if (trail.length > 1 && firstError) throw failoverExhaustedError(firstError, trail);
+    throw failure;
+  };
+  /**
+   * Whether a failed attempt may advance the chain. Beyond the classifier,
+   * two approved exclusions apply to fresh failures: a steering successor's
+   * failure is not a model failure to retry, and an explicit `/model` change
+   * owns its failure instead of the frontmatter chain. Replayed terminal
+   * records skip the live-model check so a completed chain still replays.
+   */
+  const classifyFailure = async (
+    attempt: DurableAttemptPlan,
+    record: {
+      reason: string;
+      submissionReason?: string;
+      detail?: string;
+      steering?: boolean;
+    },
+    checkCurrentModel: boolean,
+  ): Promise<boolean> => {
+    if (record.steering) return false;
+    if (!classifyModelFailover({
+      submissionReason: record.submissionReason,
+      message: record.detail ?? record.reason,
+    }).fallback) return false;
+    if (!checkCurrentModel || !attempt.ref) return true;
     try {
-      submission = await conversation.submit({
-        type: "input",
-        content: input.task,
+      const agent = await conversation.agent(handle.context);
+      if (
+        agent.model &&
+        (agent.model.provider !== attempt.ref.provider ||
+          agent.model.modelId !== attempt.ref.modelId)
+      ) {
+        return false;
+      }
+    } catch {
+      // Unreadable agent state cannot prove the failure belongs to this model.
+      return false;
+    }
+    return true;
+  };
+  try {
+    for (let index = 0; index < attempts.length; index++) {
+      const attempt = attempts[index]!;
+      if (abortRequested || input.signal?.aborted) throw new DurableTaskCancelledError();
+      if (!attempt.ref) {
+        const failure = attempt.error ?? new Error(
+          input.model !== undefined || input.sessionModel !== undefined
+            ? `Model "${attempt.label}" is not available in the model registry`
+            : "No model available for durable subagent execution",
+        );
+        failAttempt(attempt, failure, true, index + 1 < attempts.length);
+        continue;
+      }
+      const requestId = index === 0
+        ? baseRequestId
+        : durableFallbackRequestId(baseRequestId, input.taskId, index);
+      input.onRequestId?.(requestId);
+      conversationIdle = false;
+      const reservation = await reserveDurableRun(
+        handle,
+        conversation,
+        input.taskId,
         requestId,
-      }, handle.context);
-    } catch (error) {
-      await conversation.commit(async (tx) => {
-        const runs = await tx.doc(handle.runsDoc, conversation.id);
-        const current = runs.byRequestId[requestId];
-        if (current?.status === "admitting") {
-          const admitted = await tx.submissionByRequest(conversation.id, requestId);
-          if (!admitted) {
-            delete runs.byRequestId[requestId];
-            if (runs.activeByTask[input.taskId] === requestId) {
-              delete runs.activeByTask[input.taskId];
+        {
+          model: attempt.ref,
+          ...(attempt.thinkingLevel !== undefined
+            ? { thinkingLevel: attempt.thinkingLevel }
+            : {}),
+        },
+      );
+      if (abortRequested || input.signal?.aborted) {
+        if (reservation.status === "admitting") {
+          const released = await releaseUnadmittedDurableRun(
+            input.piDir,
+            input.taskId,
+            requestId,
+            process.pid,
+            {
+              databasePath: input.databasePath,
+              models: input.models,
+              modelRegistry: input.modelRegistry,
+            },
+          );
+          if (!released && await handle.hasSubmission(childId, requestId)) {
+            submissionAdmitted = true;
+            requestAbort();
+            if (abortPromise) await abortPromise;
+            if (abortFailure !== undefined) {
+              throw new Error("durable subagent cancellation failed", { cause: abortFailure });
             }
           }
         }
-      }, handle.context);
-      throw error;
-    }
-    submissionAdmitted = true;
-    if (abortRequested || input.signal?.aborted) requestAbort();
-    const activated = await activateDurableRun(
-      handle,
-      conversation,
-      input.taskId,
-      requestId,
-    );
-    input.onSubmitted?.(String(childId));
-    if (isTerminalDurableRun(activated)) {
-      conversationIdle = true;
-      if (activated.status === "failed") throw new Error(activated.reason);
-      if (activated.status === "cancelled") {
-        throw new DurableTaskCancelledError(activated.reason);
+        throw new DurableTaskCancelledError();
       }
-      const answer = await settledAnswerText(handle, conversation, activated.answer);
-      const usage = parseDurableUsage(activated.usageJson) ??
+      if (reservation.status === "busy") {
+        throw new Error(`Durable task ${input.taskId} already has another active request.`);
+      }
+      if (isTerminalDurableRun(reservation)) {
+        input.onSubmitted?.(String(childId));
+        if (reservation.status === "cancelled") {
+          throw new DurableTaskCancelledError(reservation.reason);
+        }
+        if (reservation.status === "failed") {
+          const failure = new Error(reservation.reason);
+          failAttempt(
+            attempt,
+            failure,
+            await classifyFailure(attempt, reservation, false),
+            index + 1 < attempts.length,
+          );
+          continue;
+        }
+        const answer = await settledAnswerText(handle, conversation, reservation.answer);
+        const usage = parseDurableUsage(reservation.usageJson) ??
+          await readConversationUsage(handle, childId);
+        return { conversationId: String(childId), answer, usage };
+      }
+
+      let submission: import("@earendil-works/pi-durable").Submission;
+      try {
+        submission = await conversation.submit({
+          type: "input",
+          content: input.task,
+          requestId,
+        }, handle.context);
+      } catch (error) {
+        await conversation.commit(async (tx) => {
+          const runs = await tx.doc(handle.runsDoc, conversation.id);
+          const current = runs.byRequestId[requestId];
+          if (current?.status === "admitting") {
+            const admitted = await tx.submissionByRequest(conversation.id, requestId);
+            if (!admitted) {
+              delete runs.byRequestId[requestId];
+              if (runs.activeByTask[input.taskId] === requestId) {
+                delete runs.activeByTask[input.taskId];
+              }
+            }
+          }
+        }, handle.context);
+        throw error;
+      }
+      submissionAdmitted = true;
+      if (abortRequested || input.signal?.aborted) requestAbort();
+      const activated = await activateDurableRun(
+        handle,
+        conversation,
+        input.taskId,
+        requestId,
+      );
+      input.onSubmitted?.(String(childId));
+      if (isTerminalDurableRun(activated)) {
+        conversationIdle = true;
+        if (activated.status === "cancelled") {
+          throw new DurableTaskCancelledError(activated.reason);
+        }
+        if (activated.status === "failed") {
+          const failure = new Error(activated.reason);
+          failAttempt(
+            attempt,
+            failure,
+            await classifyFailure(attempt, activated, false),
+            index + 1 < attempts.length,
+          );
+          continue;
+        }
+        const answer = await settledAnswerText(handle, conversation, activated.answer);
+        const usage = parseDurableUsage(activated.usageJson) ??
+          await readConversationUsage(handle, childId);
+        return { conversationId: String(childId), answer, usage };
+      }
+
+      await submission.wait(handle.context);
+      const settledRun = await settleDurableRun(
+        handle,
+        conversation,
+        input.taskId,
+        requestId,
+      );
+      conversationIdle = true;
+      if (input.signal?.aborted && abortFailure !== undefined) {
+        throw new Error("durable subagent cancellation failed", { cause: abortFailure });
+      }
+      if (settledRun.status === "cancelled") {
+        throw new DurableTaskCancelledError(settledRun.reason);
+      }
+      if (settledRun.status === "failed") {
+        const failure = new Error(settledRun.reason);
+        failAttempt(
+          attempt,
+          failure,
+          await classifyFailure(attempt, settledRun, true),
+          index + 1 < attempts.length,
+        );
+        continue;
+      }
+      if (settledRun.status !== "done") {
+        throw new Error("Durable task lifecycle did not reach a terminal outcome.");
+      }
+      const answer = await settledAnswerText(handle, conversation, settledRun.answer);
+      const usage = parseDurableUsage(settledRun.usageJson) ??
         await readConversationUsage(handle, childId);
       return { conversationId: String(childId), answer, usage };
     }
-
-    await submission.wait(handle.context);
-    const settledRun = await settleDurableRun(
-      handle,
-      conversation,
-      input.taskId,
-      requestId,
-    );
-    conversationIdle = true;
-    if (input.signal?.aborted && abortFailure !== undefined) {
-      throw new Error("durable subagent cancellation failed", { cause: abortFailure });
-    }
-    if (settledRun.status === "cancelled") {
-      throw new DurableTaskCancelledError(settledRun.reason);
-    }
-    if (settledRun.status === "failed") throw new Error(settledRun.reason);
-    if (settledRun.status !== "done") {
-      throw new Error("Durable task lifecycle did not reach a terminal outcome.");
-    }
-    const answer = await settledAnswerText(handle, conversation, settledRun.answer);
-    const usage = parseDurableUsage(settledRun.usageJson) ??
-      await readConversationUsage(handle, childId);
-    return { conversationId: String(childId), answer, usage };
+    throw new Error("Durable task lifecycle did not reach a terminal outcome.");
   } finally {
     input.signal?.removeEventListener("abort", onAbort);
     try {
@@ -1314,6 +1601,166 @@ export async function steerDurableTask(
     return true;
   }, handle.context);
   return admitted ? null : `Durable task ${taskId} is no longer running; steering was not admitted.`;
+}
+
+const DURABLE_THINKING_LEVELS: readonly DurableThinkingLevel[] = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
+
+function durableThinkingLevels(
+  model: import("@earendil-works/pi-ai").Model<import("@earendil-works/pi-ai").Api> | undefined,
+): DurableThinkingLevel[] {
+  if (!model?.reasoning) return ["off"];
+  return DURABLE_THINKING_LEVELS.filter(
+    (level) => model.thinkingLevelMap?.[level] !== null,
+  );
+}
+
+function durableModelForArgument(
+  handle: DurableHarnessHandle,
+  argument: string,
+): import("@earendil-works/pi-ai").Model<import("@earendil-works/pi-ai").Api> | undefined {
+  const separator = argument.indexOf("/");
+  if (separator > 0) {
+    const exact = handle.models.getModel(
+      argument.slice(0, separator),
+      argument.slice(separator + 1),
+    );
+    if (exact) return exact;
+  }
+  return handle.models.getAllModels().find(
+    (candidate) => candidate.id === argument || candidate.name === argument,
+  ) as import("@earendil-works/pi-ai").Model<import("@earendil-works/pi-ai").Api> | undefined;
+}
+
+/**
+ * Run one child-scoped control against the durable child conversation. The
+ * active-run check prevents a stale task row from mutating a settled child;
+ * no operation reaches the parent's session or command dispatcher.
+ */
+export async function executeDurableChildBuiltinCommand(
+  piDir: string,
+  taskId: string,
+  command: ChildBuiltinCommand,
+  options: {
+    databasePath?: string;
+    models?: DurableModelsFactory;
+    modelRegistry?: DurableRuntimeModelRegistry;
+  } = {},
+): Promise<ChildBuiltinCommandResult> {
+  const info = (message: string): ChildBuiltinCommandResult => ({ level: "info", message });
+  const failure = (message: string): ChildBuiltinCommandResult => ({ level: "error", message });
+  try {
+    const handle = await openDurableHarness(piDir, options);
+    const conversation = await findChild(handle, taskId);
+    if (!conversation) return failure(`No durable child conversation for task ${taskId}.`);
+
+    const active = await conversation.commit(async (tx) => {
+      const runs = await tx.doc(handle.runsDoc, conversation.id);
+      const requestId = runs.activeByTask[taskId];
+      const run = requestId ? runs.byRequestId[requestId] : undefined;
+      if (!run || run.taskId !== taskId) return false;
+      if (run.status === "admitting") return true;
+      if (run.status !== "running") return false;
+      const live = await tx.doc(handle.module.LiveDoc, conversation.id);
+      if (!live.run) return false;
+      const task = await tx.task(live.run.taskId);
+      return !!task && !task.abortRequested &&
+        task.state.status !== "completing" && task.state.status !== "terminal";
+    }, handle.context);
+    if (!active) {
+      return failure(`Durable task ${taskId} is no longer active; its child transcript is read-only.`);
+    }
+
+    const agent = await conversation.agent(handle.context);
+    if (command.name === "model") {
+      const models = handle.models.getAllModels().filter(
+        (candidate) => candidate.type === undefined || candidate.type === "chat",
+      );
+      if (!command.argument) {
+        const current = agent.model ? `${agent.model.provider}/${agent.model.modelId}` : "none";
+        const choices = models.map((model) => `${model.provider}/${model.id}`);
+        return info(
+          `Child model: ${current}. Set with /model <provider/model>. Available: ${choices.join(", ") || "none"}.`,
+        );
+      }
+      const model = durableModelForArgument(handle, command.argument);
+      if (!model || (model.type !== undefined && model.type !== "chat")) {
+        return failure(`Unknown child model "${command.argument}". Use /model to list available child models.`);
+      }
+      const modelRef = { provider: model.provider, modelId: model.id };
+      const supportedLevels = durableThinkingLevels(model);
+      const configured = await configureActiveDurableChild(
+        handle,
+        conversation,
+        taskId,
+        {
+          model: modelRef,
+          ...(!supportedLevels.includes(agent.thinkingLevel as DurableThinkingLevel)
+            ? { thinkingLevel: "off" as const }
+            : {}),
+        },
+      );
+      if (!configured) {
+        return failure(`Durable task ${taskId} settled before the child model change; its transcript is read-only.`);
+      }
+      return info(`Child model set to ${modelRef.provider}/${modelRef.modelId}.`);
+    }
+
+    if (command.name === "thinking") {
+      const model = agent.model
+        ? handle.models.getModel(agent.model.provider, agent.model.modelId)
+        : undefined;
+      const levels = durableThinkingLevels(model);
+      if (!command.argument) {
+        return info(
+          `Child thinking level: ${agent.thinkingLevel}. Available: ${levels.join(", ")}. Set with /thinking <level>.`,
+        );
+      }
+      const level = parseDurableThinkingLevel(command.argument);
+      if (!level || !levels.includes(level)) {
+        return failure(
+          `Unknown or unsupported child thinking level "${command.argument}". Available levels: ${levels.join(", ")}.`,
+        );
+      }
+      const configured = await configureActiveDurableChild(
+        handle,
+        conversation,
+        taskId,
+        { thinkingLevel: level },
+      );
+      if (!configured) {
+        return failure(`Durable task ${taskId} settled before the thinking-level change; its transcript is read-only.`);
+      }
+      return info(`Child thinking level set to ${level}.`);
+    }
+
+    if (command.name === "session") {
+      const [context, usage] = await Promise.all([
+        conversation.context(handle.context),
+        readConversationUsage(handle, conversation.id),
+      ]);
+      const model = agent.model
+        ? `${agent.model.provider}/${agent.model.modelId}`
+        : "none";
+      return info([
+        `Durable child conversation ${String(conversation.id)}`,
+        `Model: ${model}; thinking: ${agent.thinkingLevel}; cwd: ${agent.cwd ?? "(default)"}`,
+        `Context messages: ${context.messages.length}`,
+        `Tokens: ${usage.totals.totalTokens} total (${usage.totals.inputTokens} input, ${usage.totals.outputTokens} output); cost: $${usage.totals.costTotal.toFixed(4)}`,
+      ].join("\n"));
+    }
+
+    return failure(`/${command.name} is not implemented for durable child sessions.`);
+  } catch (error) {
+    return failure(error instanceof Error ? error.message : String(error));
+  }
 }
 
 /** Abort the child conversation of a task; resolves once it is idle. */

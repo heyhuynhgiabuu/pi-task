@@ -16,7 +16,11 @@ import {
   taskResultContentText,
   type AgentConfig,
 } from "../helpers.js";
-import type { BackgroundTask, CompletionDeliveryOutcome } from "../types.js";
+import type {
+  BackgroundTask,
+  ChildBuiltinCommandResult,
+  CompletionDeliveryOutcome,
+} from "../types.js";
 import { sessionViewOf } from "../panel/delivery.js";
 import type { DeliveryGuard } from "../panel/delivery.js";
 import { durableParentOf } from "./ownership.js";
@@ -26,6 +30,7 @@ import {
   SdkSubagentInterruptedError,
   runSdkSubagent,
 } from "../subagent/runSdk.js";
+import { subscribeSdkChildMetadata } from "../subagent/sdk-metadata.js";
 import {
   formatSdkBackgroundReceipt,
   startSdkBackgroundTask,
@@ -64,7 +69,8 @@ export interface SdkTaskExecutionOptions {
   backgroundTasks: Map<string, BackgroundTask>;
   foregroundTasks: Map<string, BackgroundTask>;
   deliveryGuard: DeliveryGuard;
-  taskWidget: Pick<TaskWidgetController, "requestRender" | "noteTaskFinished">;
+  taskWidget: Pick<TaskWidgetController, "requestRender" | "noteTaskFinished"> &
+    Partial<Pick<TaskWidgetController, "setLiveMetadata">>;
   ensureTaskWidget: () => void;
   clearTaskWidgetIfIdle: () => void;
   enqueueDelivery: (
@@ -116,6 +122,8 @@ export async function executeSdkTask({
 }: SdkTaskExecutionOptions) {
   let sdkSessionId: string | undefined;
   let sdkSessionPath: string | undefined;
+  let sdkCommandsOpen = true;
+  const pendingSdkCommands = new Set<Promise<ChildBuiltinCommandResult>>();
   const runSdkFallback = async (task?: BackgroundTask) => {
     try {
       return await runSdkSubagent({
@@ -141,7 +149,17 @@ export async function executeSdkTask({
                 (error: unknown) =>
                   error instanceof Error ? error.message : String(error),
               );
-            task.sdkCommand = (command) => executeSdkChildBuiltinCommand(session, command);
+            task.sdkCommand = (command) => {
+              if (!sdkCommandsOpen || (task.status !== undefined && task.status !== "running")) {
+                return {
+                  level: "error",
+                  message: "This SDK child session has settled; its transcript is read-only.",
+                };
+              }
+              const pending = executeSdkChildBuiltinCommand(session, command);
+              pendingSdkCommands.add(pending);
+              return pending.finally(() => pendingSdkCommands.delete(pending));
+            };
           }
 
           let unsubscribeSessionReady: (() => void) | undefined;
@@ -158,11 +176,17 @@ export async function executeSdkTask({
             );
           }
 
+          const unsubscribeTaskMetadata = task
+            ? subscribeSdkChildMetadata(session, (metadata) =>
+                taskWidget.setLiveMetadata?.(id, metadata),
+              )
+            : undefined;
           const unsubscribeTaskTools = task
             ? subscribeToolEvents(session, task, 10, taskWidget.requestRender)
             : undefined;
           return () => {
             unsubscribeSessionReady?.();
+            unsubscribeTaskMetadata?.();
             unsubscribeTaskTools?.();
           };
         },
@@ -188,9 +212,13 @@ export async function executeSdkTask({
     } finally {
       // The child session is disposed once the run settles; drop the steering
       // callback so the disposed session is not retained by the task row.
+      sdkCommandsOpen = false;
       if (task) {
         task.sdkSteer = undefined;
         task.sdkCommand = undefined;
+      }
+      while (pendingSdkCommands.size > 0) {
+        await Promise.allSettled([...pendingSdkCommands]);
       }
     }
   };

@@ -111,7 +111,12 @@ import {
   taskResultOutputSchema,
   withTaskStructuredContent,
 } from "./tool/structured.js";
-import type { BackgroundTask, ExecutionBackend } from "./types.js";
+import type {
+  BackgroundTask,
+  ChildBuiltinCommand,
+  ChildBuiltinCommandResult,
+  ExecutionBackend,
+} from "./types.js";
 import { startIntentHash } from "./task-intent.js";
 import {
   executeDurableTask,
@@ -120,6 +125,7 @@ import {
 } from "./lifecycle/durable-execution.js";
 import {
   abortDurableTask,
+  executeDurableChildBuiltinCommand,
   steerDurableTask,
   type DurableRuntimeModelRegistry,
 } from "./subagent/durable.js";
@@ -193,6 +199,44 @@ export default function (pi: ExtensionAPI) {
       }
       const result = steerRunningBackgroundTask(task.paneId, text, task.handle);
       return result.ok ? null : result.reason;
+    },
+    runChildBuiltinCommand: async (
+      task: BackgroundTask,
+      taskId: string,
+      command: ChildBuiltinCommand,
+    ): Promise<ChildBuiltinCommandResult> => {
+      if (task.backend === "durable") {
+        return executeDurableChildBuiltinCommand(extensionPiDir, taskId, command, {
+          modelRegistry: runtimeModelRegistry,
+        });
+      }
+      if (task.backend === "sdk") {
+        return task.sdkCommand
+          ? task.sdkCommand(command)
+          : { level: "error", message: "This SDK task does not expose a live child-session control handle." };
+      }
+      if (command.name === "name" && !command.argument) {
+        return {
+          level: "error",
+          message: "Use /name <name>; Pi displays the current name only inside the hidden child TUI.",
+        };
+      }
+      let childCommandText = command.rawText;
+      if (command.name === "thinking") {
+        const levels = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+        const level = command.argument.toLowerCase();
+        if (!level) {
+          return { level: "error", message: "Specify a child thinking level: /thinking <level>." };
+        }
+        if (!levels.has(level)) {
+          return { level: "error", message: `Unknown thinking level "${command.argument}".` };
+        }
+        childCommandText = `/thinking ${level}`;
+      }
+      const result = steerRunningBackgroundTask(task.paneId, childCommandText, task.handle);
+      return result.ok
+        ? { level: "info", message: `Sent ${childCommandText} to the child Pi session.` }
+        : { level: "error", message: result.reason };
     },
     canReplaceSession: () =>
       foregroundTasks.size === 0 &&

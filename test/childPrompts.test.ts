@@ -7,7 +7,11 @@ import { test } from "node:test";
 import { initTheme, ProjectTrustStore, type SlashCommandInfo } from "@earendil-works/pi-coding-agent";
 import { createTaskWidgetController } from "../src/lifecycle/widget.js";
 import type { TaskTranscriptOverlay } from "../src/panel/task-transcript-overlay.js";
-import { loadChildPromptTemplates } from "../src/panel/child-prompts.js";
+import {
+  availableChildBuiltinCommands,
+  loadChildPromptTemplates,
+  routeChildBuiltinCommand,
+} from "../src/panel/child-prompts.js";
 
 function tempDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -147,11 +151,86 @@ test("child prompt autocomplete is scoped to enabled prompt templates and native
     );
     assert.match(
       service.prepareSteeringInput("/model something", "durable").error ?? "",
-      /conflicts with a Pi command/,
+      /conflicts with a Pi built-in/,
+    );
+    assert.equal(
+      (await routeChildBuiltinCommand("/model something", "durable"))?.kind,
+      "supported",
+      "the child built-in router runs before the same-named template expansion path",
     );
     assert.match(
       service.prepareSteeringInput("/ship something", "terminal").error ?? "",
-      /conflicts with a Pi command/,
+      /conflicts with a Pi built-in or parent-session command/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("child built-in routing and autocomplete expose only verified backend commands", async () => {
+  const terminal = await availableChildBuiltinCommands("terminal");
+  const sdk = await availableChildBuiltinCommands("sdk");
+  const durable = await availableChildBuiltinCommands("durable");
+  const names = (commands: readonly { name: string }[]) => commands.map(({ name }) => name);
+
+  assert.deepEqual(names(terminal), ["thinking", "name"]);
+  assert.deepEqual(names(sdk), ["model", "thinking", "name", "session"]);
+  assert.deepEqual(names(durable), ["model", "thinking", "session"]);
+  assert.ok(terminal.every((command) => command.description?.includes("child")));
+
+  assert.deepEqual(await routeChildBuiltinCommand("/model openai/gpt-test", "sdk"), {
+    kind: "supported",
+    command: { name: "model", argument: "openai/gpt-test", rawText: "/model openai/gpt-test" },
+  });
+  assert.deepEqual(await routeChildBuiltinCommand("/thinking high", "terminal"), {
+    kind: "supported",
+    command: { name: "thinking", argument: "high", rawText: "/thinking high" },
+  });
+  assert.equal(
+    (await routeChildBuiltinCommand("/model\topenai/example", "sdk"))?.command.argument,
+    "openai/example",
+    "native command names are recognized when arguments use non-space whitespace",
+  );
+  const login = await routeChildBuiltinCommand("/login openai", "terminal");
+  assert.equal(login?.kind, "unsupported");
+  assert.match(login?.message ?? "", /credential/i);
+  assert.deepEqual(await availableChildBuiltinCommands("none"), []);
+  for (const [text, backend, reason] of [
+    ["/logout", "sdk", /credential/i],
+    ["/trust", "terminal", /trust/i],
+    ["/import ./old-session.jsonl", "sdk", /session switching/i],
+    ["/share", "durable", /private session data/i],
+    ["/export", "terminal", /private session data/i],
+    ["/quit", "terminal", /never forwarded/i],
+    ["/compact", "durable", /atomic active-task-only/i],
+    ["/session", "terminal", /overlay hides/i],
+  ] as const) {
+    const denied = await routeChildBuiltinCommand(text, backend);
+    assert.equal(denied?.kind, "unsupported", `${text} is explicitly denied`);
+    assert.match(denied?.message ?? "", reason);
+  }
+  assert.equal(await routeChildBuiltinCommand("/not-a-command arg", "sdk"), undefined);
+
+  const root = tempDir("pi-task-command-autocomplete-");
+  try {
+    const service = await loadChildPromptTemplates({
+      cwd: root,
+      parentCwd: root,
+      parentProjectTrusted: true,
+      agentDir: join(root, "agent"),
+      parentCommands: [],
+      backend: "sdk",
+    });
+    const suggestions = await service.autocompleteProvider.getSuggestions(
+      ["/mod"],
+      0,
+      5,
+      { signal: new AbortController().signal },
+    );
+    assert.ok(suggestions?.items.some((item) => item.value === "model"));
+    assert.ok(
+      !suggestions?.items.some((item) => ["login", "logout", "share", "quit"].includes(item.value)),
+      "unsafe or unsupported Pi commands are not advertised",
     );
   } finally {
     rmSync(root, { recursive: true, force: true });

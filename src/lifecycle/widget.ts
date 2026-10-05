@@ -15,7 +15,12 @@ import {
 } from "../task-widget.js";
 import { taskActivity, type TaskActivity } from "../task-activity.js";
 import { ignoreStaleExtensionCtx } from "../stale-ctx.js";
-import type { BackgroundTask } from "../types.js";
+import type {
+  BackgroundTask,
+  ChildBuiltinCommand,
+  ChildBuiltinCommandBackend,
+  ChildBuiltinCommandResult,
+} from "../types.js";
 import {
   isPanelFocused,
   panelRows as orderPanelRows,
@@ -44,6 +49,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import {
   loadChildPromptTemplates,
+  routeChildBuiltinCommand,
   type ChildPromptTemplateService,
 } from "../panel/child-prompts.js";
 import { TaskPanelEditor, type TaskPanelHost } from "../panel/task-editor.js";
@@ -147,6 +153,12 @@ export interface TaskWidgetControllerDeps {
     taskId: string,
     text: string,
   ) => string | null | Promise<string | null>;
+  /** Dispatch a verified Pi built-in only to the selected child's own session/backend. */
+  runChildBuiltinCommand?: (
+    task: BackgroundTask,
+    taskId: string,
+    command: ChildBuiltinCommand,
+  ) => ChildBuiltinCommandResult | Promise<ChildBuiltinCommandResult>;
   /** Stop a running task's terminal resource; error message or null on success. */
   stopTask: (taskId: string, task: BackgroundTask) => string | null | Promise<string | null>;
   /** Current parent prompt/extension command descriptors; bodies stay in Pi's resource loader. */
@@ -527,6 +539,13 @@ export function createTaskWidgetController(
     const generation = ++viewGeneration;
     overlayOpen = true;
     const childCwd = task.cwd ?? ctx.cwd;
+    const builtinBackend: ChildBuiltinCommandBackend = task.comparisonIndex !== undefined
+      ? "none"
+      : task.backend === "durable"
+        ? "durable"
+        : task.backend === "sdk"
+          ? "sdk"
+          : "terminal";
     let parentCommands: SlashCommandInfo[] = [];
     try {
       parentCommands = deps?.getCommands?.() ?? [];
@@ -541,6 +560,7 @@ export function createTaskWidgetController(
             parentCwd: ctx.cwd,
             parentProjectTrusted: ctx.isProjectTrusted?.() ?? false,
             parentCommands,
+            backend: builtinBackend,
             agentDir: deps?.getPromptAgentDir?.(),
           }).catch((error: unknown) => {
             try {
@@ -604,7 +624,8 @@ export function createTaskWidgetController(
               pane,
               host: {
                 taskId,
-                onSteer: (text: string) => steerViewedTask(text, promptTemplatesPromise),
+                onSteer: (text: string) =>
+                  steerViewedTask(taskId, text, promptTemplatesPromise, generation, ctx, builtinBackend),
                 onClose: () => done(undefined),
                 requestRender,
                 // The viewed child's live phase drives the animated working row.
@@ -869,27 +890,65 @@ export function createTaskWidgetController(
   // ── Panel actions ─────────────────────────────────────────────────────────
 
   function steerViewedTask(
+    taskId: string,
     text: string,
-    promptTemplatesPromise?: Promise<ChildPromptTemplateService | undefined>,
+    promptTemplatesPromise: Promise<ChildPromptTemplateService | undefined> | undefined,
+    generation: number,
+    ctx: ExtensionContext,
+    builtinBackend: ChildBuiltinCommandBackend,
   ): void {
-    const taskId = panelState.viewTaskId;
-    const task = taskId ? findTask(taskId) : undefined;
-    if (!taskId || !task) {
-      widgetCtx?.ui.notify("No task is open in the transcript view", "error");
+    const isCurrentView = () =>
+      generation === viewGeneration &&
+      panelState.viewTaskId === taskId &&
+      widgetCtx === ctx;
+    const notify = (message: string, level: "info" | "warning" | "error") => {
+      if (!isCurrentView()) return;
+      ignoreStaleExtensionCtx(() => ctx.ui.notify(message, level));
+    };
+    if (!isCurrentView()) return;
+    const task = findTask(taskId);
+    if (!task) {
+      notify("No task is open in the transcript view", "error");
       return;
     }
     const activelyTracked = foregroundTasks.has(taskId) || backgroundTasks.has(taskId);
     if (!activelyTracked || (task.status !== undefined && task.status !== "running")) {
-      widgetCtx?.ui.notify(
-        "This task is no longer running; its transcript is read-only.",
-        "warning",
-      );
+      notify("This task is no longer running; its transcript is read-only.", "warning");
       return;
     }
     void (async () => {
+      if (task.runtime !== "claude" && text.trim().startsWith("/")) {
+        let route: Awaited<ReturnType<typeof routeChildBuiltinCommand>>;
+        try {
+          route = await routeChildBuiltinCommand(text, builtinBackend);
+        } catch (error) {
+          notify(
+            `Pi's child command catalog is unavailable; no slash command was sent: ${error instanceof Error ? error.message : String(error)}`,
+            "error",
+          );
+          return;
+        }
+        if (!isCurrentView()) return;
+        if (route?.kind === "unsupported") {
+          notify(route.message, "error");
+          return;
+        }
+        if (route?.kind === "supported") {
+          const result = await deps?.runChildBuiltinCommand?.(task, taskId, route.command);
+          if (!isCurrentView()) return;
+          if (!result) {
+            notify(`/${route.command.name} is not available for this child task.`, "error");
+          } else {
+            notify(result.message, result.level);
+          }
+          return;
+        }
+      }
+
       let steeringText = text;
       if (task.runtime !== "claude" && promptTemplatesPromise) {
         const service = await promptTemplatesPromise;
+        if (!isCurrentView()) return;
         if (service) {
           const backend = task.backend === "sdk"
             ? "sdk"
@@ -898,25 +957,22 @@ export function createTaskWidgetController(
               : "terminal";
           const prepared = service.prepareSteeringInput(text, backend);
           if (prepared.error) {
-            widgetCtx?.ui.notify(prepared.error, "error");
+            notify(prepared.error, "error");
             return;
           }
           steeringText = prepared.text;
         }
       }
-      return deps?.steerTask(task, taskId, steeringText);
-    })()
-      .then((error) => {
-        if (error) {
-          widgetCtx?.ui.notify(`Could not steer task: ${error}`, "error");
-        }
-      })
-      .catch((error: unknown) => {
-        widgetCtx?.ui.notify(
-          `Could not steer task: ${error instanceof Error ? error.message : String(error)}`,
-          "error",
-        );
-      });
+      if (!isCurrentView()) return;
+      const error = await deps?.steerTask(task, taskId, steeringText);
+      if (!isCurrentView()) return;
+      if (error) notify(`Could not steer task: ${error}`, "error");
+    })().catch((error: unknown) => {
+      notify(
+        `Could not steer task: ${error instanceof Error ? error.message : String(error)}`,
+        "error",
+      );
+    });
   }
 
   function stopTaskRow(taskId: string): void {
@@ -983,7 +1039,27 @@ export function createTaskWidgetController(
       else closeView();
     },
     onStop: (taskId: string) => stopTaskRow(taskId),
-    onSteer: (text: string) => steerViewedTask(text),
+    onSteer: (text: string) => {
+      const taskId = panelState.viewTaskId;
+      const ctx = widgetCtx;
+      const task = taskId ? findTask(taskId) : undefined;
+      if (!taskId || !ctx || !task) return;
+      const builtinBackend: ChildBuiltinCommandBackend = task.comparisonIndex !== undefined
+        ? "none"
+        : task.backend === "durable"
+          ? "durable"
+          : task.backend === "sdk"
+            ? "sdk"
+            : "terminal";
+      steerViewedTask(
+        taskId,
+        text,
+        undefined,
+        viewGeneration,
+        ctx,
+        builtinBackend,
+      );
+    },
     onScrollView: (delta: number) => activePane?.scrollBy(delta),
     onExitView: () => closeView(),
     requestRender,

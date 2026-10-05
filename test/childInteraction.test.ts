@@ -13,6 +13,9 @@
  */
 
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { initTheme } from "@earendil-works/pi-coding-agent";
@@ -433,6 +436,124 @@ test("slash-like text is steered verbatim instead of invoking parent or child co
   }
   assert.deepEqual(calls.steers, ["/model", "/compact", "/quit"]);
   overlay.dispose();
+});
+
+test("child built-ins are dispatched to the viewed child, unsafe commands are denied, and stale results are ignored", async () => {
+  initTheme();
+  const root = mkdtempSync(join(tmpdir(), "pi-task-child-command-view-"));
+  mkdirSync(join(root, ".pi", "prompts"), { recursive: true });
+  writeFileSync(
+    join(root, ".pi", "prompts", "model.md"),
+    "This same-named template must never shadow the native child /model command.",
+    "utf8",
+  );
+  const taskId = "sdk-command-task";
+  const task = {
+    agentType: "general",
+    sessionName: "sdk-command",
+    originalPane: null,
+    description: "command routing test",
+    startedAt: Date.now(),
+    toolUses: 0,
+    turns: 0,
+    recentCalls: [],
+    dir: root,
+    cwd: root,
+    backend: "sdk",
+    status: "running",
+  };
+  let factory: ((tui: unknown, theme: unknown, keys: unknown, done: () => void) => TaskTranscriptOverlay) | undefined;
+  const notices: Array<{ message: string; level: string }> = [];
+  const context = {
+    mode: "tui",
+    hasUI: true,
+    cwd: root,
+    isProjectTrusted: () => true,
+    ui: {
+      getEditorComponent: () => undefined,
+      setEditorComponent: () => {},
+      setWidget: () => {},
+      notify: (message: string, level: string) => notices.push({ message, level }),
+      custom: (make: typeof factory) => {
+        factory = make;
+        return new Promise<unknown>(() => {});
+      },
+    },
+  } as never;
+  const childCommands: string[] = [];
+  const parentSteering: string[] = [];
+  let releaseLateCommand!: () => void;
+  const lateCommand = new Promise<void>((resolve) => { releaseLateCommand = resolve; });
+  let lateCommandStarted!: () => void;
+  const commandStarted = new Promise<void>((resolve) => { lateCommandStarted = resolve; });
+  const controller = createTaskWidgetController(
+    new Map([[taskId, task as never]]),
+    new Map(),
+    {
+      getCommands: () => [],
+      getPromptAgentDir: () => join(root, "agent"),
+      runChildBuiltinCommand: async (_task: unknown, _id: string, command: { name: string; rawText: string }) => {
+        childCommands.push(command.rawText);
+        if (command.name === "thinking") {
+          lateCommandStarted();
+          await lateCommand;
+        }
+        return { level: "info", message: `child ran ${command.rawText}` };
+      },
+      steerTask: (_task, _id, text) => {
+        parentSteering.push(text);
+        return null;
+      },
+      stopTask: () => null,
+    } as never,
+  );
+  try {
+    controller.ensureTaskWidget(context);
+    controller.openTaskView(taskId);
+    assert.ok(factory, "the child transcript overlay was created");
+    const overlay = factory(
+      { terminal: { rows: 30, columns: 90 }, requestRender: () => {} },
+      { fg: (_token: string, text: string) => text, bg: (_token: string, text: string) => text },
+      { matches: () => false },
+      () => {},
+    );
+    const editor = (overlay as unknown as {
+      editor: { setText(text: string): void; isShowingAutocomplete?: () => boolean };
+    }).editor;
+    editor.isShowingAutocomplete = () => false;
+
+    const submit = (text: string) => {
+      editor.setText(text);
+      overlay.handleInput("\r");
+    };
+    submit("/model openai/gpt-test");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.deepEqual(childCommands, ["/model openai/gpt-test"]);
+    assert.deepEqual(parentSteering, [], "a Pi built-in never reaches the parent-steering path");
+    assert.ok(notices.some(({ message, level }) => level === "info" && message.includes("child ran")));
+
+    submit("/logout openai");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.deepEqual(childCommands, ["/model openai/gpt-test"], "credential commands never reach the child");
+    assert.deepEqual(parentSteering, [], "credential commands never reach the parent");
+    assert.ok(notices.some(({ message, level }) => level === "error" && /credential/i.test(message)));
+
+    submit("/thinking high");
+    await Promise.race([
+      commandStarted,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("child command did not start")), 1000)),
+    ]);
+    controller.closeTaskView(taskId);
+    const noticeCount = notices.length;
+    releaseLateCommand();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(notices.length, noticeCount, "a command result from a closed view is not shown in a stale UI");
+    assert.deepEqual(parentSteering, []);
+    overlay.dispose();
+  } finally {
+    controller.dispose();
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("the configured app.tools.expand key toggles every tool and never reaches the editor", () => {

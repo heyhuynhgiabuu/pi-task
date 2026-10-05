@@ -55,6 +55,7 @@ export interface SdkTaskExecutionOptions {
     excludeTools: string[];
   };
   skillPaths: string[];
+  promptTemplatePaths?: string[];
   fast: boolean;
   signal?: AbortSignal;
   isBackground: boolean;
@@ -99,6 +100,7 @@ export async function executeSdkTask({
   conversationId,
   toolSelection,
   skillPaths,
+  promptTemplatePaths,
   fast,
   signal,
   isBackground,
@@ -173,6 +175,7 @@ export async function executeSdkTask({
         excludeTools: toolSelection.excludeTools,
         systemPrompt: agent.body,
         skillPaths,
+        promptTemplatePaths,
         fast,
         // Background tasks outlive the parent run's turn: they must NOT be
         // aborted by the parent's signal just because they are tracked.

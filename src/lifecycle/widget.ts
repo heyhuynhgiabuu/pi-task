@@ -37,7 +37,15 @@ import {
 } from "../panel/transcript.js";
 import type { TaskContextInfo } from "../panel/task-context.js";
 import type { DurableChildAgent } from "../panel/durable-transcript.js";
-import { CustomEditor, getSelectListTheme } from "@earendil-works/pi-coding-agent";
+import {
+  CustomEditor,
+  getSelectListTheme,
+  type SlashCommandInfo,
+} from "@earendil-works/pi-coding-agent";
+import {
+  loadChildPromptTemplates,
+  type ChildPromptTemplateService,
+} from "../panel/child-prompts.js";
 import { TaskPanelEditor, type TaskPanelHost } from "../panel/task-editor.js";
 import { TaskOverlay } from "../panel/task-overlay.js";
 import {
@@ -65,6 +73,7 @@ export function createSteerEditor(
   tui: import("@earendil-works/pi-tui").TUI,
   theme: unknown,
   keybindings: unknown,
+  editorPaddingX = 0,
 ): SteerEditorLike {
   const t = theme as { fg?: unknown; bg?: unknown } | null | undefined;
   if (t && typeof t.fg === "function" && typeof t.bg === "function") {
@@ -78,24 +87,33 @@ export function createSteerEditor(
         borderColor: (text: string) => (t.fg as (c: string, s: string) => string)("border", text),
         selectList: getSelectListTheme() as never,
       };
-      return new CustomEditor(
+      const nativeEditor = new CustomEditor(
         tui,
         editorTheme as never,
         keybindings as never,
         // Native chrome: the working indicator renders inside the editor's top
         // border (pi's own streaming screen does the same). Harmless when no
         // indicator is set: the border renders unchanged.
-        { embedWorkingStatus: true },
-      ) as unknown as SteerEditorLike;
+        { embedWorkingStatus: true, paddingX: editorPaddingX },
+      );
+      const editor = nativeEditor as unknown as SteerEditorLike;
+      // Autocomplete state and submit callback are public Editor APIs; the
+      // overlay uses them to preserve native menu navigation and acceptance.
+      return editor;
     } catch {
       // Theme not initialized / degraded host: fall through to the minimal input.
     }
   }
-  return new MinimalSteerEditor();
+  return new MinimalSteerEditor(editorPaddingX);
 }
 
 class MinimalSteerEditor implements SteerEditorLike {
   private text = "";
+  private readonly paddingX: number;
+
+  constructor(paddingX: number) {
+    this.paddingX = Number.isFinite(paddingX) ? Math.max(0, Math.floor(paddingX)) : 0;
+  }
 
   handleInput(data: string): void {
     if (data === "\x7f") {
@@ -108,7 +126,7 @@ class MinimalSteerEditor implements SteerEditorLike {
   }
 
   render(width: number): string[] {
-    return [truncateToWidth(`❯ ${this.text}`, width, "…")];
+    return [truncateToWidth(`${" ".repeat(this.paddingX)}❯ ${this.text}`, width, "…")];
   }
 
   getText(): string {
@@ -121,6 +139,8 @@ class MinimalSteerEditor implements SteerEditorLike {
 }
 
 export interface TaskWidgetControllerDeps {
+  /** Effective host display settings used by Pi's own editor/transcript renderers. */
+  getDisplaySettings?: () => { editorPaddingX?: number; outputPad?: 0 | 1 };
   /** Steer a running task; returns an error message or null on success. */
   steerTask: (
     task: BackgroundTask,
@@ -129,6 +149,10 @@ export interface TaskWidgetControllerDeps {
   ) => string | null | Promise<string | null>;
   /** Stop a running task's terminal resource; error message or null on success. */
   stopTask: (taskId: string, task: BackgroundTask) => string | null | Promise<string | null>;
+  /** Current parent prompt/extension command descriptors; bodies stay in Pi's resource loader. */
+  getCommands?: () => SlashCommandInfo[];
+  /** Test seam for an isolated prompt resource directory. */
+  getPromptAgentDir?: () => string;
   /** Whether a Pi session can be replaced without discarding task lifecycle state. */
   canReplaceSession?: () => boolean;
   /** Clock for linger/ordering logic (test seam; defaults to Date.now). */
@@ -502,6 +526,41 @@ export function createTaskWidgetController(
     syncAnimationTicker();
     const generation = ++viewGeneration;
     overlayOpen = true;
+    const childCwd = task.cwd ?? ctx.cwd;
+    let parentCommands: SlashCommandInfo[] = [];
+    try {
+      parentCommands = deps?.getCommands?.() ?? [];
+    } catch {
+      // Suggestions degrade to child-local prompts if the host command API is stale.
+    }
+    const promptTemplatesPromise: Promise<ChildPromptTemplateService | undefined> =
+      task.runtime === "claude"
+        ? Promise.resolve(undefined)
+        : loadChildPromptTemplates({
+            cwd: childCwd,
+            parentCwd: ctx.cwd,
+            parentProjectTrusted: ctx.isProjectTrusted?.() ?? false,
+            parentCommands,
+            agentDir: deps?.getPromptAgentDir?.(),
+          }).catch((error: unknown) => {
+            try {
+              ctx.ui.notify(
+                `Task prompt templates are unavailable: ${error instanceof Error ? error.message : String(error)}`,
+                "warning",
+              );
+            } catch {
+              // The transcript view remains usable with raw steering.
+            }
+            return undefined;
+          });
+    let displaySettings: { editorPaddingX?: number; outputPad?: 0 | 1 } | undefined;
+    try {
+      displaySettings = deps?.getDisplaySettings?.();
+    } catch {
+      // Display settings are optional; a stale/replaced context must not stop
+      // the view from using Pi's defaults.
+      displaySettings = undefined;
+    }
     /** Phase of the viewed child, for the working row and the repaint policy. */
     const viewedActivity = () => {
       const viewed = findTask(taskId);
@@ -528,16 +587,24 @@ export function createTaskWidgetController(
             transcriptOverlayDone = done as (result?: unknown) => void;
             const pane = createTaskTranscriptPane(tui, theme, {
               taskId,
-              cwd: task.cwd ?? ctx.cwd,
+              cwd: childCwd,
               sig: () => transcriptSig(taskId),
               read: () => itemsFor(taskId),
+              // Match the parent transcript's configured horizontal padding.
+              outputPad: displaySettings?.outputPad ?? 1,
             });
             activePane = pane;
+            const editor = createSteerEditor(
+              tui,
+              theme,
+              keybindings,
+              displaySettings?.editorPaddingX,
+            );
             activeOverlay = new TaskTranscriptOverlay({
               pane,
               host: {
                 taskId,
-                onSteer: (text: string) => steerViewedTask(text),
+                onSteer: (text: string) => steerViewedTask(text, promptTemplatesPromise),
                 onClose: () => done(undefined),
                 requestRender,
                 // The viewed child's live phase drives the animated working row.
@@ -546,9 +613,19 @@ export function createTaskWidgetController(
                 context: () => childContext(taskId),
               },
               theme,
-              editor: createSteerEditor(tui, theme, keybindings),
+              editor,
               terminalRows: () => tui.terminal.rows,
               ui: tui,
+              keybindings,
+            });
+            void promptTemplatesPromise.then((service) => {
+              if (
+                !service ||
+                generation !== viewGeneration ||
+                activeOverlay === undefined
+              ) return;
+              editor.setAutocompleteProvider?.(service.autocompleteProvider);
+              requestRender();
             });
             return activeOverlay;
           },
@@ -791,7 +868,10 @@ export function createTaskWidgetController(
 
   // ── Panel actions ─────────────────────────────────────────────────────────
 
-  function steerViewedTask(text: string): void {
+  function steerViewedTask(
+    text: string,
+    promptTemplatesPromise?: Promise<ChildPromptTemplateService | undefined>,
+  ): void {
     const taskId = panelState.viewTaskId;
     const task = taskId ? findTask(taskId) : undefined;
     if (!taskId || !task) {
@@ -806,7 +886,26 @@ export function createTaskWidgetController(
       );
       return;
     }
-    void Promise.resolve(deps?.steerTask(task, taskId, text))
+    void (async () => {
+      let steeringText = text;
+      if (task.runtime !== "claude" && promptTemplatesPromise) {
+        const service = await promptTemplatesPromise;
+        if (service) {
+          const backend = task.backend === "sdk"
+            ? "sdk"
+            : task.backend === "durable"
+              ? "durable"
+              : "terminal";
+          const prepared = service.prepareSteeringInput(text, backend);
+          if (prepared.error) {
+            widgetCtx?.ui.notify(prepared.error, "error");
+            return;
+          }
+          steeringText = prepared.text;
+        }
+      }
+      return deps?.steerTask(task, taskId, steeringText);
+    })()
       .then((error) => {
         if (error) {
           widgetCtx?.ui.notify(`Could not steer task: ${error}`, "error");

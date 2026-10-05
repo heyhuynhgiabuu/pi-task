@@ -4,9 +4,10 @@
  * ONE transcript is on screen (the above-editor pane this replaces left the
  * parent log visible), owns scroll keys — ↑↓/pgup/pgdn toward older lines —
  * and receives mouse-wheel events before the main transcript's own scroll
- * (pi-tui dispatches wheel to overlays first). Every other key feeds the
- * embedded steer editor (a real CustomEditor, so the steer prompt edits like
- * the parent agent's input); enter submits it and esc returns to main.
+ * (pi-tui dispatches wheel to overlays first). Scrolling and the configured
+ * tool-expand key stay overlay-level; other editing keys feed the embedded
+ * steer editor (a real CustomEditor); enter steers the viewed child and esc
+ * returns to main.
  *
  * Layout, top to bottom, mirroring pi's own screen: transcript, the compact
  * child status row, the editor (whose top border carries the working indicator
@@ -21,8 +22,12 @@ import {
   matchesKey,
   truncateToWidth,
   type Component,
+  type Editor,
   type TUI,
+  type TuiMouseEvent,
+  type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
+import type { KeybindingsManager } from "@earendil-works/pi-coding-agent";
 
 import type { TaskActivity } from "../task-activity.js";
 import {
@@ -111,11 +116,13 @@ export interface TaskTranscriptOverlayTheme {
 }
 
 /** The embedded steer input: the full parent-editor surface, narrowed. */
-export interface SteerEditorLike {
-  handleInput(data: string): void;
-  render(width: number): string[];
-  getText(): string;
-  setText(text: string): void;
+export interface SteerEditorLike
+  extends Pick<Editor, "handleInput" | "render" | "getText" | "setText"> {
+  setAutocompleteProvider?: Editor["setAutocompleteProvider"];
+  /** Public pi-tui state used to route selection keys while a menu is open. */
+  isShowingAutocomplete?: Editor["isShowingAutocomplete"];
+  /** Public Editor submit callback. */
+  onSubmit?: Editor["onSubmit"];
   dispose?(): void;
   /**
    * `CustomEditor.setWorkingStatusIndicator`: draws the indicator inside the
@@ -145,10 +152,16 @@ export interface TaskTranscriptOverlayHost {
   context?(): TaskContextInfo | undefined;
 }
 
-interface WheelLike {
-  type: string;
-  wheelDelta?: number;
-}
+const OVERLAY_HORIZONTAL_PADDING = 1;
+const AUTOCOMPLETE_ROUTING_KEYBINDINGS = [
+  "tui.select.cancel",
+  "tui.select.up",
+  "tui.select.down",
+  "tui.editor.pageUp",
+  "tui.editor.pageDown",
+] as const;
+
+type ExpandKeybindings = Pick<KeybindingsManager, "matches">;
 
 export interface TaskTranscriptOverlayOptions {
   pane: TaskTranscriptPane;
@@ -161,6 +174,8 @@ export interface TaskTranscriptOverlayOptions {
    * indicator against it; without it the overlay stays static (headless use).
    */
   ui?: TUI;
+  /** The same Pi keybindings used by the host editor. */
+  keybindings?: ExpandKeybindings;
 }
 
 export class TaskTranscriptOverlay implements Component {
@@ -173,6 +188,7 @@ export class TaskTranscriptOverlay implements Component {
   /** Raw background escape for the panel fill (reset stripped). */
   private readonly bgStart: string;
   private readonly ui: TUI | undefined;
+  private readonly keybindings: ExpandKeybindings | undefined;
   /**
    * The view's one working indicator, created on first activity: it animates in
    * the editor's top border when the editor supports it, and as a row above the
@@ -193,9 +209,14 @@ export class TaskTranscriptOverlay implements Component {
     this.editor = options.editor;
     this.terminalRows = options.terminalRows;
     this.ui = options.ui;
+    this.keybindings = options.keybindings;
+    this.editor.onSubmit = (submittedText) => {
+      const text = submittedText.trim();
+      if (text) this.host.onSteer(text);
+    };
     this.bgStart = this.theme?.bg ? this.theme.bg(OVERLAY_BG_TOKEN, "").replace("\x1b[49m", "") : "";
     this.box = new Box(
-      1,
+      OVERLAY_HORIZONTAL_PADDING,
       0,
       this.theme?.bg ? (text) => this.theme!.bg(OVERLAY_BG_TOKEN, text) : undefined,
     );
@@ -206,12 +227,33 @@ export class TaskTranscriptOverlay implements Component {
   }
 
   handleInput(data: string): void {
-    if (matchesKey(data, "escape")) {
+    const autocompleteActive = this.editor.isShowingAutocomplete?.() ?? false;
+    if (
+      matchesKey(data, "escape") &&
+      !(autocompleteActive && this.keybindings?.matches(data, "tui.select.cancel"))
+    ) {
       this.host.onClose();
       return;
     }
+    if (this.keybindings?.matches(data, "app.tools.expand")) {
+      this.pane.toggleToolsExpanded?.();
+      this.host.requestRender();
+      return;
+    }
+    // Match the key actions the native Editor handles while its completion list
+    // is active. In particular, select-up/down may be remapped away from arrows.
+    // Its pageUp/pageDown actions also belong to the editor, not this pane.
+    if (
+      autocompleteActive &&
+      AUTOCOMPLETE_ROUTING_KEYBINDINGS.some((action) => this.keybindings?.matches(data, action))
+    ) {
+      this.editor.handleInput(data);
+      this.host.requestRender();
+      return;
+    }
     // Pane semantics: positive delta scrolls back toward older lines. Scroll
-    // keys are overlay-level and never reach the steer editor.
+    // keys are overlay-level and never reach the steer editor unless the native
+    // completion menu above owns one of its selection/navigation bindings.
     if (matchesKey(data, "up")) {
       this.pane.scrollBy(ARROW_SCROLL);
       this.host.requestRender();
@@ -233,6 +275,14 @@ export class TaskTranscriptOverlay implements Component {
       return;
     }
     if (matchesKey(data, "return")) {
+      // Let Pi's editor accept the selected item first. Slash completion may
+      // then submit through the native onSubmit callback; file/argument
+      // completion only fills the editor and remains unsubmitted.
+      if (this.editor.isShowingAutocomplete?.()) {
+        this.editor.handleInput(data);
+        this.host.requestRender();
+        return;
+      }
       const text = this.editor.getText().trim();
       if (text) {
         this.editor.setText("");
@@ -247,12 +297,39 @@ export class TaskTranscriptOverlay implements Component {
     this.host.requestRender();
   }
 
-  /** Wheel over the overlay scrolls the transcript, not the main log. */
-  handleMouse(event: WheelLike): { handled: boolean } | undefined {
-    if (event.type !== "wheel" || !event.wheelDelta) return undefined;
-    // pi-tui sends negative deltas for wheel-up; pane positive = older.
-    this.pane.scrollBy(-event.wheelDelta);
-    return { handled: true };
+  /** Wheel scrolls the transcript; clicks are forwarded only to native tool rows. */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    if (event.type === "wheel" && event.wheelDelta) {
+      // pi-tui sends negative deltas for wheel-up; pane positive = older.
+      this.pane.scrollBy(-event.wheelDelta);
+      return { handled: true };
+    }
+    // Press/drag/release/move remain with the host so selection keeps working.
+    if (event.type !== "click" || event.button !== "left") return undefined;
+    // The overlay paints through a Box with one cell of horizontal padding on
+    // either side. Match Box.handleMouse's bounds and coordinates before the
+    // pane routes this row to the tool component.
+    if (
+      event.x < OVERLAY_HORIZONTAL_PADDING ||
+      event.x >= event.width - OVERLAY_HORIZONTAL_PADDING
+    ) {
+      return undefined;
+    }
+    const hit = this.pane.hitTest?.(event.y);
+    if (!hit) return undefined;
+    const nativeEvent: TuiMouseEvent = {
+      ...event,
+      x: event.x - OVERLAY_HORIZONTAL_PADDING,
+      y: hit.y,
+      width: Math.max(1, event.width - OVERLAY_HORIZONTAL_PADDING * 2),
+      height: hit.height,
+    };
+    const result = hit.dispatchMouse
+      ? hit.dispatchMouse(nativeEvent)
+      : hit.component.handleMouse?.(nativeEvent);
+    if (!result?.handled) return undefined;
+    this.host.requestRender();
+    return result;
   }
 
   render(width: number): string[] {

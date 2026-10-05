@@ -22,9 +22,27 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import { truncateToWidth, type TUI } from "@earendil-works/pi-tui";
+import {
+  truncateToWidth,
+  type Component,
+  type TUI,
+  type TuiMouseEvent,
+  type TuiMouseEventResult,
+} from "@earendil-works/pi-tui";
 
 import type { TranscriptItem } from "./transcript.js";
+
+/** What a row of the pane's last render maps to, for native mouse routing. */
+export interface TaskTranscriptPaneHit {
+  /** The native pi component that owns the row (a tool component). */
+  component: Pick<Component, "handleMouse">;
+  /** Row inside that component's own rendered block. */
+  y: number;
+  /** Rows the component occupies in the pane. */
+  height: number;
+  /** Forward through pi's native handler, retaining this pane's expansion state. */
+  dispatchMouse?(event: TuiMouseEvent): TuiMouseEventResult | undefined;
+}
 
 export interface TaskTranscriptPane {
   /** Scroll back/forward from the tail; clamps to the available content. */
@@ -33,6 +51,20 @@ export interface TaskTranscriptPane {
   render(width: number, availableRows?: number): string[];
   invalidate(): void;
   dispose(): void;
+  /**
+   * Row of the pane's last render → the tool component that owns it, so the
+   * overlay can forward a click with native coordinates (it has no layout
+   * geometry of its own). Chrome rows, non-tool rows, and rows outside the
+   * transcript window return undefined, leaving them to the host.
+   */
+  hitTest?(row: number): TaskTranscriptPaneHit | undefined;
+  /** Expand or collapse every tool row; returns the state now in effect. */
+  toggleToolsExpanded?(): boolean;
+}
+
+/** Component shape the pane caches: renders lines, optionally handles mouse. */
+interface CachedComponent extends Pick<Component, "render" | "handleMouse"> {
+  setExpanded?(expanded: boolean): void;
 }
 
 const PANE_HEADER_ROWS = 14;
@@ -97,14 +129,34 @@ export function createTaskTranscriptPane(
     sig(): string;
     /** Full (expensive) transcript read. */
     read(): TranscriptItem[];
+    /** Effective `outputPad` setting: horizontal padding of transcript rows. */
+    outputPad?: number;
+    /** Optional initial expansion state for this child view; never mutates the host. */
+    toolsExpanded?: boolean;
   },
 ): TaskTranscriptPane {
   let scrollBack = 0;
   let lastSig: string | null = null;
   let cachedItems: TranscriptItem[] = [];
-  let cachedBody: { sig: string; width: number; lines: string[] } | null = null;
+  let cachedBody:
+    | {
+        sig: string;
+        width: number;
+        lines: string[];
+        /** Line span of every item in `lines`, for row → component routing. */
+        spans: Array<{ start: number; count: number; item: TranscriptItem }>;
+      }
+    | null = null;
+  let toolsExpanded = opts.toolsExpanded ?? false;
+  /** Per-call overrides are kept across live transcript object replacement. */
+  const toolExpansionOverrides = new Map<string, boolean>();
+  let toolComponents = new Set<CachedComponent>();
+  /** Geometry of the last render, so a click row maps back to a body line. */
+  let lastFrame:
+    | { lines: number; bodyTop: number; windowStart: number; visibleCount: number }
+    | undefined;
   const renderDefinitions = toolRenderDefinitions(opts.cwd);
-  let itemCache = new WeakMap<TranscriptItem, { render(width: number): string[] }>();
+  let itemCache = new WeakMap<TranscriptItem, CachedComponent>();
 
   // Re-parse only when the source signature changed (checked in render), so
   // long sessions do not re-read the JSONL and rebuild every component on
@@ -118,9 +170,15 @@ export function createTaskTranscriptPane(
     let comp = itemCache.get(item);
     if (!comp) {
       if (item.type === "user") {
-        comp = new UserMessageComponent(item.text, getMarkdownTheme());
+        comp = new UserMessageComponent(item.text, getMarkdownTheme(), opts.outputPad);
       } else if (item.type === "assistant") {
-        comp = new AssistantMessageComponent(assistantMessageForTranscript(item));
+        comp = new AssistantMessageComponent(
+          assistantMessageForTranscript(item),
+          undefined,
+          undefined,
+          undefined,
+          opts.outputPad,
+        );
       } else {
         const tool = new ToolExecutionComponent(
           item.name,
@@ -132,6 +190,8 @@ export function createTaskTranscriptPane(
           opts.cwd,
         );
         tool.markExecutionStarted();
+        // Expansion belongs to this view, never the host's interactive mode.
+        tool.setExpanded(toolExpansionOverrides.get(item.toolCallId) ?? toolsExpanded);
         if (item.result !== undefined || item.inProgress === false) {
           tool.updateResult(
             {
@@ -151,6 +211,11 @@ export function createTaskTranscriptPane(
     return comp.render(width);
   }
 
+  function invalidateRenderedBody(): void {
+    cachedBody = null;
+    lastFrame = undefined;
+  }
+
   return {
     scrollBy(delta: number) {
       scrollBack = Math.max(0, scrollBack + delta);
@@ -160,15 +225,34 @@ export function createTaskTranscriptPane(
       if (sig !== lastSig) {
         lastSig = sig;
         cachedItems = opts.read();
-        cachedBody = null;
+        const liveToolCalls = new Set(
+          cachedItems.flatMap((item) => (item.type === "tool" ? [item.toolCallId] : [])),
+        );
+        for (const toolCallId of toolExpansionOverrides.keys()) {
+          if (!liveToolCalls.has(toolCallId)) toolExpansionOverrides.delete(toolCallId);
+        }
+        invalidateRenderedBody();
       }
       // Body lines depend only on (items, width): reuse them across repaint
       // ticks (the live view re-renders every ~700 ms) unless the transcript
       // grew or the width changed.
       if (!cachedBody || cachedBody.sig !== sig || cachedBody.width !== width) {
         const body: string[] = [];
-        for (const item of cachedItems) body.push(...itemLines(item, width));
-        cachedBody = { sig, width, lines: body };
+        const spans: Array<{ start: number; count: number; item: TranscriptItem }> = [];
+        for (const item of cachedItems) {
+          const start = body.length;
+          const lines = itemLines(item, width);
+          body.push(...lines);
+          spans.push({ start, count: lines.length, item });
+        }
+        cachedBody = { sig, width, lines: body, spans };
+        toolComponents = new Set(
+          spans.flatMap((span) => {
+            if (span.item.type !== "tool") return [];
+            const component = itemCache.get(span.item);
+            return component ? [component] : [];
+          }),
+        );
       }
       const body = cachedBody.lines;
 
@@ -176,7 +260,10 @@ export function createTaskTranscriptPane(
       const borderLines = new DynamicBorder((str) => theme.fg("border", str)).render(width);
       const boundedRows =
         availableRows === undefined ? undefined : Math.max(0, Math.floor(availableRows));
-      if (boundedRows === 0) return [];
+      if (boundedRows === 0) {
+        lastFrame = undefined;
+        return [];
+      }
 
       // Reserve both navigation hints when the overlay supplies a viewport, so
       // scrolling changes the text window rather than making the pane overflow.
@@ -213,16 +300,62 @@ export function createTaskTranscriptPane(
             : "",
         );
       }
+      lastFrame = {
+        lines: lines.length,
+        bodyTop: showChrome ? borderLines.length + 1 : 0,
+        windowStart: Math.max(0, end - visibleCount),
+        visibleCount,
+      };
       return lines;
+    },
+    hitTest(row: number) {
+      const frame = lastFrame;
+      const body = cachedBody;
+      if (!frame || !body || row < 0 || row >= frame.lines) return undefined;
+      const bodyRow = row - frame.bodyTop;
+      if (bodyRow < 0 || bodyRow >= frame.visibleCount) return undefined;
+      const index = frame.windowStart + bodyRow;
+      const span = body.spans.find((entry) => index >= entry.start && index < entry.start + entry.count);
+      if (!span || span.item.type !== "tool") return undefined;
+      const toolItem = span.item;
+      const component = itemCache.get(toolItem);
+      if (!component?.handleMouse) return undefined;
+      return {
+        component,
+        y: index - span.start,
+        height: span.count,
+        dispatchMouse(event) {
+          const result = component.handleMouse?.(event);
+          if (result?.handled && event.type === "click" && event.button === "left") {
+            const currentExpansion =
+              toolExpansionOverrides.get(toolItem.toolCallId) ?? toolsExpanded;
+            toolExpansionOverrides.set(toolItem.toolCallId, !currentExpansion);
+            // The native component retained its own new state; rebuild lines
+            // from that same component so its per-tool toggle remains visible.
+            invalidateRenderedBody();
+          }
+          return result;
+        },
+      };
+    },
+    toggleToolsExpanded() {
+      toolsExpanded = !toolsExpanded;
+      toolExpansionOverrides.clear();
+      for (const component of toolComponents) component.setExpanded?.(toolsExpanded);
+      // Tool rows change height, so the cached lines must be rebuilt.
+      invalidateRenderedBody();
+      return toolsExpanded;
     },
     invalidate() {
       // Components cache theme colors internally; rebuild on theme change.
       itemCache = new WeakMap();
-      cachedBody = null;
+      invalidateRenderedBody();
     },
     dispose() {
       itemCache = new WeakMap();
-      cachedBody = null;
+      invalidateRenderedBody();
+      toolComponents.clear();
+      toolExpansionOverrides.clear();
     },
   };
 }

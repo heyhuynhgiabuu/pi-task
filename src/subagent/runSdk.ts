@@ -1,5 +1,6 @@
 import type { ExtensionContext, ModelRuntime, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
+import { isChildProjectTrusted } from "../panel/child-prompts.js";
 import { createTaskFastModeInlineExtension } from "../fast-mode.js";
 import type { AgentConfig } from "../helpers.js";
 
@@ -14,6 +15,8 @@ export interface RunSdkSubagentOptions {
   excludeTools?: string[];
   systemPrompt?: string;
   skillPaths?: string[];
+  /** Parent-session prompt files; the SDK child expands them natively. */
+  promptTemplatePaths?: string[];
   fast?: boolean;
   sessionName?: string;
   signal?: AbortSignal;
@@ -31,6 +34,7 @@ export function buildSdkResourceLoaderOptions(options: {
   settingsManager: SettingsManager;
   systemPrompt?: string;
   skillPaths?: string[];
+  promptTemplatePaths?: string[];
   fast?: boolean;
 }) {
   return {
@@ -39,6 +43,7 @@ export function buildSdkResourceLoaderOptions(options: {
     settingsManager: options.settingsManager,
     systemPromptOverride: () => options.systemPrompt,
     additionalSkillPaths: options.skillPaths,
+    additionalPromptTemplatePaths: options.promptTemplatePaths,
     noExtensions: true,
     extensionFactories: options.fast
       ? [createTaskFastModeInlineExtension(options.agentDir)]
@@ -240,7 +245,12 @@ export async function runSdkSubagent(options: RunSdkSubagentOptions): Promise<{
     const agentDir = getAgentDir();
     const modelRuntime = await createSdkChildModelRuntime(options.ctx, agentDir);
     const settingsManager = SettingsManager.create(options.cwd, agentDir, {
-      projectTrusted: options.ctx.isProjectTrusted(),
+      projectTrusted: isChildProjectTrusted({
+        cwd: options.cwd,
+        parentCwd: options.ctx.cwd,
+        parentProjectTrusted: options.ctx.isProjectTrusted(),
+        agentDir,
+      }),
     });
     const resourceLoader = new DefaultResourceLoader(
       buildSdkResourceLoaderOptions({
@@ -249,6 +259,7 @@ export async function runSdkSubagent(options: RunSdkSubagentOptions): Promise<{
         settingsManager,
         systemPrompt: options.systemPrompt,
         skillPaths: options.skillPaths,
+        promptTemplatePaths: options.promptTemplatePaths,
         fast: options.fast,
       }) as any,
     );

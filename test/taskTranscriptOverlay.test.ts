@@ -9,8 +9,19 @@
  */
 
 import { strict as assert } from "node:assert";
-import { CURSOR_MARKER } from "@earendil-works/pi-tui";
+import { CustomEditor, initTheme } from "@earendil-works/pi-coding-agent";
+import {
+  CombinedAutocompleteProvider,
+  CURSOR_MARKER,
+  getKeybindings,
+  KeybindingsManager,
+  setKeybindings,
+  TUI_KEYBINDINGS,
+  type KeybindingDefinitions,
+} from "@earendil-works/pi-tui";
 import { test } from "node:test";
+
+import { createSteerEditor } from "../src/lifecycle/widget.js";
 
 import {
   TaskTranscriptOverlay,
@@ -160,7 +171,7 @@ test("esc closes the overlay without touching the steer editor", () => {
 });
 
 test("arrow keys scroll the pane toward older lines and skip the editor", () => {
-  const { overlay, pane, editor } = makeOverlay();
+  const { overlay, pane, editor } = makeOverlay({ keybindings: { matches: () => false } });
   overlay.handleInput(UP);
   overlay.handleInput(DOWN);
   assert.deepEqual(pane.scrolled, [3, -3], "up shows older lines, down returns toward the tail");
@@ -168,7 +179,7 @@ test("arrow keys scroll the pane toward older lines and skip the editor", () => 
 });
 
 test("pageUp/pageDown page the pane", () => {
-  const { overlay, pane, editor } = makeOverlay();
+  const { overlay, pane, editor } = makeOverlay({ keybindings: { matches: () => false } });
   overlay.handleInput(PGUP);
   overlay.handleInput(PGDN);
   assert.deepEqual(pane.scrolled, [10, -10]);
@@ -185,6 +196,145 @@ test("typing forwards to the editor; enter submits and clears it", () => {
   assert.equal(editor.text, "", "the editor is cleared after submit");
   overlay.handleInput(ENTER);
   assert.deepEqual(calls.steers, ["hi"], "empty editor does not steer again");
+});
+
+test("Enter lets native slash completion run before submitting its completed text", () => {
+  const pane = makePane();
+  const steered: string[] = [];
+  const handled: string[] = [];
+  let text = "/rev";
+  let editor: SteerEditorLike;
+  editor = {
+    handleInput(data) {
+      handled.push(data);
+      text = "/review ";
+      editor.onSubmit?.(text.trim());
+      text = "";
+    },
+    render: () => [text],
+    getText: () => text,
+    setText: (value) => { text = value; },
+    isShowingAutocomplete: () => true,
+  };
+  const overlay = new TaskTranscriptOverlay({
+    pane: pane.pane,
+    host: { taskId: "t-completion", onSteer: (value) => steered.push(value), onClose() {}, requestRender() {} },
+    theme: null,
+    editor,
+    terminalRows: () => 40,
+  });
+  overlay.handleInput(ENTER);
+  assert.deepEqual(handled, [ENTER], "the selected item is accepted by the native editor first");
+  assert.deepEqual(steered, ["/review"], "native submission is routed exactly once");
+  assert.equal(text, "", "native submission clears the editor");
+  overlay.dispose();
+});
+
+test("native completion navigation and cancel keys stay with the real editor", async () => {
+  initTheme();
+  const previousKeybindings = getKeybindings();
+  const definitions = {
+    ...TUI_KEYBINDINGS,
+    "app.tools.expand": { defaultKeys: "ctrl+o" },
+  } satisfies KeybindingDefinitions;
+  const keybindings = new KeybindingsManager(definitions, {
+    "tui.select.up": ["up", "ctrl+p"],
+    "tui.select.down": ["down", "ctrl+n"],
+  });
+  setKeybindings(keybindings);
+  let overlay: TaskTranscriptOverlay | undefined;
+
+  try {
+    const commands = [{ name: "review" }, { name: "rebase" }, { name: "revise" }];
+    const provider = new CombinedAutocompleteProvider(commands, "/tmp");
+    const suggestions = await provider.getSuggestions(["/"], 0, 1, { signal: new AbortController().signal });
+    assert.equal(suggestions?.items.length, 3, "the real provider exposes multiple slash candidates");
+    const tui = { terminal: { rows: 40, columns: 100 }, requestRender() {} };
+    const theme = { fg: (_style: string, text: string) => text, bg: (_style: string, text: string) => text };
+    const editor = createSteerEditor(tui, theme, keybindings);
+    assert.ok(editor instanceof CustomEditor, "the regression exercises Pi's real CustomEditor");
+    editor.setAutocompleteProvider?.(provider);
+
+    const pane = makePane();
+    let expansions = 0;
+    const paneWithExpand = Object.assign(pane.pane, {
+      toggleToolsExpanded: () => { expansions++; return true; },
+    });
+    const { host, calls } = makeHost();
+    const activeOverlay = new TaskTranscriptOverlay({
+      pane: paneWithExpand,
+      host,
+      theme: null,
+      editor,
+      terminalRows: () => 40,
+      keybindings,
+    });
+    overlay = activeOverlay;
+    const waitForMenu = async () => {
+      for (let i = 0; i < 50 && !editor.isShowingAutocomplete?.(); i++) {
+        await new Promise((resolve) => setTimeout(resolve, 2));
+      }
+      assert.equal(editor.isShowingAutocomplete?.(), true, "native slash completion menu opened");
+    };
+
+    activeOverlay.handleInput("/");
+    await waitForMenu();
+
+    activeOverlay.handleInput(PGUP);
+    activeOverlay.handleInput(PGDN);
+    assert.deepEqual(pane.scrolled, [], "native editor page bindings do not scroll the transcript while the menu is open");
+    assert.equal(editor.isShowingAutocomplete?.(), true, "page navigation leaves completion active");
+
+    activeOverlay.handleInput(DOWN);
+    assert.deepEqual(pane.scrolled, [], "the configured selection arrow does not scroll the transcript");
+    assert.equal(editor.isShowingAutocomplete?.(), true, "the menu remains active after moving selection");
+
+    activeOverlay.handleInput("\x0e"); // ctrl+n is also configured as tui.select.down
+    assert.deepEqual(pane.scrolled, [], "the remapped selection key also belongs to the menu");
+    activeOverlay.handleInput(ENTER);
+    assert.deepEqual(calls.steers, [`/${suggestions!.items[2]!.value}`], "Enter accepts and submits the selected native candidate");
+    assert.equal(editor.getText(), "", "native slash acceptance submits and clears the editor");
+
+    activeOverlay.handleInput("/");
+    await waitForMenu();
+    activeOverlay.handleInput("\x0f"); // ctrl+o: app.tools.expand
+    assert.equal(expansions, 1, "the overlay tool-expansion action is not captured by the menu");
+    assert.equal(editor.isShowingAutocomplete?.(), true, "tool expansion leaves completion open");
+
+    activeOverlay.handleInput(ESC);
+    assert.equal(calls.closes, 0, "first Escape dismisses the native menu, not the task view");
+    assert.equal(editor.isShowingAutocomplete?.(), false);
+    assert.equal(editor.getText(), "/", "dismissing completion preserves the input");
+    activeOverlay.handleInput(ESC);
+    assert.equal(calls.closes, 1, "second Escape closes the task view");
+  } finally {
+    overlay?.dispose();
+    setKeybindings(previousKeybindings);
+  }
+});
+
+test("Enter accepts a file completion without submitting it", () => {
+  const pane = makePane();
+  const steered: string[] = [];
+  let text = "@src/fi";
+  const editor: SteerEditorLike = {
+    handleInput: () => { text = "@src/file.ts "; },
+    render: () => [text],
+    getText: () => text,
+    setText: (value) => { text = value; },
+    isShowingAutocomplete: () => true,
+  };
+  const overlay = new TaskTranscriptOverlay({
+    pane: pane.pane,
+    host: { taskId: "t-file-completion", onSteer: (value) => steered.push(value), onClose() {}, requestRender() {} },
+    theme: null,
+    editor,
+    terminalRows: () => 40,
+  });
+  overlay.handleInput(ENTER);
+  assert.deepEqual(steered, [], "file completion only edits the input");
+  assert.equal(text, "@src/file.ts ");
+  overlay.dispose();
 });
 
 test("backspace reaches the editor", () => {

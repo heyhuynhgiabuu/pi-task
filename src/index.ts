@@ -80,6 +80,7 @@ import {
   createComparisonSettledHandler,
 } from "./lifecycle/index.js";
 import { DeliveryGuard, sessionViewOf } from "./panel/delivery.js";
+import { activeParentPromptPaths } from "./panel/child-prompts.js";
 import { reconcileStaleSdkBackgroundTasks } from "./subagent/sdkBackground.js";
 import {
   createDefaultHerdrTerminalBackend,
@@ -173,6 +174,12 @@ export default function (pi: ExtensionAPI) {
   const asyncHerdr = createDefaultHerdrTerminalBackend();
   let runtimeModelRegistry: DurableRuntimeModelRegistry | undefined;
   const taskWidget = createTaskWidgetController(foregroundTasks, backgroundTasks, {
+    // Pi's public effective settings API; absent values use the same defaults as
+    // SettingsManager.getEditorPaddingX()/getOutputPad().
+    getDisplaySettings: () => pi.getSettings(),
+    // Public descriptors identify the parent's enabled, file-backed prompt
+    // templates without exposing bodies or loading any extra extensions.
+    getCommands: () => pi.getCommands(),
     steerTask: (task, taskId, text) => {
       if (task.backend === "durable") {
         return steerDurableTask(extensionPiDir, taskId, text, {
@@ -1146,6 +1153,11 @@ export default function (pi: ExtensionAPI) {
               conversationId,
               toolSelection,
               skillPaths,
+              promptTemplatePaths: activeParentPromptPaths(
+                pi.getCommands(),
+                ctx.cwd,
+                taskCwd,
+              ),
               fast: isolatedFast,
               signal,
               isBackground,

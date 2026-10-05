@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   armableTimeoutMs,
+  buildSdkResourceLoaderOptions,
   createSdkChildModelRuntime,
   getFinalAssistantResult,
 } from "../src/subagent/runSdk.js";
@@ -12,6 +13,18 @@ import {
 function tempAgentDir(): string {
   return mkdtempSync(join(tmpdir(), "pi-task-child-runtime-"));
 }
+
+test("SDK child resources include parent prompt files without enabling extensions", () => {
+  const promptTemplatePaths = ["/tmp/parent-prompt.md"];
+  const options = buildSdkResourceLoaderOptions({
+    cwd: "/tmp/child",
+    agentDir: tempAgentDir(),
+    settingsManager: {} as never,
+    promptTemplatePaths,
+  });
+  assert.deepEqual(options.additionalPromptTemplatePaths, promptTemplatePaths);
+  assert.equal(options.noExtensions, true, "prompt discovery does not enable parent extensions");
+});
 
 test("re-registers extension providers into an isolated child runtime", async () => {
   const config = {

@@ -813,6 +813,13 @@ export class TaskTranscriptOverlay implements Component, Focusable {
   private resolveOverlayBackground(): string {
     if (!this.theme) return "";
     const colorMode = this.theme.getColorMode?.() ?? "truecolor";
+    // Diagnostic: PI_TASK_DEBUG_CHILD_SURFACE=magenta paints the whole child
+    // surface magenta so a surviving grey band can be attributed to the
+    // terminal layer (band stays grey) versus our paint path (band turns
+    // magenta). Not for normal use.
+    if (process.env.PI_TASK_DEBUG_CHILD_SURFACE === "magenta") {
+      return backgroundAnsi(rgbColor(255, 0, 255), colorMode);
+    }
     const resolvedColor = this.theme.colors?.customMessageBg;
     if (resolvedColor) return backgroundAnsi(resolvedColor, colorMode);
 

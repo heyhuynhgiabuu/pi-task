@@ -1081,3 +1081,22 @@ test("in-progress tools with partial output keep their Elapsed ticker", () => {
   }
   pane.dispose();
 });
+
+test("settled tools render their real persisted duration via the built-in Took line", () => {
+  const items: TranscriptItem[] = [toolItem({
+    startedAt: Date.parse("2026-10-06T00:00:00Z"),
+    endedAt: Date.parse("2026-10-06T00:00:01.5Z"),
+  })];
+  const pane = makePane(items);
+  const lines = pane.render(80, 20).join("\n");
+  assert.ok(/Took 1\.5s/.test(lines), `expected a real Took duration, got: ${lines.slice(-200)}`);
+  pane.dispose();
+});
+
+test("settled tools without persisted timings stay silent instead of showing 0.0s", () => {
+  const items: TranscriptItem[] = [toolItem()];
+  const pane = makePane(items);
+  const lines = pane.render(80, 20).join("\n");
+  assert.equal(/Took\s/.test(lines), false, "no fabricated duration without timings");
+  pane.dispose();
+});

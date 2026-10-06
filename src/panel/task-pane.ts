@@ -191,9 +191,19 @@ export function createTaskTranscriptPane(
         );
         // Settled historical items must not synthesize a duration:
         // markExecutionStarted stamps startedAt=now, so a completed tool
-        // would always render "Took 0.0s". Live items keep the ticker.
+        // would always render "Took 0.0s". Instead, feed the renderer the
+        // real persisted call/result timestamps when the transcript has both;
+        // live items keep the ticker.
         if (item.inProgress === true) {
           tool.markExecutionStarted();
+        } else if (item.startedAt !== undefined && item.endedAt !== undefined) {
+          const state = (tool as unknown as {
+            rendererState?: { startedAt?: number; endedAt?: number };
+          }).rendererState;
+          if (state) {
+            state.startedAt = item.startedAt;
+            state.endedAt = item.endedAt;
+          }
         }
         // Expansion belongs to this view, never the host's interactive mode.
         tool.setExpanded(toolExpansionOverrides.get(item.toolCallId) ?? toolsExpanded);

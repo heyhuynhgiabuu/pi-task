@@ -224,3 +224,38 @@ test("every overlay render re-clears kitty placements so parent repaints cannot 
     setCapabilityOverrides({ images: undefined, trueColor: undefined, hyperlinks: undefined });
   }
 });
+
+test("theme tool backgrounds survive while unknown backgrounds flatten to the surface", () => {
+  const surface = rgbColor(0, 0, 0);
+  const toolBg = rgbColor(37, 42, 45);
+  const theme = {
+    fg: (_token: string, text: string) => text,
+    bg: (_token: string, text: string) => `${text}\x1b[49m`,
+    colors: { customMessageBg: surface, toolSuccessBg: toolBg } as Record<string, Color>,
+    getColorMode: () => "truecolor" as const,
+    appearance: "dark" as const,
+  };
+  const toolRow = "\x1b[38;5;201;48;2;37;42;45m$ echo hi\x1b[39;48;5;88m unknown\x1b[49m";
+  const pane = makePane([toolRow]);
+  const editor = makeFakeEditor();
+  editor.editor.render = () => ["prompt"];
+  const { host } = makeHost();
+  const overlay = new TaskTranscriptOverlay({
+    pane: pane.pane, host, theme, editor: editor.editor, terminalRows: () => 12,
+  });
+  try {
+    const cells = readAnsiCells(overlay.render(80).find((row) => row.includes("echo hi")) ?? "");
+    const text = cells.map(({ char }) => char).join("");
+    const hi = text.indexOf("$ echo hi");
+    assert.notEqual(hi, -1);
+    const toolCells = cells.slice(hi, hi + "$ echo hi".length);
+    assert.ok(toolCells.every((c) => c.background === "48;2;37;42;45"), "theme tool bg survives");
+    assert.ok(toolCells.every((c) => c.foreground === "38;5;201"), "foreground preserved");
+    const unk = text.indexOf("unknown");
+    assert.notEqual(unk, -1);
+    const surfaceBg = readAnsiCells(`${backgroundAnsi(surface, "truecolor")}x`)[0]?.background;
+    assert.equal(cells[unk + 1]?.background, surfaceBg, "unknown backgrounds flatten to the surface");
+  } finally {
+    overlay.dispose();
+  }
+});

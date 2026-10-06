@@ -145,11 +145,12 @@ function hasExplicitBackground(style: string): boolean {
  * bold — passes through untouched. Payload values of combined sequences are
  * preserved when rebuilding.
  */
-function flattenToSurface(line: string, bgStart: string): string {
+function flattenToSurface(line: string, bgStart: string, allowedBgs: readonly string[]): string {
   return line.replace(/\x1b\[([0-9;]*)m/g, (sequence, parameters: string) => {
     const codes = parameters === "" ? [0] : parameters.split(";").map(Number);
     const kept: number[] = [];
     let hadBackground = false;
+    let backgroundEscape: string | undefined;
     for (let index = 0; index < codes.length; index++) {
       const code = codes[index]!;
       if (code === 49) {
@@ -160,13 +161,16 @@ function flattenToSurface(line: string, bgStart: string): string {
         kept.push(0);
       } else if ((code >= 40 && code <= 47) || (code >= 100 && code <= 107)) {
         hadBackground = true;
+        backgroundEscape = `\x1b[${code}m`;
       } else if (code === 48) {
         const mode = codes[index + 1];
         if (mode === 5 && codes[index + 2] !== undefined) {
           hadBackground = true;
+          backgroundEscape = `\x1b[48;5;${codes[index + 2]}m`;
           index += 2;
         } else if (mode === 2 && codes[index + 4] !== undefined) {
           hadBackground = true;
+          backgroundEscape = `\x1b[48;2;${codes[index + 2]};${codes[index + 3]};${codes[index + 4]}m`;
           index += 4;
         } else {
           kept.push(code);
@@ -176,8 +180,12 @@ function flattenToSurface(line: string, bgStart: string): string {
       }
     }
     if (!hadBackground) return sequence;
+    // Theme tool/user backgrounds are intentional and opaque: keep them.
+    const replacement = backgroundEscape !== undefined && allowedBgs.includes(backgroundEscape)
+      ? backgroundEscape
+      : bgStart;
     const rebuilt = kept.length > 0 ? `\x1b[${kept.join(";")}m` : "";
-    return `${rebuilt}${bgStart}`;
+    return `${rebuilt}${replacement}`;
   });
 }
 
@@ -330,6 +338,8 @@ export class TaskTranscriptOverlay implements Component, Focusable {
   private overriddenComposite:
     | { target: object; original: (base: string, line: string, col: number, w: number, total: number) => string }
     | undefined;
+  /** Theme-sanctioned background escapes that survive flattening. */
+  private allowedBgEscapes: readonly string[] = [];
   /**
    * The view's one working indicator, created on first activity: it animates in
    * the editor's top border when the editor supports it, and as a row above the
@@ -800,6 +810,7 @@ export class TaskTranscriptOverlay implements Component, Focusable {
   render(width: number): string[] {
     // Theme colors can resolve after a terminal report or change with appearance.
     this.bgStart = this.resolveOverlayBackground();
+    this.allowedBgEscapes = this.resolveAllowedBackgrounds();
     // The parent transcript re-emits its own kitty image escapes whenever it
     // scrolls or repaints (image lines live in its cached render); each new
     // placement draws above overlay text, so re-clear every frame while the
@@ -835,10 +846,33 @@ export class TaskTranscriptOverlay implements Component, Focusable {
 
   private paintOverlayBackground(text: string): string {
     if (this.bgStart === "") return text;
-    // Single-surface screen: explicit backgrounds from transcript components
-    // (tool pending/success/error, selections) flatten onto the theme surface,
-    // and the line ends on the surface so trailing padding stays painted.
-    return `${this.bgStart}${flattenToSurface(text, this.bgStart)}${this.bgStart}`;
+    // Single-surface screen with theme-sanctioned exceptions: the theme's own
+    // tool/user backgrounds are opaque and intentional, so they survive;
+    // everything else (unknown extensions, stale selections) flattens onto the
+    // surface, and the line ends on the surface so padding stays painted.
+    return `${this.bgStart}${flattenToSurface(text, this.bgStart, this.allowedBgEscapes)}${this.bgStart}`;
+  }
+
+  /** Theme-resolved escapes for tool/user backgrounds that may survive. */
+  private resolveAllowedBackgrounds(): string[] {
+    if (!this.theme) return [];
+    const mode = this.theme.getColorMode?.() ?? "truecolor";
+    const tokens = ["toolPendingBg", "toolSuccessBg", "toolErrorBg", "userMessageBg"] as const;
+    const colors = this.theme.colors as Record<string, Color | undefined> | undefined;
+    const out: string[] = [];
+    if (colors) {
+      for (const token of tokens) {
+        const color = colors[token];
+        if (color) out.push(backgroundAnsi(color, mode));
+      }
+    }
+    if (out.length === 0 && this.theme.bg) {
+      for (const token of tokens) {
+        const legacy = this.theme.bg(token, "").replace(/\x1b\[49m/g, "");
+        if (legacy && hasExplicitBackground(legacy)) out.push(legacy);
+      }
+    }
+    return out;
   }
 
   invalidate(): void {

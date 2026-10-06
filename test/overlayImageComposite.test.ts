@@ -193,3 +193,34 @@ test("the child transcript flattens tool backgrounds onto the theme surface", ()
     overlay.dispose();
   }
 });
+
+test("every overlay render re-clears kitty placements so parent repaints cannot bleed through", () => {
+  setCapabilityOverrides({ images: "kitty", trueColor: undefined, hyperlinks: undefined });
+  const writes: string[] = [];
+  const tui = {
+    terminal: { rows: 12, write: (data: string) => writes.push(data) },
+    requestRender: () => {},
+  };
+  const pane = makePane([]);
+  const editor = makeFakeEditor();
+  editor.editor.render = () => ["prompt"];
+  const { host } = makeHost();
+  const overlay = new TaskTranscriptOverlay({
+    pane: pane.pane,
+    host,
+    theme: null,
+    editor: editor.editor,
+    terminalRows: () => 12,
+    ui: tui as never,
+  });
+  try {
+    const before = writes.filter((w) => w === KITTY_DELETE_ALL).length;
+    overlay.render(40);
+    overlay.render(40);
+    const after = writes.filter((w) => w === KITTY_DELETE_ALL).length;
+    assert.ok(after >= before + 2, "each render re-sends the kitty delete");
+  } finally {
+    overlay.dispose();
+    setCapabilityOverrides({ images: undefined, trueColor: undefined, hyperlinks: undefined });
+  }
+});

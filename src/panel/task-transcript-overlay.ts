@@ -800,6 +800,13 @@ export class TaskTranscriptOverlay implements Component, Focusable {
   render(width: number): string[] {
     // Theme colors can resolve after a terminal report or change with appearance.
     this.bgStart = this.resolveOverlayBackground();
+    // The parent transcript re-emits its own kitty image escapes whenever it
+    // scrolls or repaints (image lines live in its cached render); each new
+    // placement draws above overlay text, so re-clear every frame while the
+    // fullscreen child view is open.
+    if (this.ui && getCapabilities().images === "kitty" && typeof this.ui.terminal?.write === "function") {
+      this.ui.terminal.write(deleteAllKittyImages());
+    }
     return this.box.render(width);
   }
 

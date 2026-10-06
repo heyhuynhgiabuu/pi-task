@@ -1764,7 +1764,13 @@ test("task transcript assistant messages use Pi's native renderer without clippi
     assert.ok(plainLines.some((line) => line.includes("reasoning line 1")));
     assert.ok(plainLines.some((line) => line.includes("reasoning line 12")), "full native thinking block stays visible");
     assert.ok(plainLines.some((line) => line.includes("The answer.")));
-    for (const line of nativeLines) {
+    // The pane strips OSC 133 semantic-prompt markers (they break padded
+    // rendering on spec-compliant terminals), so compare the native renderer's
+    // lines minus those marker-only rows.
+    const expected = nativeLines
+      .filter((line) => !/^(\x1b\[[0-9;]*m)*\x1b\]133;[^\x07\x1b]*(\x07|\x1b\\)/.test(line))
+      .map((line) => line.replace(/\x1b\]133;[^\x07\x1b]*(\x07|\x1b\\)/g, ""));
+    for (const line of expected) {
       assert.ok(lines.includes(line), `native assistant renderer line is preserved: ${JSON.stringify(line)}`);
     }
   } finally {

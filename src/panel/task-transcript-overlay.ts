@@ -20,6 +20,8 @@ import {
   Box,
   compositeTuiLine,
   CURSOR_MARKER,
+  deleteAllKittyImages,
+  getCapabilities,
   Loader,
   matchesKey,
   rgbColor,
@@ -353,6 +355,20 @@ export class TaskTranscriptOverlay implements Component, Focusable {
       },
     });
     this.installImageRowOverride();
+    this.clearKittyImageLayer();
+  }
+
+  /**
+   * Kitty image placements live in the terminal's separate graphics layer:
+   * painting opaque overlay cells over them does not remove them, so parent
+   * transcript screenshots stay visible through the fullscreen child view.
+   * Delete every placement while the overlay is open; dispose forces a full
+   * redraw so the parent's images repaint from their own cached lines.
+   */
+  private clearKittyImageLayer(): void {
+    if (!this.ui || getCapabilities().images !== "kitty") return;
+    if (typeof this.ui.terminal?.write !== "function") return;
+    this.ui.terminal.write(deleteAllKittyImages());
   }
 
   /**
@@ -781,6 +797,8 @@ export class TaskTranscriptOverlay implements Component, Focusable {
     this.overlayFocused = false;
     this.syncEditorFocus();
     this.restoreImageRowOverride();
+    // Repaint every row so kitty placements deleted on open render again.
+    if (typeof this.ui?.requestRender === "function") this.ui.requestRender(true);
     this.childSelector?.dispose();
     this.childSelector = undefined;
     this.childHistoryPicker?.dispose();

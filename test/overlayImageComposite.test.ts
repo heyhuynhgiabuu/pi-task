@@ -16,6 +16,7 @@ import {
   type SteerEditorLike,
   type TaskTranscriptOverlayHost,
 } from "../src/panel/task-transcript-overlay.js";
+import { getCapabilities, setCapabilityOverrides } from "@earendil-works/pi-tui";
 import { makeFakeEditor, makeHost, makePane } from "./taskTranscriptOverlay.test.js";
 
 const KITTY_ROW = "\x1b_Ga=T,f=100,s=10,v=10;AAAA\x1b\\";
@@ -97,4 +98,46 @@ test("a TUI without compositeLineAt leaves compositing untouched", () => {
   } finally {
     overlay.dispose();
   }
+});
+
+const KITTY_DELETE_ALL = "\x1b_Ga=d,d=A,q=2\x1b\\";
+
+test("opening the child overlay clears kitty image placements; closing forces a full redraw", () => {
+  const previousImages = getCapabilities().images;
+  setCapabilityOverrides({ images: "kitty", trueColor: undefined, hyperlinks: undefined });
+  const writes: string[] = [];
+  const redraws: boolean[] = [];
+  const tui = {
+    terminal: { rows: 12, write: (data: string) => writes.push(data) },
+    requestRender: (force = false) => redraws.push(force),
+  };
+  const pane = makePane([]);
+  const editor = makeFakeEditor();
+  editor.editor.render = () => ["prompt"];
+  const { host } = makeHost();
+  const overlay = new TaskTranscriptOverlay({
+    pane: pane.pane,
+    host,
+    theme: null,
+    editor: editor.editor,
+    terminalRows: () => 12,
+    ui: tui as never,
+  });
+  try {
+    assert.ok(
+      writes.includes(KITTY_DELETE_ALL),
+      "the overlay deletes all kitty placements when it opens",
+    );
+  } finally {
+    overlay.dispose();
+  }
+  assert.ok(
+    redraws.includes(true),
+    "dispose forces a full redraw so parent images repaint",
+  );
+  setCapabilityOverrides({
+    images: previousImages as undefined,
+    trueColor: undefined,
+    hyperlinks: undefined,
+  });
 });

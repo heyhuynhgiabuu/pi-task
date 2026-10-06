@@ -23,6 +23,7 @@ import {
   planModelChain,
 } from "../model-failover.js";
 import type { AgentModelSpec } from "../helpers.js";
+import { parseToolList, resolveAgentToolAllowlist } from "../agent-tools.js";
 import type {
   ChildBuiltinCommand,
   ChildBuiltinCommandResult,
@@ -83,6 +84,8 @@ export interface DurableHarnessHandle {
   module: DurableModule;
   context: ChordContext;
   models: import("@earendil-works/pi-ai").Models;
+  /** The harness-wide registrations; each conversation selects its own subset in pi.agent. */
+  toolRegistrations: readonly import("@earendil-works/pi-durable").ToolRegistration[];
   /** Read-only lookup of an exact conversation-scoped submission identity. */
   hasSubmission(conversationId: ConversationId, requestId: string): Promise<boolean>;
   /** Owner key -> child conversation id, durable across restarts. */
@@ -260,6 +263,51 @@ export function durableOwnerKey(taskId: string): string {
   return `pi-task:${taskId}`;
 }
 
+/** Resolve frontmatter permissions against the tools this durable harness installs. */
+function durableToolRegistrations(
+  handle: DurableHarnessHandle,
+  input: {
+    tools?: string | string[];
+    disallowedTools?: string[];
+    readonly?: boolean;
+  },
+): import("@earendil-works/pi-durable").ToolRegistration[] {
+  const available = new Map(handle.toolRegistrations.map((tool) => [tool.name, tool]));
+  const unsupported = [...new Set(
+    parseToolList(input.tools).filter((name) => !available.has(name)),
+  )];
+  if (unsupported.length > 0) {
+    throw new Error(
+      `Durable backend does not support explicitly requested tools: ${unsupported.join(", ")}. ` +
+        `Supported durable tools: ${[...available.keys()].join(", ")}.`,
+    );
+  }
+  const explicitlyRequestedMutators = parseToolList(input.tools).filter((name) =>
+    input.readonly && ["bash", "write", "edit"].includes(name),
+  );
+  if (explicitlyRequestedMutators.length > 0) {
+    throw new Error(
+      `Agent has readonly: true but tools requests mutating durable tool: ${explicitlyRequestedMutators[0]}. ` +
+        "Remove readonly: or drop the mutating tool from tools:.",
+    );
+  }
+
+  const disallowedTools = [
+    ...parseToolList(input.disallowedTools),
+    ...(input.readonly ? ["bash", "write", "edit", "apply_patch"] : []),
+  ];
+  const allowedNames = resolveAgentToolAllowlist({
+    tools: input.tools,
+    disallowedTools,
+    parentToolNames: [...available.keys()],
+  });
+  return allowedNames.map((name) => {
+    const tool = available.get(name);
+    if (!tool) throw new Error(`Durable backend tool policy resolved unavailable tool: ${name}`);
+    return tool;
+  });
+}
+
 /** A Pi tool-call id makes each explicit task_id follow-up replay-safe. */
 export function durableRequestId(taskId: string, toolCallId?: string): string {
   if (!toolCallId) return durableOwnerKey(taskId);
@@ -406,6 +454,7 @@ export async function openDurableHarness(
       children,
       runsDoc,
       usageDoc: durable.UsageDoc,
+      toolRegistrations: CodingTools.tools ?? [],
     };
   })();
   harnessCache.set(databasePath, { promise, runtimeModelRegistry, runtimeFast });
@@ -420,6 +469,7 @@ async function findOrCreateChild(
     model?: { provider: string; modelId: string };
     cwd?: string;
     thinkingLevel?: DurableThinkingLevel;
+    tools?: readonly import("@earendil-works/pi-durable").ToolRegistration[];
   },
 ): Promise<ConversationId> {
   const root = await handle.harness.root(handle.context);
@@ -438,6 +488,7 @@ async function findOrCreateChild(
       ...(configure?.thinkingLevel !== undefined
         ? { thinkingLevel: configure.thinkingLevel }
         : {}),
+      ...(configure?.tools !== undefined ? { tools: configure.tools } : {}),
     });
     map.byOwner[ownerKey] = { conversationId: created.id };
     return created.id;
@@ -860,6 +911,7 @@ async function reserveDurableRun(
   configure?: {
     model?: { provider: string; modelId: string };
     thinkingLevel?: DurableThinkingLevel;
+    tools?: readonly import("@earendil-works/pi-durable").ToolRegistration[];
   },
 ): Promise<DurableRunReservation> {
   return conversation.commit(async (tx) => {
@@ -891,13 +943,16 @@ async function reserveDurableRun(
     const current = runs.byRequestId[requestId]!;
     if (
       current.status === "admitting" &&
-      (configure?.model !== undefined || configure?.thinkingLevel !== undefined)
+      (configure?.model !== undefined ||
+        configure?.thinkingLevel !== undefined ||
+        configure?.tools !== undefined)
     ) {
       await handle.module.configure(tx, conversation.id, {
         ...(configure?.model !== undefined ? { model: configure.model } : {}),
         ...(configure?.thinkingLevel !== undefined
           ? { thinkingLevel: configure.thinkingLevel }
           : {}),
+        ...(configure?.tools !== undefined ? { tools: configure.tools } : {}),
       });
     }
     return copyDurableRunRecord(current);
@@ -1233,6 +1288,12 @@ export async function runDurableTask(input: {
   requestId?: string;
   /** Agent frontmatter thinking level; without it the child runs at the harness default. */
   thinkingLevel?: DurableThinkingLevel;
+  /** Agent frontmatter allowlist; unsupported requested tools fail before child admission. */
+  tools?: string | string[];
+  /** Agent frontmatter deny list. */
+  disallowedTools?: string[];
+  /** Add bash/write/edit/apply_patch to the deny list, even with explicit tools. */
+  readonly?: boolean;
   /**
    * Ordered frontmatter models. Each model is attempted at most once per run;
    * only a clear provider/model failure advances to the next entry.
@@ -1244,6 +1305,8 @@ export async function runDurableTask(input: {
   fast?: boolean;
   /** Called once the submission is durably admitted, before it settles. */
   onSubmitted?: (conversationId: string) => void;
+  /** Best-effort committed ledger for a failed/cancelled run; never persisted in pi-task history. */
+  onTerminalUsage?: (usage: DurableUsage) => void;
   /** Initial committed state for a live durable transcript view. */
   onSnapshot?: (snapshot: import("@earendil-works/pi-durable").SnapshotEvent) => void;
   /** One committed batch from the child conversation's event stream. */
@@ -1258,6 +1321,7 @@ export async function runDurableTask(input: {
     modelRegistry: input.modelRegistry,
     fast: input.fast,
   });
+  const toolRegistrations = durableToolRegistrations(handle, input);
   const attempts = buildDurableAttempts(input, handle);
   // Legacy (non-chain) callers fail on an invalid explicit model before any
   // child state exists, exactly as before failover existed.
@@ -1276,6 +1340,7 @@ export async function runDurableTask(input: {
       model: primary?.ref,
       cwd: input.cwd,
       thinkingLevel: primary?.thinkingLevel,
+      tools: toolRegistrations,
     },
   );
   const conversation = (await handle.harness.conversation(childId, handle.context))!;
@@ -1419,6 +1484,7 @@ export async function runDurableTask(input: {
           ...(attempt.thinkingLevel !== undefined
             ? { thinkingLevel: attempt.thinkingLevel }
             : {}),
+          tools: toolRegistrations,
         },
       );
       if (abortRequested || input.signal?.aborted) {
@@ -1555,6 +1621,22 @@ export async function runDurableTask(input: {
       return { conversationId: String(childId), answer, usage };
     }
     throw new Error("Durable task lifecycle did not reach a terminal outcome.");
+  } catch (error) {
+    try {
+      if (submissionAdmitted && !conversationIdle) {
+        await conversation.waitForIdle(handle.context);
+        conversationIdle = true;
+      }
+    } catch {
+      // Usage remains best-effort when the conversation cannot be observed idle.
+    }
+    try {
+      if (abortPromise) await abortPromise;
+      input.onTerminalUsage?.(await readConversationUsage(handle, childId));
+    } catch {
+      // A receipt enrichment failure must not replace the original task outcome.
+    }
+    throw error;
   } finally {
     input.signal?.removeEventListener("abort", onAbort);
     try {
@@ -2036,8 +2118,8 @@ export async function resumeDurableTasks(
   piDir: string,
   hooks: {
     onRecovered?: (taskId: string, output: string, usage: DurableUsage) => void;
-    onFailed?: (taskId: string, reason: string) => void;
-    onCancelled?: (taskId: string, reason: string) => void;
+    onFailed?: (taskId: string, reason: string, usage?: DurableUsage) => void;
+    onCancelled?: (taskId: string, reason: string, usage?: DurableUsage) => void;
     /** Exclude already delivered or foreign-session request lifecycles. */
     shouldRecover?: (taskId: string, requestId: string, conversationId: string) => boolean;
     /** Exact parent request recorded in task history; used for legacy rows without a run doc. */
@@ -2236,9 +2318,15 @@ export async function resumeDurableTasks(
     }
 
     let outcome: "done" | "failed" | "cancelled" = "failed";
-    const reportFailure = (reason: string) => {
+    const reportFailure = async (reason: string) => {
+      let usage: DurableUsage | undefined;
       try {
-        hooks.onFailed?.(taskId, reason);
+        usage = await readConversationUsage(handle, conversationId);
+      } catch {
+        // Failure receipts include usage only when the committed ledger is readable.
+      }
+      try {
+        hooks.onFailed?.(taskId, reason, usage);
       } catch {
         // Recovery of sibling tasks must continue independently.
       }
@@ -2252,19 +2340,25 @@ export async function resumeDurableTasks(
       );
       if (settled.status === "cancelled") {
         outcome = "cancelled";
+        let usage: DurableUsage | undefined;
         try {
-          hooks.onCancelled?.(taskId, settled.reason);
+          usage = await readConversationUsage(handle, conversationId);
+        } catch {
+          // Cancellation receipts include usage only when the committed ledger is readable.
+        }
+        try {
+          hooks.onCancelled?.(taskId, settled.reason, usage);
         } catch {
           // Cancellation reporting is best-effort; the harness is already idle.
         }
         return;
       }
       if (settled.status === "failed") {
-        reportFailure(settled.reason);
+        await reportFailure(settled.reason);
         return;
       }
       if (settled.status !== "done") {
-        reportFailure("Durable task lifecycle did not reach a terminal result.");
+        await reportFailure("Durable task lifecycle did not reach a terminal result.");
         return;
       }
       const output = await settledAnswerText(handle, conversation, settled.answer);
@@ -2276,8 +2370,8 @@ export async function resumeDurableTasks(
       );
       outcome = "done";
     })()
-      .catch((error: unknown) => {
-        reportFailure(error instanceof Error ? error.message : String(error));
+      .catch(async (error: unknown) => {
+        await reportFailure(error instanceof Error ? error.message : String(error));
       })
       .finally(async () => {
         if (eventStream) {

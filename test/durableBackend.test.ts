@@ -943,6 +943,8 @@ test("restart recovery observes steering admitted after its initial discovery", 
   let taskPromise: ReturnType<typeof runDurableTask> | undefined;
   const recoveredMessages: string[] = [];
   const failureMessages: string[] = [];
+  let terminalUsage: { totals?: { totalTokens?: number } } | undefined;
+  let recoveryFailureUsage: { totals?: { totalTokens?: number } } | undefined;
   let resolveSettled!: (status: string) => void;
   const recoverySettled = new Promise<string>((resolve) => { resolveSettled = resolve; });
   try {
@@ -954,6 +956,7 @@ test("restart recovery observes steering admitted after its initial discovery", 
       task: "Start the recoverable run.",
       models: () => gated.models,
       onSubmitted: (id) => { conversationId = id; },
+      onTerminalUsage: (usage) => { terminalUsage = usage; },
     });
     await gated.resultReached(0);
     assert.equal(
@@ -962,7 +965,10 @@ test("restart recovery observes steering admitted after its initial discovery", 
     );
     await resumeDurableTasks(piDir, {
       onRecovered: (_taskId, output) => recoveredMessages.push(output),
-      onFailed: (_taskId, reason) => failureMessages.push(reason),
+      onFailed: (_taskId, reason, usage) => {
+        failureMessages.push(reason);
+        recoveryFailureUsage = usage;
+      },
       onSettled: (_taskId, status) => resolveSettled(status),
     }, { databasePath, models: () => gated.models });
     gated.releaseResult(0);
@@ -986,6 +992,8 @@ test("restart recovery observes steering admitted after its initial discovery", 
     assert.equal(status, "failed");
     assert.deepEqual(recoveredMessages, [], "a later steering failure must not deliver a stale success");
     assert.equal(failureMessages.length, 1);
+    assert.ok((terminalUsage?.totals.totalTokens ?? 0) > 0, "failed run reports its committed usage ledger");
+    assert.ok((recoveryFailureUsage?.totals.totalTokens ?? 0) > 0, "recovery failure reports its committed usage ledger");
     const inspection = await handle.harness.inspect(handle.context);
     assert.equal(inspection.submissions.some((submission) => submission.status === "queued"), false);
   } finally {
@@ -1015,6 +1023,8 @@ test("restart recovery treats cancellation of a late steering successor as cance
   let taskPromise: ReturnType<typeof runDurableTask> | undefined;
   const recoveredMessages: string[] = [];
   const cancelledMessages: string[] = [];
+  let terminalUsage: { totals?: { totalTokens?: number } } | undefined;
+  let recoveryCancellationUsage: { totals?: { totalTokens?: number } } | undefined;
   let resolveSettled!: (status: string) => void;
   const recoverySettled = new Promise<string>((resolve) => { resolveSettled = resolve; });
   try {
@@ -1026,6 +1036,7 @@ test("restart recovery treats cancellation of a late steering successor as cance
       task: "Start the cancelable run.",
       models: () => gated.models,
       onSubmitted: (id) => { conversationId = id; },
+      onTerminalUsage: (usage) => { terminalUsage = usage; },
     });
     await gated.resultReached(0);
     assert.equal(
@@ -1034,7 +1045,10 @@ test("restart recovery treats cancellation of a late steering successor as cance
     );
     await resumeDurableTasks(piDir, {
       onRecovered: (_taskId, output) => recoveredMessages.push(output),
-      onCancelled: (_taskId, reason) => cancelledMessages.push(reason),
+      onCancelled: (_taskId, reason, usage) => {
+        cancelledMessages.push(reason);
+        recoveryCancellationUsage = usage;
+      },
       onSettled: (_taskId, status) => resolveSettled(status),
     }, { databasePath, models: () => gated.models });
 
@@ -1059,6 +1073,8 @@ test("restart recovery treats cancellation of a late steering successor as cance
     ]);
     assert.equal(status, "cancelled");
     assert.equal(cancelledMessages.length, 1);
+    assert.ok((terminalUsage?.totals.totalTokens ?? 0) > 0, "cancelled run reports its committed usage ledger");
+    assert.ok((recoveryCancellationUsage?.totals.totalTokens ?? 0) > 0, "recovery cancellation reports its committed usage ledger");
     assert.deepEqual(recoveredMessages, []);
     const inspection = await handle.harness.inspect(handle.context);
     assert.equal(inspection.submissions.some((submission) => submission.status === "queued"), false);
@@ -1283,6 +1299,96 @@ test("restart recovery delivers one final answer for a task with queued steering
       await waitForChildIdle(handle, conversationId);
       await handle.harness.close(handle.context);
     }
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("durable tool policy is isolated per child and retained on task resume", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-durable-tool-policy-"));
+  const piDir = join(root, ".pi");
+  const databasePath = join(root, "durable.sqlite");
+  const models = makeModels(["Read-only.", "Restricted.", "Default tools.", "Resumed."]);
+  let handle: Awaited<ReturnType<typeof openDurableHarness>> | undefined;
+  try {
+    const readonlyResult = await runDurableTask({
+      piDir,
+      databasePath,
+      taskId: "t-policy-readonly",
+      task: "Run with the readonly agent policy.",
+      models,
+      readonly: true,
+    });
+    const restrictedResult = await runDurableTask({
+      piDir,
+      databasePath,
+      taskId: "t-policy-disallowed",
+      task: "Run with a disallowed tool.",
+      models,
+      tools: ["read", "bash"],
+      disallowedTools: ["bash"],
+    });
+    const defaultResult = await runDurableTask({
+      piDir,
+      databasePath,
+      taskId: "t-policy-default",
+      task: "Preserve the existing default tool surface.",
+      models,
+    });
+    const resumedResult = await runDurableTask({
+      piDir,
+      databasePath,
+      taskId: "t-policy-disallowed",
+      requestId: "pi-task:t-policy-disallowed:call:resume",
+      task: "Continue with the same policy.",
+      models,
+      tools: ["read", "bash"],
+      disallowedTools: ["bash"],
+    });
+
+    await assert.rejects(
+      runDurableTask({
+        piDir,
+        databasePath,
+        taskId: "t-policy-readonly-invalid",
+        task: "Reject a mutating explicit tool on a readonly agent.",
+        models,
+        tools: ["read", "bash"],
+        readonly: true,
+      }),
+      /readonly: true but tools requests mutating durable tool: bash/i,
+    );
+
+    handle = await openDurableHarness(piDir, { databasePath });
+    const toolNames = async (conversationId: string) => {
+      const conversation = await handle!.harness.conversation(
+        conversationId as never,
+        handle!.context,
+      );
+      assert.ok(conversation);
+      return (await conversation.agent(handle!.context)).tools.map((tool) => tool.name);
+    };
+    assert.deepEqual(await toolNames(readonlyResult.conversationId), ["read"]);
+    assert.deepEqual(await toolNames(restrictedResult.conversationId), ["read"]);
+    assert.deepEqual(await toolNames(defaultResult.conversationId), ["read", "write", "edit", "bash"]);
+    assert.equal(resumedResult.conversationId, restrictedResult.conversationId);
+    assert.deepEqual(await toolNames(resumedResult.conversationId), ["read"]);
+
+    await assert.rejects(
+      runDurableTask({
+        piDir,
+        databasePath,
+        taskId: "t-policy-unsupported",
+        task: "An unsupported explicit tool must not be dropped silently.",
+        models,
+        tools: ["read", "grep"],
+      }),
+      /durable backend does not support explicitly requested tools: grep/i,
+    );
+    const children = await handle.harness.snapshot(handle.children, handle.context);
+    assert.equal(children?.byOwner["pi-task:t-policy-unsupported"], undefined);
+    assert.equal(children?.byOwner["pi-task:t-policy-readonly-invalid"], undefined);
+  } finally {
+    if (handle) await handle.harness.close(handle.context);
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -1960,6 +2066,9 @@ test("durable background completion receipt carries its usage ledger", async () 
         body: "",
         source: "project",
         path: "test-agent.md",
+        tools: ["read", "bash"],
+        disallowedTools: ["bash"],
+        readonly: true,
       },
       description: "Check usage receipt",
       sessionName: "task-t-background-usage",
@@ -2057,11 +2166,83 @@ test("durable background completion receipt carries its usage ledger", async () 
       modelId: "vendor/model",
     });
     assert.equal(runInput?.modelRegistry, modelRegistry);
+    assert.deepEqual(runInput?.tools, ["read", "bash"]);
+    assert.deepEqual(runInput?.disallowedTools, ["bash"]);
+    assert.equal(runInput?.readonly, true);
   } finally {
     releaseRunner();
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+for (const isBackground of [false, true] as const) {
+  for (const outcome of ["failed", "cancelled"] as const) {
+    test(`durable ${isBackground ? "background" : "foreground"} ${outcome} receipt includes available usage`, async () => {
+      const root = mkdtempSync(join(tmpdir(), `pi-task-durable-${outcome}-usage-`));
+      const sent: { details?: Record<string, unknown> }[] = [];
+      const usage = {
+        models: {},
+        tools: {},
+        totals: { inputTokens: 7, outputTokens: 3, totalTokens: 10, costTotal: 0.12 },
+      };
+      try {
+        const result = await executeDurableTask({
+          id: `t-${outcome}-usage-${isBackground ? "background" : "foreground"}`,
+          agent: {
+            name: "general",
+            description: "General task",
+            body: "",
+            source: "project",
+            path: "test-agent.md",
+          },
+          description: "Usage receipt regression",
+          sessionName: "task-usage-receipt",
+          prompt: "Return a short result.",
+          cwd: root,
+          ctx: { modelRegistry: {} } as never,
+          pi: { sendMessage: (message: { details?: Record<string, unknown> }) => { sent.push(message); } } as never,
+          piDir: join(root, ".pi"),
+          artifactsDir: join(root, ".pi", "artifacts"),
+          isBackground,
+          backgroundTasks: new Map(),
+          foregroundTasks: new Map(),
+          deliveryGuard: new DeliveryGuard(),
+          taskWidget: {
+            noteTaskFinished: () => {},
+            openTaskView: () => {},
+            closeTaskView: () => {},
+            setLiveTranscript: () => {},
+          } as never,
+          clearTaskWidgetIfIdle: () => {},
+          ensureTaskWidget: () => {},
+          enqueueDelivery: (delivery) => { delivery(); },
+          runTask: async (input) => {
+            const terminalInput = input as typeof input & {
+              onTerminalUsage?: (value: typeof usage) => void;
+            };
+            terminalInput.onTerminalUsage?.(usage);
+            if (outcome === "cancelled") throw new DurableTaskCancelledError("cancelled for test");
+            throw new Error("provider failed for test");
+          },
+        });
+
+        if (isBackground) {
+          for (let waited = 0; waited < 2_000 && sent.length === 0; waited += 10) {
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+          assert.equal(sent.length, 1, "one terminal background receipt is sent");
+          assert.equal(sent[0]?.details?.phase, outcome);
+          assert.deepEqual(sent[0]?.details?.usage, usage);
+        } else {
+          assert.equal(result.details.phase, outcome);
+          assert.deepEqual(result.details.usage, usage);
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+}
 
 for (const outcome of ["success", "failure"] as const) {
   test(`durable background ${outcome} marks stale-context sends suppressed`, async () => {

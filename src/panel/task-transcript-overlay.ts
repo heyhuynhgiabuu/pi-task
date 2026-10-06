@@ -16,19 +16,23 @@
  */
 
 import {
+  backgroundAnsi,
   Box,
   CURSOR_MARKER,
   Loader,
   matchesKey,
+  rgbColor,
   truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
+  type Color,
   type Component,
   type Editor,
   type Focusable,
   type TUI,
   type TuiMouseEvent,
   type TuiMouseEventResult,
+  type TerminalColorMode,
 } from "@earendil-works/pi-tui";
 import type { KeybindingsManager } from "@earendil-works/pi-coding-agent";
 
@@ -95,21 +99,46 @@ const PAGE_SCROLL = 10;
 const KEY_HINTS = "\u2191\u2193 scroll \u00b7 pgup/pgdn page \u00b7 enter steer \u00b7 esc back";
 const SESSION_INFO_HINTS = "\u2191\u2193 scroll \u00b7 pgup/pgdn page \u00b7 esc back";
 
-/** Reapply the overlay surface after SGR resets that clear a cell background. */
-function restoreOverlayBackground(line: string, bgStart: string): string {
-  return line.replace(/\x1b\[([0-9;]*)m/g, (sequence, parameters: string) => {
-    const codes = parameters === "" ? [0] : parameters.split(";").map(Number);
-    for (let index = 0; index < codes.length; index++) {
-      const code = codes[index];
-      if (code === 0 || code === 49) return `${sequence}${bgStart}`;
-      // Skip extended color parameters: RGB channels may themselves be 0 or 49.
-      if (code === 38 || code === 48 || code === 58) {
-        if (codes[index + 1] === 5) index += 2;
-        else if (codes[index + 1] === 2) index += 4;
+type SgrBackgroundEffect = "reset" | "set" | undefined;
+
+/** The last background-affecting operation in an SGR sequence, if any. */
+function sgrBackgroundEffect(parameters: string): SgrBackgroundEffect {
+  const codes = parameters === "" ? [0] : parameters.split(";").map(Number);
+  let effect: SgrBackgroundEffect;
+  for (let index = 0; index < codes.length; index++) {
+    const code = codes[index];
+    if (code === 0 || code === 49) {
+      effect = "reset";
+    } else if ((code >= 40 && code <= 47) || (code >= 100 && code <= 107)) {
+      effect = "set";
+    } else if (code === 38 || code === 48 || code === 58) {
+      // Skip extended color payloads: RGB channels and palette indices can be 0 or 49.
+      const mode = codes[index + 1];
+      if (mode === 5 && codes[index + 2] !== undefined) {
+        if (code === 48) effect = "set";
+        index += 2;
+      } else if (mode === 2 && codes[index + 4] !== undefined) {
+        if (code === 48) effect = "set";
+        index += 4;
       }
     }
-    return sequence;
-  });
+  }
+  return effect;
+}
+
+/** Whether a legacy theme result contains an explicit background color. */
+function hasExplicitBackground(style: string): boolean {
+  for (const match of style.matchAll(/\x1b\[([0-9;]*)m/g)) {
+    if (sgrBackgroundEffect(match[1] ?? "") === "set") return true;
+  }
+  return false;
+}
+
+/** Reapply the overlay surface only when the final SGR operation cleared its background. */
+function restoreOverlayBackground(line: string, bgStart: string): string {
+  return line.replace(/\x1b\[([0-9;]*)m/g, (sequence, parameters: string) =>
+    sgrBackgroundEffect(parameters) === "reset" ? `${sequence}${bgStart}` : sequence,
+  );
 }
 
 /** Crop oversized editor output around its hardware-cursor marker. */
@@ -138,6 +167,12 @@ function fillEditorViewport(lines: string[], maxRows: number): string[] {
 export interface TaskTranscriptOverlayTheme {
   fg(color: string, text: string): string;
   bg(color: string, text: string): string;
+  /** Concrete, terminal-resolved Pi theme colors (optional for lightweight host mocks). */
+  colors?: { customMessageBg: Color };
+  /** ANSI encoding for concrete theme colors. */
+  getColorMode?(): TerminalColorMode;
+  /** Used only when a legacy theme exposes terminal-default background. */
+  appearance?: "dark" | "light";
 }
 
 /** The embedded steer input: the full parent-editor surface, narrowed. */
@@ -231,8 +266,8 @@ export class TaskTranscriptOverlay implements Component, Focusable {
   private readonly editor: SteerEditorLike;
   private readonly terminalRows: () => number;
   private readonly box: Box;
-  /** Raw background escape for the panel fill (reset stripped). */
-  private readonly bgStart: string;
+  /** Current explicit surface shared by panel fill and restored SGR resets. */
+  private bgStart = "";
   private readonly ui: TUI | undefined;
   private readonly keybindings: ExpandKeybindings | undefined;
   /** Search selector currently borrowing this child's editor view. */
@@ -293,11 +328,10 @@ export class TaskTranscriptOverlay implements Component, Focusable {
       const text = submittedText.trim();
       if (text) this.host.onSteer(text);
     };
-    this.bgStart = this.theme?.bg ? this.theme.bg(OVERLAY_BG_TOKEN, "").replace("\x1b[49m", "") : "";
     this.box = new Box(
       OVERLAY_HORIZONTAL_PADDING,
       0,
-      this.theme?.bg ? (text) => this.theme!.bg(OVERLAY_BG_TOKEN, text) : undefined,
+      this.theme ? (text) => this.paintOverlayBackground(text) : undefined,
     );
     this.box.addChild({
       render: (width: number) => this.renderBody(width),
@@ -649,7 +683,29 @@ export class TaskTranscriptOverlay implements Component, Focusable {
   }
 
   render(width: number): string[] {
+    // Theme colors can resolve after a terminal report or change with appearance.
+    this.bgStart = this.resolveOverlayBackground();
     return this.box.render(width);
+  }
+
+  private resolveOverlayBackground(): string {
+    if (!this.theme) return "";
+    const colorMode = this.theme.getColorMode?.() ?? "truecolor";
+    const resolvedColor = this.theme.colors?.customMessageBg;
+    if (resolvedColor) return backgroundAnsi(resolvedColor, colorMode);
+
+    const legacySurface = this.theme.bg?.(OVERLAY_BG_TOKEN, "").replace(/\x1b\[49m/g, "") ?? "";
+    if (legacySurface && hasExplicitBackground(legacySurface)) return legacySurface;
+
+    if (this.theme.appearance) {
+      const fallbackColor = this.theme.appearance === "dark" ? rgbColor(0, 0, 0) : rgbColor(255, 255, 255);
+      return backgroundAnsi(fallbackColor, colorMode);
+    }
+    return "";
+  }
+
+  private paintOverlayBackground(text: string): string {
+    return this.bgStart === "" ? text : `${this.bgStart}${text}\x1b[49m`;
   }
 
   invalidate(): void {

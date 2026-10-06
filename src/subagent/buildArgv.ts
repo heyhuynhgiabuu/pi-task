@@ -4,6 +4,7 @@
 
 import type { AgentConfig } from "../helpers.js";
 import {
+  parseToolList,
   resolveAgentToolAllowlist,
   resolveClaudeToolPolicy,
 } from "../agent-tools.js";
@@ -50,6 +51,17 @@ export function buildPiArgv(opts: BuildPiArgvOptions): string[] {
   const args: string[] = [];
   const noDiscovery =
     opts.fast || process.env.PI_TASK_CHILD_NO_EXTENSIONS === "1";
+  const explicitMcpTools = parseToolList(agent.tools).filter((tool) =>
+    tool.startsWith("mcp__"),
+  );
+  const selectedMcpTools = allowedTools.filter((tool) =>
+    tool.startsWith("mcp__") && explicitMcpTools.includes(tool),
+  );
+  if (noDiscovery && selectedMcpTools.length > 0) {
+    throw new Error(
+      "This Pi child has MCP tools selected, but extension loading is disabled; enable extension loading to use MCP.",
+    );
+  }
   if (noDiscovery) {
     args.push("--no-extensions");
     for (const extensionPath of opts.requiredExtensions ?? []) {
@@ -62,6 +74,7 @@ export function buildPiArgv(opts: BuildPiArgvOptions): string[] {
     }
     args.push("--extension", opts.fastExtensionPath, "--fast");
   }
+  if (selectedMcpTools.length === 0) args.push("--no-mcp");
   if (agent.model) args.push("--model", agent.model);
   if (agent.thinking) args.push("--thinking", agent.thinking);
   for (const skillPath of opts.skillPaths ?? []) {

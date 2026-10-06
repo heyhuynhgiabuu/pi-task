@@ -251,3 +251,64 @@ test("buildClaudeArgs: declared Pi skills are rejected instead of being silently
     /Claude Code runtime does not support Pi skills/,
   );
 });
+
+test("Pi terminal children isolate MCP unless the agent explicitly selects MCP tools", () => {
+  const base = {
+    sessionName: "task-mcp",
+    sessionDir: "/tmp/tasks",
+    promptContent: "Do the work.",
+    parentToolNames: ["read", "mcp__docs__search", "mcp__other__lookup"],
+  };
+  const agent: AgentConfig = {
+    name: "general",
+    description: "General worker",
+    body: "",
+    source: "user",
+  };
+
+  const isolated = buildPiArgv({ agent, ...base });
+  assert.ok(isolated.includes("--no-mcp"), "MCP is disabled when not explicitly selected in agent tools");
+
+  const selected = buildPiArgv({
+    agent: { ...agent, tools: ["read", "mcp__docs__search"] },
+    ...base,
+  });
+  assert.ok(!selected.includes("--no-mcp"), "explicit MCP selection remains available");
+  assert.equal(indexOfValue(selected, "--tools"), "read,mcp__docs__search");
+
+  const denied = buildPiArgv({
+    agent: {
+      ...agent,
+      tools: ["read", "mcp__docs__search"],
+      disallowedTools: ["mcp__docs__search"],
+    },
+    ...base,
+  });
+  assert.ok(denied.includes("--no-mcp"), "a denied MCP tool does not keep MCP enabled");
+});
+
+test("Pi terminal children reject explicit MCP when extension loading is disabled", () => {
+  const previous = process.env.PI_TASK_CHILD_NO_EXTENSIONS;
+  process.env.PI_TASK_CHILD_NO_EXTENSIONS = "1";
+  try {
+    assert.throws(
+      () => buildPiArgv({
+        agent: {
+          name: "mcp-worker",
+          description: "MCP worker",
+          body: "",
+          source: "user",
+          tools: ["mcp__docs__search"],
+        },
+        sessionName: "task-mcp",
+        sessionDir: "/tmp/tasks",
+        promptContent: "Do the work.",
+        parentToolNames: ["mcp__docs__search"],
+      }),
+      /MCP tools selected, but extension loading is disabled/,
+    );
+  } finally {
+    if (previous === undefined) delete process.env.PI_TASK_CHILD_NO_EXTENSIONS;
+    else process.env.PI_TASK_CHILD_NO_EXTENSIONS = previous;
+  }
+});

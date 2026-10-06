@@ -1,15 +1,18 @@
-import {
-  CompactionEntry,
-  ResetEntry,
-  type AgentEvent,
-  type EntryRecord,
-  type SnapshotEvent,
-  type UsageState,
+import type {
+  AgentEvent,
+  EntryRecord,
+  SnapshotEvent,
+  UsageState,
 } from "@earendil-works/pi-durable";
 import type { Message } from "@earendil-works/pi-ai";
 import type { ChildHistoryOption } from "../types.js";
 import type { ChildUsageMetadata } from "./child-metadata.js";
 import { MAX_TRANSCRIPT_ITEMS, type TranscriptItem } from "./transcript.js";
+
+// Persisted pi-durable entry kinds (entries.ts, 1.0.4). Keep runtime imports
+// out of this always-loaded transcript adapter; the durable peer is optional.
+const COMPACTION_ENTRY_KIND = "pi.compaction";
+const RESET_ENTRY_KIND = "pi.reset";
 
 type ToolTranscriptItem = Extract<TranscriptItem, { type: "tool" }>;
 type AssistantTranscriptItem = Extract<TranscriptItem, { type: "assistant" }>;
@@ -374,7 +377,7 @@ export class DurableTranscript {
   }
 
   private observeEntryMetadata(entry: EntryRecord): void {
-    if (entry.kind === CompactionEntry.kind || entry.kind === ResetEntry.kind) {
+    if (entry.kind === COMPACTION_ENTRY_KIND || entry.kind === RESET_ENTRY_KIND) {
       this.contextTokens = null;
       return;
     }

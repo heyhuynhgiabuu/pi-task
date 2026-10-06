@@ -11,14 +11,18 @@
 import { strict as assert } from "node:assert";
 import { CustomEditor, getSelectListTheme, initTheme } from "@earendil-works/pi-coding-agent";
 import {
+  backgroundAnsi,
   CombinedAutocompleteProvider,
   CURSOR_MARKER,
   getKeybindings,
   KeybindingsManager,
+  rgbColor,
   setKeybindings,
   TUI_KEYBINDINGS,
   visibleWidth,
+  type Color,
   type KeybindingDefinitions,
+  type TerminalColorMode,
 } from "@earendil-works/pi-tui";
 import { test } from "node:test";
 
@@ -30,6 +34,7 @@ import {
   TaskTranscriptOverlay,
   type SteerEditorLike,
   type TaskTranscriptOverlayHost,
+  type TaskTranscriptOverlayTheme,
 } from "../src/panel/task-transcript-overlay.js";
 
 const UP = "\x1b[A";
@@ -149,6 +154,112 @@ function makeOverlay() {
   });
   const strip = (raw: string[]) => raw.map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
   return { overlay, pane, editor, calls, strip };
+}
+
+interface AnsiCell {
+  char: string;
+  foreground: string | undefined;
+  background: string | undefined;
+  italic: boolean;
+}
+
+/** Interpret the SGR subset used by the overlay so tests can assert cell state. */
+function readAnsiCells(line: string): AnsiCell[] {
+  const cells: AnsiCell[] = [];
+  let foreground: string | undefined;
+  let background: string | undefined;
+  let italic = false;
+  const appendText = (text: string) => {
+    for (const char of text) cells.push({ char, foreground, background, italic });
+  };
+  const applySgr = (parameters: string) => {
+    const codes = parameters === "" ? [0] : parameters.split(";").map(Number);
+    for (let index = 0; index < codes.length; index++) {
+      const code = codes[index];
+      if (code === 0) {
+        foreground = undefined;
+        background = undefined;
+        italic = false;
+      } else if (code === 3) {
+        italic = true;
+      } else if (code === 23) {
+        italic = false;
+      } else if (code === 39) {
+        foreground = undefined;
+      } else if (code === 49) {
+        background = undefined;
+      } else if (code === 38 || code === 48) {
+        const mode = codes[index + 1];
+        if (mode === 5 && codes[index + 2] !== undefined) {
+          const color = `${code};5;${codes[index + 2]}`;
+          if (code === 38) foreground = color;
+          else background = color;
+          index += 2;
+        } else if (mode === 2 && codes[index + 4] !== undefined) {
+          const color = `${code};2;${codes[index + 2]};${codes[index + 3]};${codes[index + 4]}`;
+          if (code === 38) foreground = color;
+          else background = color;
+          index += 4;
+        }
+      } else if ((code >= 30 && code <= 37) || (code >= 90 && code <= 97)) {
+        foreground = String(code);
+      } else if ((code >= 40 && code <= 47) || (code >= 100 && code <= 107)) {
+        background = String(code);
+      }
+    }
+  };
+
+  const sgrPattern = /\x1b\[([0-9;]*)m/g;
+  let cursor = 0;
+  for (const match of line.matchAll(sgrPattern)) {
+    const position = match.index ?? cursor;
+    appendText(line.slice(cursor, position));
+    applySgr(match[1] ?? "");
+    cursor = position + match[0].length;
+  }
+  appendText(line.slice(cursor));
+  return cells;
+}
+
+function backgroundState(color: Color, mode: TerminalColorMode): string | undefined {
+  return readAnsiCells(`${backgroundAnsi(color, mode)}x`)[0]?.background;
+}
+
+function backgroundStateFromAnsi(backgroundAnsi: string): string | undefined {
+  return readAnsiCells(`${backgroundAnsi}x`)[0]?.background;
+}
+
+function assertSolidBackground(lines: string[], expected: string | undefined): void {
+  assert.ok(lines.length > 0, "overlay renders cells");
+  for (const [row, line] of lines.entries()) {
+    const cells = readAnsiCells(line);
+    assert.ok(cells.length > 0, `row ${row} contains cells`);
+    for (const [column, cell] of cells.entries()) {
+      assert.equal(cell.background, expected, `row ${row}, column ${column} has the overlay surface`);
+    }
+  }
+}
+
+function assertTextBackground(cells: AnsiCell[], text: string, expected: string | undefined): void {
+  const rendered = cells.map(({ char }) => char).join("");
+  const start = rendered.indexOf(text);
+  assert.notEqual(start, -1, `rendered cells contain ${JSON.stringify(text)}`);
+  for (let offset = 0; offset < text.length; offset++) {
+    assert.equal(cells[start + offset]?.background, expected, `${text} cell ${offset} retains its background`);
+  }
+}
+
+function makeSurfaceOverlay(
+  theme: TaskTranscriptOverlayTheme,
+  paneLines: string[] = [],
+  editorLines: string[] = ["prompt"],
+  terminalRows = 5,
+): TaskTranscriptOverlay {
+  const pane = makePane(paneLines);
+  const editor = makeFakeEditor();
+  editor.editor.render = () => editorLines;
+  const { host } = makeHost();
+  return new TaskTranscriptOverlay({ pane: pane.pane, host, theme, editor: editor.editor, terminalRows: () => terminalRows });
 }
 
 function wheel(delta: number) {
@@ -720,6 +831,107 @@ test("overlay fill is restored after background resets in transcript and editor 
     const editorLine = lines.find((line) => line.includes("after editor reset"));
     assert.ok(paneLine?.includes(`\x1b[49m${bgStart} after pane reset`));
     assert.ok(editorLine?.includes(`\x1b[39;49m${bgStart} after editor reset`));
+  } finally {
+    overlay.dispose();
+  }
+});
+
+test("resolved theme surface fills content, padding, and blank rows and refreshes by frame", () => {
+  let color = rgbColor(24, 36, 48);
+  let mode: TerminalColorMode = "truecolor";
+  const theme = {
+    fg: (_token: string, text: string) => text,
+    // This realistic default-token result has no explicit background of its own.
+    bg: (_token: string, text: string) => `${text}\x1b[49m`,
+    get colors() { return { customMessageBg: color }; },
+    getColorMode: () => mode,
+    appearance: "dark" as const,
+  };
+  const thinking = "\x1b[3;38;5;201mthinking\x1b[23;39m";
+  const overlay = makeSurfaceOverlay(theme, [thinking]);
+
+  try {
+    const firstFrame = overlay.render(12);
+    const firstBackground = backgroundState(color, mode);
+    assertSolidBackground(firstFrame, firstBackground);
+    assert.ok(firstFrame[1], "the transcript includes a blank filler row");
+    assert.ok(readAnsiCells(firstFrame[1] ?? "").every((cell) => cell.char === " "), "filler row stays blank");
+
+    const transcriptCells = readAnsiCells(firstFrame[0] ?? "");
+    const thinkingCells = transcriptCells.filter(({ char }) => "thinking".includes(char));
+    assert.equal(thinkingCells.length, "thinking".length);
+    for (const cell of thinkingCells) {
+      assert.equal(cell.foreground, "38;5;201", "thinking keeps its transcript foreground");
+      assert.equal(cell.italic, true, "thinking remains italic");
+    }
+    assert.equal(transcriptCells[0]?.background, firstBackground, "left Box padding has the surface");
+    assert.equal(transcriptCells.at(-1)?.background, firstBackground, "right Box padding has the surface");
+
+    color = rgbColor(62, 74, 86);
+    mode = "256color";
+    const secondFrame = overlay.render(12);
+    const secondBackground = backgroundState(color, mode);
+    assert.notEqual(secondBackground, firstBackground, "the test changes both color and encoding");
+    assertSolidBackground(secondFrame, secondBackground);
+  } finally {
+    overlay.dispose();
+  }
+});
+
+test("legacy concrete theme background takes precedence over appearance fallback", () => {
+  const legacyBg = "\x1b[48;5;235m";
+  const theme = {
+    fg: (_token: string, text: string) => text,
+    bg: (_token: string, text: string) => `${legacyBg}${text}\x1b[49m`,
+    appearance: "light" as const,
+  };
+  const overlay = makeSurfaceOverlay(theme);
+  try {
+    assertSolidBackground(overlay.render(12), backgroundStateFromAnsi(legacyBg));
+  } finally {
+    overlay.dispose();
+  }
+});
+
+test("default-only legacy theme backgrounds fall back to appearance black or white", () => {
+  for (const appearance of ["dark", "light"] as const) {
+    const theme = {
+      fg: (_token: string, text: string) => text,
+      bg: (_token: string, text: string) => `${text}\x1b[49m`,
+      appearance,
+      getColorMode: () => "truecolor" as const,
+    };
+    const overlay = makeSurfaceOverlay(theme);
+    const fallback = appearance === "dark" ? rgbColor(0, 0, 0) : rgbColor(255, 255, 255);
+    try {
+      assertSolidBackground(overlay.render(12), backgroundState(fallback, "truecolor"));
+    } finally {
+      overlay.dispose();
+    }
+  }
+});
+
+test("combined SGR reset keeps explicit tool backgrounds and ignores RGB channel values", () => {
+  const surface = rgbColor(24, 36, 48);
+  const mode: TerminalColorMode = "truecolor";
+  const theme = {
+    fg: (_token: string, text: string) => text,
+    bg: (_token: string, text: string) => `${text}\x1b[49m`,
+    colors: { customMessageBg: surface },
+    getColorMode: () => mode,
+    appearance: "dark" as const,
+  };
+  const line = "\x1b[0;48;5;88mindexed-tool\x1b[49m outside " +
+    "\x1b[48;2;0;49;0mtruecolor-tool\x1b[49m tail";
+  const overlay = makeSurfaceOverlay(theme, [line]);
+
+  try {
+    const frame = overlay.render(80);
+    const cells = readAnsiCells(frame.find((row) => row.includes("indexed-tool")) ?? "");
+    assertTextBackground(cells, "indexed-tool", "48;5;88");
+    assertTextBackground(cells, "outside", backgroundState(surface, mode));
+    assertTextBackground(cells, "truecolor-tool", "48;2;0;49;0");
+    assertTextBackground(cells, "tail", backgroundState(surface, mode));
   } finally {
     overlay.dispose();
   }

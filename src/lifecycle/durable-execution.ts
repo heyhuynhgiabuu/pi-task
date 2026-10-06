@@ -15,6 +15,7 @@ import type {
 import {
   type DurableModelsFactory,
   type DurableRuntimeModelRegistry,
+  type DurableUsage,
   durableDatabasePath,
   durableRequestId,
   inspectDurableDatabasePath,
@@ -305,7 +306,7 @@ export async function resumeDurableAfterRestart(deps: {
           },
         );
       },
-      onCancelled: (taskId, reason) => {
+      onCancelled: (taskId, reason, usage) => {
         const history = owned(taskId);
         if (history === "other-session" || (history && history.status !== "running")) return;
         if (history) {
@@ -335,10 +336,11 @@ export async function resumeDurableAfterRestart(deps: {
             task_id: taskId,
             resumed: true,
             error: reason,
+            ...(usage ? { usage } : {}),
           },
         );
       },
-      onFailed: (taskId, reason) => {
+      onFailed: (taskId, reason, usage) => {
         const history = owned(taskId);
         if (history === "other-session" || (history && history.status !== "running")) return;
         if (history) {
@@ -366,6 +368,7 @@ export async function resumeDurableAfterRestart(deps: {
             task_id: taskId,
             resumed: true,
             error: reason,
+            ...(usage ? { usage } : {}),
           },
         );
       },
@@ -515,6 +518,7 @@ export async function executeDurableTask({
     });
 
   let progressTranscript: DurableTranscript | undefined;
+  let terminalUsage: DurableUsage | undefined;
   let progressFailureShown = false;
   const updateTranscript = (items: readonly TranscriptItem[], toolUses: number) => {
     const task = backgroundTasks.get(id) ?? foregroundTasks.get(id);
@@ -588,6 +592,10 @@ export async function executeDurableTask({
       fast,
       thinkingLevel: parseDurableThinkingLevel(agent.thinking),
       modelSpecs: agent.modelSpecs,
+      tools: agent.tools,
+      disallowedTools: agent.disallowedTools,
+      readonly: agent.readonly,
+      onTerminalUsage: (usage) => { terminalUsage = usage; },
       onRequestId: noteAttemptRequestId,
       modelRegistry: ctx.modelRegistry,
       signal: runnerAbortController.signal,
@@ -714,6 +722,7 @@ export async function executeDurableTask({
             background: true,
             backend: "durable",
             task_id: id,
+            ...(terminalUsage ? { usage: terminalUsage } : {}),
           },
         );
       },
@@ -834,6 +843,7 @@ export async function executeDurableTask({
         result_valid: false,
         backend: "durable" as const,
         error: message,
+        ...(terminalUsage ? { usage: terminalUsage } : {}),
       },
       ...(cancelled ? {} : { isError: true }),
     };

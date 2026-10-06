@@ -189,7 +189,12 @@ export function createTaskTranscriptPane(
           tui,
           opts.cwd,
         );
-        tool.markExecutionStarted();
+        // Settled historical items must not synthesize a duration:
+        // markExecutionStarted stamps startedAt=now, so a completed tool
+        // would always render "Took 0.0s". Live items keep the ticker.
+        if (item.inProgress === true) {
+          tool.markExecutionStarted();
+        }
         // Expansion belongs to this view, never the host's interactive mode.
         tool.setExpanded(toolExpansionOverrides.get(item.toolCallId) ?? toolsExpanded);
         if (item.result !== undefined || item.inProgress === false) {

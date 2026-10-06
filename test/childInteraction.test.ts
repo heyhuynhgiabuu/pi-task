@@ -1053,3 +1053,31 @@ test("the configured app.tools.expand key toggles every tool and never reaches t
   assert.deepEqual(calls.editorKeys, ["x"], "other keys still edit the steer prompt");
   overlay.dispose();
 });
+
+test("completed historical tools do not show a synthetic Took duration", () => {
+  const items: TranscriptItem[] = [toolItem()];
+  const pane = makePane(items);
+  const lines = pane.render(80, 20).join("\n");
+  assert.equal(/Took\s/.test(lines), false, "no synthetic Took on a completed historical tool");
+  assert.ok(lines.includes("echo hi"), "the command row still renders");
+  pane.dispose();
+});
+
+test("in-progress tools with partial output keep their Elapsed ticker", () => {
+  const items: TranscriptItem[] = [toolItem({ inProgress: true })];
+  const pane = makePane(items);
+  const lines = pane.render(80, 20);
+  assert.ok(/Elapsed\s/.test(lines.join("\n")), "a running tool with partial output still shows Elapsed");
+  // The bash renderer keeps a 1s Elapsed interval while partial; settle the
+  // component so the interval cannot hold the test process open.
+  for (let row = lines.length - 1; row >= 0; row--) {
+    const hit = pane.hitTest?.(row);
+    if (hit) {
+      (hit.component as unknown as {
+        updateResult?: (result: unknown, isPartial: boolean) => void;
+      }).updateResult?.({ content: [{ type: "text", text: "done" }], details: {} }, false);
+      break;
+    }
+  }
+  pane.dispose();
+});

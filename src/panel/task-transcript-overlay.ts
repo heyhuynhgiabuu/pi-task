@@ -18,6 +18,7 @@
 import {
   backgroundAnsi,
   Box,
+  compositeTuiLine,
   CURSOR_MARKER,
   Loader,
   matchesKey,
@@ -280,6 +281,17 @@ export class TaskTranscriptOverlay implements Component, Focusable {
   private childSessionInfo: ChildSessionInfo | undefined;
   private childSessionInfoScroll = 0;
   /**
+   * Scoped compositing override installed while this fullscreen overlay is
+   * open, so parent transcript image rows cannot punch a default-background
+   * hole in the overlay (pi-tui 1.0.4 `compositeTuiLine` keeps image base
+   * lines and drops the overlay's line for that row). The original method is
+   * restored on dispose. TS-private but a stable prototype method in pi-tui;
+   * the cast is the documented boundary escape.
+   */
+  private overriddenComposite:
+    | { target: object; original: (base: string, line: string, col: number, w: number, total: number) => string }
+    | undefined;
+  /**
    * The view's one working indicator, created on first activity: it animates in
    * the editor's top border when the editor supports it, and as a row above the
    * editor otherwise.
@@ -340,6 +352,56 @@ export class TaskTranscriptOverlay implements Component, Focusable {
         this.childHistoryView?.pane.invalidate();
       },
     });
+    this.installImageRowOverride();
+  }
+
+  /**
+   * While a fullscreen child overlay is visible, every row it covers must end
+   * up with the overlay's opaque surface — including rows whose parent line is
+   * a terminal-image escape (kitty/iTerm2). pi-tui keeps image base lines and
+   * drops the overlay line for that row, leaving a default-background hole
+   * that shows the terminal's blur. This override composites the overlay over
+   * an empty base for such rows and is reverted in dispose.
+   */
+  private installImageRowOverride(): void {
+    const target = this.ui as unknown as
+      | {
+          compositeLineAt?: (
+            baseLine: string,
+            overlayLine: string,
+            startCol: number,
+            overlayWidth: number,
+            totalWidth: number,
+          ) => string;
+        }
+      | undefined;
+    if (typeof target?.compositeLineAt !== "function") return;
+    const original = target.compositeLineAt.bind(target);
+    target.compositeLineAt = (
+      baseLine: string,
+      overlayLine: string,
+      startCol: number,
+      overlayWidth: number,
+      totalWidth: number,
+    ): string => {
+      if (baseLine.includes("\x1b_G") || baseLine.includes("\x1b]1337;")) {
+        // Image rows are replaced by the overlay's own (opaque) row.
+        return compositeTuiLine("", overlayLine, startCol, overlayWidth, totalWidth);
+      }
+      return original(baseLine, overlayLine, startCol, overlayWidth, totalWidth);
+    };
+    this.overriddenComposite = { target: target as object, original };
+  }
+
+  private restoreImageRowOverride(): void {
+    const overridden = this.overriddenComposite;
+    if (!overridden) return;
+    this.overriddenComposite = undefined;
+    const target = overridden.target as {
+      compositeLineAt?: unknown;
+    };
+    if (target.compositeLineAt === undefined) return;
+    target.compositeLineAt = overridden.original;
   }
 
   /** Replace the child editor with its read-only session information screen. */
@@ -718,6 +780,7 @@ export class TaskTranscriptOverlay implements Component, Focusable {
     this.disposed = true;
     this.overlayFocused = false;
     this.syncEditorFocus();
+    this.restoreImageRowOverride();
     this.childSelector?.dispose();
     this.childSelector = undefined;
     this.childHistoryPicker?.dispose();

@@ -58,7 +58,7 @@ interface FakePane {
   };
 }
 
-function makePane(lines: string[] = ["transcript-line-a", "transcript-line-b"]): FakePane {
+export function makePane(lines: string[] = ["transcript-line-a", "transcript-line-b"]): FakePane {
   const fake: FakePane = {
     scrolled: [],
     disposed: false,
@@ -87,7 +87,7 @@ interface FakeEditor {
   editor: SteerEditorLike;
 }
 
-function makeFakeEditor(): FakeEditor {
+export function makeFakeEditor(): FakeEditor {
   const fake: FakeEditor = {
     keys: [],
     text: "",
@@ -130,7 +130,7 @@ function makeFakeEditor(): FakeEditor {
   return fake;
 }
 
-function makeHost() {
+export function makeHost() {
   const calls = { steers: [] as string[], closes: 0, renders: 0 };
   const host: TaskTranscriptOverlayHost = {
     taskId: "t1",

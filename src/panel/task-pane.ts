@@ -67,6 +67,8 @@ interface CachedComponent extends Pick<Component, "render" | "handleMouse"> {
   setExpanded?(expanded: boolean): void;
 }
 
+/** pi marks prompt boundaries with OSC 133; meaningless inside this modal. */
+const OSC133_MARKER = /\x1b\]133;[^\x07\x1b]*(?:\x07|\x1b\\)/g;
 const PANE_HEADER_ROWS = 14;
 /**
  * Per-tool renderers for the tools SDK children actually call, so tool calls
@@ -223,7 +225,13 @@ export function createTaskTranscriptPane(
       }
       itemCache.set(item, comp);
     }
-    return comp.render(width);
+    // pi's Assistant/UserMessageComponents prefix OSC 133 semantic-prompt
+    // markers to their first line; this view left-pads every row by one cell,
+    // so the marker reaches the terminal at column 1 and spec-compliant
+    // terminals (OSC 133;A = fresh line: CR + index when x != 0) abandon the
+    // rest of the row at default background — the grey blur band under tool
+    // blocks. Semantic prompts are meaningless inside this modal.
+    return comp.render(width).map((line) => line.replace(OSC133_MARKER, ""));
   }
 
   function invalidateRenderedBody(): void {

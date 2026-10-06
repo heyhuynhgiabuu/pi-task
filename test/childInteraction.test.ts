@@ -1100,3 +1100,16 @@ test("settled tools without persisted timings stay silent instead of showing 0.0
   assert.equal(/Took\s/.test(lines), false, "no fabricated duration without timings");
   pane.dispose();
 });
+
+test("pane lines carry no OSC 133 semantic-prompt markers", () => {
+  const items: TranscriptItem[] = [
+    { type: "user", text: "do the thing", timestamp: "" },
+    { type: "assistant", text: "done", thinking: "thinking it through", timestamp: "" },
+  ];
+  const pane = makePane(items);
+  const lines = pane.render(80, 20);
+  for (const line of lines) {
+    assert.equal(line.includes("\x1b]133;"), false, "OSC 133 marker leaked into a transcript row");
+  }
+  pane.dispose();
+});

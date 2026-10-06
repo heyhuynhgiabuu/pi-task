@@ -16,8 +16,14 @@ import {
   type SteerEditorLike,
   type TaskTranscriptOverlayHost,
 } from "../src/panel/task-transcript-overlay.js";
-import { getCapabilities, setCapabilityOverrides } from "@earendil-works/pi-tui";
-import { makeFakeEditor, makeHost, makePane } from "./taskTranscriptOverlay.test.js";
+import { backgroundAnsi, getCapabilities, rgbColor, setCapabilityOverrides, type TerminalColorMode } from "@earendil-works/pi-tui";
+import {
+  makeFakeEditor,
+  makeHost,
+  makePane,
+  readAnsiCells,
+  type AnsiCell,
+} from "./taskTranscriptOverlay.test.js";
 
 const KITTY_ROW = "\x1b_Ga=T,f=100,s=10,v=10;AAAA\x1b\\";
 const OVERLAY_ROW = "\x1b[48;2;0;0;0mopaque child row\x1b[49m";
@@ -140,4 +146,50 @@ test("opening the child overlay clears kitty image placements; closing forces a 
     trueColor: undefined,
     hyperlinks: undefined,
   });
+});
+
+test("the child transcript flattens tool backgrounds onto the theme surface", () => {
+  const surface = rgbColor(0, 0, 0);
+  const mode: TerminalColorMode = "truecolor";
+  const theme = {
+    fg: (_token: string, text: string) => text,
+    bg: (_token: string, text: string) => `${text}\x1b[49m`,
+    colors: { customMessageBg: surface },
+    getColorMode: () => mode,
+    appearance: "dark" as const,
+  };
+  // A tool row as pi renders it: grey tool background with styled foreground.
+  const toolRow = "\x1b[38;5;201;48;5;236m$ echo hi\x1b[49m tail";
+  const pane = makePane([toolRow]);
+  const editor = makeFakeEditor();
+  editor.editor.render = () => ["prompt"];
+  const { host } = makeHost();
+  const overlay = new TaskTranscriptOverlay({
+    pane: pane.pane,
+    host,
+    theme,
+    editor: editor.editor,
+    terminalRows: () => 12,
+  });
+  try {
+    const cells = readAnsiCells(overlay.render(80).find((row) => row.includes("echo hi")) ?? "");
+    const text = cells.map(({ char }) => char).join("");
+    const start = text.indexOf("$ echo hi");
+    assert.notEqual(start, -1);
+    const surfaceBg = readAnsiCells(`${backgroundAnsi(surface, mode)}x`)[0]?.background;
+    for (let offset = 0; offset < "$ echo hi".length; offset++) {
+      assert.equal(
+        cells[start + offset]?.background,
+        surfaceBg,
+        `tool cell ${offset} sits on the theme surface`,
+      );
+    }
+    const fgCells = cells.slice(start, start + "$ echo hi".length);
+    assert.ok(
+      fgCells.every((cell) => cell.foreground === "38;5;201"),
+      "the tool row keeps its foreground styling",
+    );
+  } finally {
+    overlay.dispose();
+  }
 });

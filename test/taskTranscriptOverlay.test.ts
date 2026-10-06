@@ -156,7 +156,7 @@ function makeOverlay() {
   return { overlay, pane, editor, calls, strip };
 }
 
-interface AnsiCell {
+export interface AnsiCell {
   char: string;
   foreground: string | undefined;
   background: string | undefined;
@@ -164,7 +164,7 @@ interface AnsiCell {
 }
 
 /** Interpret the SGR subset used by the overlay so tests can assert cell state. */
-function readAnsiCells(line: string): AnsiCell[] {
+export function readAnsiCells(line: string): AnsiCell[] {
   const cells: AnsiCell[] = [];
   let foreground: string | undefined;
   let background: string | undefined;
@@ -829,8 +829,8 @@ test("overlay fill is restored after background resets in transcript and editor 
     const lines = overlay.render(80);
     const paneLine = lines.find((line) => line.includes("after pane reset"));
     const editorLine = lines.find((line) => line.includes("after editor reset"));
-    assert.ok(paneLine?.includes(`\x1b[49m${bgStart} after pane reset`));
-    assert.ok(editorLine?.includes(`\x1b[39;49m${bgStart} after editor reset`));
+    assert.ok(paneLine?.includes(`${bgStart} after pane reset`));
+    assert.ok(editorLine?.includes(`\x1b[39m${bgStart} after editor reset`));
   } finally {
     overlay.dispose();
   }
@@ -911,7 +911,7 @@ test("default-only legacy theme backgrounds fall back to appearance black or whi
   }
 });
 
-test("combined SGR reset keeps explicit tool backgrounds and ignores RGB channel values", () => {
+test("combined SGR resets flatten tool backgrounds onto the surface without corrupting RGB payloads", () => {
   const surface = rgbColor(24, 36, 48);
   const mode: TerminalColorMode = "truecolor";
   const theme = {
@@ -928,10 +928,14 @@ test("combined SGR reset keeps explicit tool backgrounds and ignores RGB channel
   try {
     const frame = overlay.render(80);
     const cells = readAnsiCells(frame.find((row) => row.includes("indexed-tool")) ?? "");
-    assertTextBackground(cells, "indexed-tool", "48;5;88");
+    // Single-surface semantics: tool backgrounds flatten onto the surface.
+    assertTextBackground(cells, "indexed-tool", backgroundState(surface, mode));
     assertTextBackground(cells, "outside", backgroundState(surface, mode));
-    assertTextBackground(cells, "truecolor-tool", "48;2;0;49;0");
+    assertTextBackground(cells, "truecolor-tool", backgroundState(surface, mode));
     assertTextBackground(cells, "tail", backgroundState(surface, mode));
+    // RGB payload values 0/49 were not mistaken for resets: the text survives.
+    const rendered = cells.map(({ char }) => char).join("");
+    assert.ok(rendered.includes("indexed-tool") && rendered.includes("truecolor-tool"));
   } finally {
     overlay.dispose();
   }

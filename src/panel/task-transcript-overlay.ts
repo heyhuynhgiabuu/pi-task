@@ -137,11 +137,48 @@ function hasExplicitBackground(style: string): boolean {
   return false;
 }
 
-/** Reapply the overlay surface only when the final SGR operation cleared its background. */
-function restoreOverlayBackground(line: string, bgStart: string): string {
-  return line.replace(/\x1b\[([0-9;]*)m/g, (sequence, parameters: string) =>
-    sgrBackgroundEffect(parameters) === "reset" ? `${sequence}${bgStart}` : sequence,
-  );
+/**
+ * Flatten every explicit background in a transcript line onto the overlay
+ * surface. Tool components paint their own themed backgrounds (pending/
+ * success/error); the child view is a single-surface screen, so those become
+ * the surface color while every other SGR operation — foregrounds, italic,
+ * bold — passes through untouched. Payload values of combined sequences are
+ * preserved when rebuilding.
+ */
+function flattenToSurface(line: string, bgStart: string): string {
+  return line.replace(/\x1b\[([0-9;]*)m/g, (sequence, parameters: string) => {
+    const codes = parameters === "" ? [0] : parameters.split(";").map(Number);
+    const kept: number[] = [];
+    let hadBackground = false;
+    for (let index = 0; index < codes.length; index++) {
+      const code = codes[index]!;
+      if (code === 49) {
+        hadBackground = true;
+      } else if (code === 0) {
+        // A full reset clears the background too: re-fill after the reset.
+        hadBackground = true;
+        kept.push(0);
+      } else if ((code >= 40 && code <= 47) || (code >= 100 && code <= 107)) {
+        hadBackground = true;
+      } else if (code === 48) {
+        const mode = codes[index + 1];
+        if (mode === 5 && codes[index + 2] !== undefined) {
+          hadBackground = true;
+          index += 2;
+        } else if (mode === 2 && codes[index + 4] !== undefined) {
+          hadBackground = true;
+          index += 4;
+        } else {
+          kept.push(code);
+        }
+      } else {
+        kept.push(code);
+      }
+    }
+    if (!hadBackground) return sequence;
+    const rebuilt = kept.length > 0 ? `\x1b[${kept.join(";")}m` : "";
+    return `${rebuilt}${bgStart}`;
+  });
 }
 
 /** Crop oversized editor output around its hardware-cursor marker. */
@@ -783,7 +820,11 @@ export class TaskTranscriptOverlay implements Component, Focusable {
   }
 
   private paintOverlayBackground(text: string): string {
-    return this.bgStart === "" ? text : `${this.bgStart}${text}\x1b[49m`;
+    if (this.bgStart === "") return text;
+    // Single-surface screen: explicit backgrounds from transcript components
+    // (tool pending/success/error, selections) flatten onto the theme surface,
+    // and the line ends on the surface so trailing padding stays painted.
+    return `${this.bgStart}${flattenToSurface(text, this.bgStart)}${this.bgStart}`;
   }
 
   invalidate(): void {
@@ -1056,7 +1097,7 @@ export class TaskTranscriptOverlay implements Component, Focusable {
       ...Array.from({ length: Math.max(0, transcriptRows - transcript.length) }, () => ""),
       footer,
     ].slice(0, rows);
-    return this.bgStart === "" ? lines : lines.map((line) => restoreOverlayBackground(line, this.bgStart));
+    return lines;
   }
 
   private renderChildHistoryTranscript(width: number, rows: number): string[] {
@@ -1079,7 +1120,7 @@ export class TaskTranscriptOverlay implements Component, Focusable {
       this.color("dim", footer),
     ];
     return lines.slice(0, rows).map((line) =>
-      this.bgStart === "" ? line : restoreOverlayBackground(line, this.bgStart),
+      line,
     );
   }
 
@@ -1092,14 +1133,14 @@ export class TaskTranscriptOverlay implements Component, Focusable {
     );
     const title = this.color("accent", truncateToWidth("Child Session Info", width, "…"));
     const footer = this.color("dim", truncateToWidth(SESSION_INFO_HINTS, width, "…"));
-    if (rows === 1) return [this.bgStart === "" ? title : restoreOverlayBackground(title, this.bgStart)];
+    if (rows === 1) return [title];
     const contentRows = Math.max(1, rows - 2);
     const maxStart = Math.max(0, wrapped.length - contentRows);
     this.childSessionInfoScroll = Math.min(this.childSessionInfoScroll, maxStart);
     const content = wrapped.slice(this.childSessionInfoScroll, this.childSessionInfoScroll + contentRows);
     const lines = [title, ...content, footer];
     while (lines.length < rows) lines.splice(lines.length - 1, 0, "");
-    return lines.slice(0, rows).map((line) => this.bgStart === "" ? line : restoreOverlayBackground(line, this.bgStart));
+    return lines.slice(0, rows);
   }
 
   /** Preserve the original compact layout for hosts that have no child stats. */
@@ -1157,7 +1198,7 @@ export class TaskTranscriptOverlay implements Component, Focusable {
       ...editorLines,
       ...footerLines,
     ];
-    return this.bgStart === "" ? lines : lines.map((line) => restoreOverlayBackground(line, this.bgStart));
+    return lines;
   }
 
   /**
@@ -1172,13 +1213,13 @@ export class TaskTranscriptOverlay implements Component, Focusable {
     if (this.childHistoryPicker) {
       this.childHistoryPicker.setViewportRows(rows);
       return fillEditorViewport(this.childHistoryPicker.render(width), rows).map((line) =>
-        this.bgStart === "" ? line : restoreOverlayBackground(line, this.bgStart),
+        line,
       );
     }
     if (this.childSelector) {
       this.childSelector.setViewportRows(rows);
       return fillEditorViewport(this.childSelector.render(width), rows).map((line) =>
-        this.bgStart === "" ? line : restoreOverlayBackground(line, this.bgStart),
+        line,
       );
     }
     if (this.childSessionInfo) return this.renderChildSessionInfo(width, rows);
@@ -1253,8 +1294,6 @@ export class TaskTranscriptOverlay implements Component, Focusable {
       ...editorLines,
       ...footerLines,
     ];
-    return this.bgStart === ""
-      ? lines
-      : lines.map((line) => restoreOverlayBackground(line, this.bgStart));
+    return lines;
   }
 }

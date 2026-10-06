@@ -24,6 +24,7 @@ import {
 } from "../model-failover.js";
 import type { AgentModelSpec } from "../helpers.js";
 import { parseToolList, resolveAgentToolAllowlist } from "../agent-tools.js";
+import { loadDurableParentToolBridge } from "./durable-parent-tools.js";
 import type {
   ChildBuiltinCommand,
   ChildBuiltinCommandResult,
@@ -273,17 +274,16 @@ function durableToolRegistrations(
   },
 ): import("@earendil-works/pi-durable").ToolRegistration[] {
   const available = new Map(handle.toolRegistrations.map((tool) => [tool.name, tool]));
-  const unsupported = [...new Set(
-    parseToolList(input.tools).filter((name) => !available.has(name)),
-  )];
-  if (unsupported.length > 0) {
-    throw new Error(
-      `Durable backend does not support explicitly requested tools: ${unsupported.join(", ")}. ` +
-        `Supported durable tools: ${[...available.keys()].join(", ")}.`,
-    );
-  }
+  // Containment holds by construction: the child only ever receives names from
+  // `available`, minus the deny list. Names the durable harness cannot host
+  // (extension-runtime tools such as codemode or peer) fail open and are
+  // dropped by the allowlist intersection below — pi-runtime parity, where CLI
+  // children also lack tools their runtime does not register. `readonly`
+  // matches the documented CLI contract (README): it denies
+  // write/edit/apply_patch, not bash, and explicit write/edit on a readonly
+  // agent is a frontmatter contradiction that fails closed.
   const explicitlyRequestedMutators = parseToolList(input.tools).filter((name) =>
-    input.readonly && ["bash", "write", "edit"].includes(name),
+    input.readonly && ["write", "edit"].includes(name),
   );
   if (explicitlyRequestedMutators.length > 0) {
     throw new Error(
@@ -294,10 +294,13 @@ function durableToolRegistrations(
 
   const disallowedTools = [
     ...parseToolList(input.disallowedTools),
-    ...(input.readonly ? ["bash", "write", "edit", "apply_patch"] : []),
+    ...(input.readonly ? ["write", "edit", "apply_patch"] : []),
   ];
+  // Without an explicit allowlist the durable surface stays the four CodingTools:
+  // resolveAgent composes every installed extension when `tools` is unset, so
+  // leaving it unset would silently widen the default surface to the bridge.
   const allowedNames = resolveAgentToolAllowlist({
-    tools: input.tools,
+    tools: parseToolList(input.tools).length > 0 ? input.tools : ["read", "write", "edit", "bash"],
     disallowedTools,
     parentToolNames: [...available.keys()],
   });
@@ -414,6 +417,11 @@ export async function openDurableHarness(
         );
     const registry = durable.createRegistry();
     registry.install(CodingTools);
+    const parentToolBridge = await loadDurableParentToolBridge();
+    if (parentToolBridge) registry.install(durable.defineExtension({
+      name: parentToolBridge.name,
+      tools: parentToolBridge.tools,
+    }));
     const storage = await sqlite.openNodeSqliteStorage(databasePath);
     const harness = await durable.Harness.open(
       storage,
@@ -454,7 +462,10 @@ export async function openDurableHarness(
       children,
       runsDoc,
       usageDoc: durable.UsageDoc,
-      toolRegistrations: CodingTools.tools ?? [],
+      toolRegistrations: [
+        ...(CodingTools.tools ?? []),
+        ...(parentToolBridge?.tools ?? []),
+      ],
     };
   })();
   harnessCache.set(databasePath, { promise, runtimeModelRegistry, runtimeFast });

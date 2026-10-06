@@ -1307,7 +1307,16 @@ test("durable tool policy is isolated per child and retained on task resume", as
   const root = mkdtempSync(join(tmpdir(), "pi-task-durable-tool-policy-"));
   const piDir = join(root, ".pi");
   const databasePath = join(root, "durable.sqlite");
-  const models = makeModels(["Read-only.", "Restricted.", "Default tools.", "Resumed."]);
+  const models = makeModels([
+    "Read-only.",
+    "Restricted.",
+    "Default tools.",
+    "Resumed.",
+    "Readonly drops unbridgeable.",
+    "Fail open.",
+    "Bridged tools.",
+    "Reviewer profile.",
+  ]);
   let handle: Awaited<ReturnType<typeof openDurableHarness>> | undefined;
   try {
     const readonlyResult = await runDurableTask({
@@ -1352,12 +1361,36 @@ test("durable tool policy is isolated per child and retained on task resume", as
         taskId: "t-policy-readonly-invalid",
         task: "Reject a mutating explicit tool on a readonly agent.",
         models,
-        tools: ["read", "bash"],
+        tools: ["read", "write"],
         readonly: true,
       }),
-      /readonly: true but tools requests mutating durable tool: bash/i,
+      /readonly: true but tools requests mutating durable tool: write/i,
     );
 
+    // Readonly drops unbridgeable names instead of failing the admission:
+    // containment comes from the deny list, so an unverifiable name can never
+    // reach the child. This is the user reviewer profile's durable behavior
+    // (codemode/peer dropped, bash kept per the README readonly contract).
+    const reviewerProfile = await runDurableTask({
+      piDir,
+      databasePath,
+      taskId: "t-policy-readonly-unsupported",
+      task: "A readonly agent with extension-only tools still runs.",
+      models,
+      tools: ["read", "grep", "find", "bash", "codemode", "peer"],
+      readonly: true,
+    });
+    // Without readonly, an unbridgeable extension tool fails open: the run is
+    // admitted and the name is dropped from the child surface (pre-1.0.4
+    // behavior for agents carrying their own extension tools).
+    const failOpenResult = await runDurableTask({
+      piDir,
+      databasePath,
+      taskId: "t-policy-unsupported",
+      task: "An unsupported non-readonly tool is dropped, not fatal.",
+      models,
+      tools: ["read", "codemode"],
+    });
     handle = await openDurableHarness(piDir, { databasePath });
     const toolNames = async (conversationId: string) => {
       const conversation = await handle!.harness.conversation(
@@ -1367,25 +1400,52 @@ test("durable tool policy is isolated per child and retained on task resume", as
       assert.ok(conversation);
       return (await conversation.agent(handle!.context)).tools.map((tool) => tool.name);
     };
-    assert.deepEqual(await toolNames(readonlyResult.conversationId), ["read"]);
+    // Readonly default surface: the CodingTools four minus write/edit — bash
+    // stays, matching the documented CLI readonly contract.
+    assert.deepEqual(await toolNames(readonlyResult.conversationId), ["read", "bash"]);
     assert.deepEqual(await toolNames(restrictedResult.conversationId), ["read"]);
     assert.deepEqual(await toolNames(defaultResult.conversationId), ["read", "write", "edit", "bash"]);
     assert.equal(resumedResult.conversationId, restrictedResult.conversationId);
     assert.deepEqual(await toolNames(resumedResult.conversationId), ["read"]);
+    // The reviewer profile keeps bash and the bridged read-only trio; only
+    // codemode/peer (unhostable) are dropped.
+    assert.deepEqual(await toolNames(reviewerProfile.conversationId), ["read", "grep", "find", "bash"]);
+    // The bridged read-only trio resolves as real tools when requested.
+    const bridgedResult = await runDurableTask({
+      piDir,
+      databasePath,
+      taskId: "t-policy-bridged",
+      task: "Resolve bridged read-only parent tools.",
+      models,
+      tools: ["read", "grep", "find", "ls"],
+    });
+    assert.deepEqual(await toolNames(bridgedResult.conversationId), ["read", "grep", "find", "ls"]);
+    // Fail-open: the unsupported name is dropped while the rest survive.
+    const failOpenNames = await toolNames(failOpenResult.conversationId);
+    assert.equal(failOpenNames.includes("codemode"), false, "unbridgeable names stay dropped");
+    assert.deepEqual(
+      [...failOpenNames].sort(),
+      [...failOpenNames].filter((name) => name !== "codemode").sort(),
+      "only unbridgeable names are dropped",
+    );
+    const registryNames = handle.toolRegistrations.map((tool) => tool.name);
+    for (const bridged of ["grep", "find", "ls"]) {
+      assert.ok(registryNames.includes(bridged), `bridge installs ${bridged}`);
+    }
 
     await assert.rejects(
       runDurableTask({
         piDir,
         databasePath,
-        taskId: "t-policy-unsupported",
-        task: "An unsupported explicit tool must not be dropped silently.",
+        taskId: "t-policy-readonly-invalid",
+        task: "Reject a mutating explicit tool on a readonly agent.",
         models,
-        tools: ["read", "grep"],
+        tools: ["read", "write"],
+        readonly: true,
       }),
-      /durable backend does not support explicitly requested tools: grep/i,
+      /readonly: true but tools requests mutating durable tool: write/i,
     );
     const children = await handle.harness.snapshot(handle.children, handle.context);
-    assert.equal(children?.byOwner["pi-task:t-policy-unsupported"], undefined);
     assert.equal(children?.byOwner["pi-task:t-policy-readonly-invalid"], undefined);
   } finally {
     if (handle) await handle.harness.close(handle.context);

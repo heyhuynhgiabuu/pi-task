@@ -329,13 +329,23 @@ async function durableToolRegistrations(
     }
   }
   if (bridged.length > 0) {
-    // The conversation selects tools from the registry snapshot, so the bridge
-    // must be installed there, not only passed in the per-run list. install()
-    // is idempotent per extension name, and the per-run list stays authoritative
-    // for what this child may select.
+    // The conversation resolves its stored tool names against the live registry
+    // snapshot on every turn, so the bridge must be installed there, not only
+    // passed in the per-run list. install() REPLACES the extension by name, so
+    // merge with what earlier runs bridged: a later, narrower run must never
+    // evict tools a still-running child already selected.
+    const bridgedName = "pi-task-parent-extension-tools";
+    const merged = new Map<
+      string,
+      import("@earendil-works/pi-durable").ToolRegistration
+    >();
+    for (const tool of handle.registry.snapshot().extension(bridgedName)?.tools ?? []) {
+      merged.set(tool.name, tool);
+    }
+    for (const tool of bridged) merged.set(tool.name, tool);
     handle.registry.install(handle.module.defineExtension({
-      name: "pi-task-parent-extension-tools",
-      tools: bridged,
+      name: bridgedName,
+      tools: [...merged.values()],
     }));
     for (const tool of bridged) available.set(tool.name, tool);
   }

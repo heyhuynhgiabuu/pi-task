@@ -14,8 +14,9 @@
  *   `CodingTools` so conversation policy keeps one authoritative source; the
  *   factory list below only ever names the read-only trio, and `task` (nested
  *   delegation guard, `PI_TASK_TOOL_DISABLED`) is never listed.
- * - Mutating or extension-runtime tools (codemode, websearch, MCP, peer, …)
- *   are not bridgeable without their `ExtensionToolContext`.
+ * - Extension-runtime tools (codemode, MCP, peer, …) still need their live
+ *   `ExtensionToolContext`; only requested names with a known package entry
+ *   path are re-hosted through `loadParentExtensionTools`.
  *
  * Stored durable conversations persist tool NAMES only; the registry is rebuilt
  * here on every `openDurableHarness`, so resume re-resolves stored names.
@@ -104,9 +105,12 @@ const extensionToolCache = new Map<
 	Promise<Map<string, AgentTool<any, any>>>
 >();
 
-/** Minimal ExtensionAPI surface registration-time code may touch. */
+/**
+ * Minimal ExtensionAPI surface: registration calls are captured, everything
+ * else becomes a no-op so packages whose setup touches other APIs still load.
+ */
 function extensionCaptureShim(captured: Map<string, AgentTool<any, any>>): unknown {
-	return {
+	const target: Record<string, unknown> = {
 		registerTool: (tool: AgentTool<any, any>) => {
 			if (
 				tool &&
@@ -116,9 +120,13 @@ function extensionCaptureShim(captured: Map<string, AgentTool<any, any>>): unkno
 				captured.set(tool.name, tool);
 			}
 		},
-		on: () => () => {},
-		appendEntry: () => {},
 	};
+	return new Proxy(target, {
+		get: (t, property, receiver) =>
+			property in t
+				? Reflect.get(t, property, receiver)
+				: () => undefined,
+	});
 }
 
 /**
@@ -136,16 +144,23 @@ export function loadParentExtensionTools(
 	const cached = extensionToolCache.get(entryPath);
 	if (cached) return cached;
 	const loading = (async () => {
-		const mod: unknown = await import(pathToFileURL(entryPath).href);
-		const create = (mod as { default?: unknown }).default ?? mod;
-		if (typeof create !== "function") {
-			return new Map<string, AgentTool<any, any>>();
+		try {
+			const mod: unknown = await import(pathToFileURL(entryPath).href);
+			const create = (mod as { default?: unknown }).default ?? mod;
+			if (typeof create !== "function") {
+				return new Map<string, AgentTool<any, any>>();
+			}
+			const captured = new Map<string, AgentTool<any, any>>();
+			await (create as (api: unknown) => unknown)(
+				extensionCaptureShim(captured),
+			);
+			return captured;
+		} catch (error) {
+			// A failed load must not poison the cache: the next run may succeed
+			// (transient config) or surface the error again.
+			extensionToolCache.delete(entryPath);
+			throw error;
 		}
-		const captured = new Map<string, AgentTool<any, any>>();
-		await (create as (api: unknown) => unknown)(
-			extensionCaptureShim(captured),
-		);
-		return captured;
 	})();
 	loading.catch(() => undefined);
 	extensionToolCache.set(entryPath, loading);

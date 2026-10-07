@@ -4046,3 +4046,69 @@ test("durable children host requested parent extension tools via the module brid
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a later narrower bridge never evicts tools from a running child", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-durable-ext-evict-"));
+  const piDir = join(root, ".pi");
+  const databasePath = join(root, "durable.sqlite");
+  const fixturePath = join(root, "fixture-two-tool-extension.mjs");
+  writeFileSync(
+    fixturePath,
+    [
+      "export default function fixtureExtension(pi) {",
+      "  for (const name of [\"fixture_websearch\", \"fixture_context7\"]) {",
+      "    pi.registerTool({",
+      "      name,",
+      "      description: `Fixture ${name}.`,",
+      "      parameters: { type: \"object\", properties: {} },",
+      "      execute: async () => ({ content: [{ type: \"text\", text: \"fixture ok\" }] }),",
+      "    });",
+      "  }",
+      "}",
+    ].join("\n"),
+    "utf-8",
+  );
+  const models = makeModels(["First.", "Second."]);
+  let handle: Awaited<ReturnType<typeof openDurableHarness>> | undefined;
+  try {
+    const first = await runDurableTask({
+      piDir,
+      databasePath,
+      taskId: "t-ext-evict-first",
+      task: "Bridge the search tool.",
+      models,
+      tools: ["read", "fixture_websearch"],
+      parentExtensionToolSources: {
+        fixture_websearch: fixturePath,
+        fixture_context7: fixturePath,
+      },
+    });
+    // A second, narrower run must not evict the first child's tool.
+    const second = await runDurableTask({
+      piDir,
+      databasePath,
+      taskId: "t-ext-evict-second",
+      task: "Bridge a different tool.",
+      models,
+      tools: ["read", "fixture_context7"],
+      parentExtensionToolSources: {
+        fixture_websearch: fixturePath,
+        fixture_context7: fixturePath,
+      },
+    });
+    handle = await openDurableHarness(piDir, { databasePath });
+    const toolNames = async (conversationId: string) => {
+      const conversation = await handle!.harness.conversation(
+        conversationId as never,
+        handle!.context,
+      );
+      assert.ok(conversation);
+      return (await conversation.agent(handle!.context)).tools.map((tool) => tool.name);
+    };
+    assert.deepEqual(await toolNames(first.conversationId), ["read", "fixture_websearch"]);
+    assert.deepEqual(await toolNames(second.conversationId), ["read", "fixture_context7"]);
+  } finally {
+    if (handle) await handle.harness.close(handle.context);
+    rmSync(root, { recursive: true, force: true });
+  }
+});

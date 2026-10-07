@@ -74,6 +74,8 @@ export interface DurableTaskExecutionOptions {
   signal?: AbortSignal;
   /** Mirror the parent's fast mode onto the child's Codex requests. */
   fast?: boolean;
+  /** Parent extension module entry paths by tool name, for bridgeable research tools. */
+  parentExtensionToolSources?: Record<string, string>;
   isBackground: boolean;
   backgroundTasks: Map<string, BackgroundTask>;
   foregroundTasks: Map<string, BackgroundTask>;
@@ -487,6 +489,7 @@ export async function executeDurableTask({
   toolCallId,
   signal,
   fast,
+  parentExtensionToolSources,
   isBackground,
   backgroundTasks,
   foregroundTasks,
@@ -593,6 +596,7 @@ export async function executeDurableTask({
       thinkingLevel: parseDurableThinkingLevel(agent.thinking),
       modelSpecs: agent.modelSpecs,
       tools: agent.tools,
+      parentExtensionToolSources,
       disallowedTools: agent.disallowedTools,
       readonly: agent.readonly,
       onTerminalUsage: (usage) => { terminalUsage = usage; },

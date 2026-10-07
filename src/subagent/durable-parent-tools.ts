@@ -21,6 +21,7 @@
  * here on every `openDurableHarness`, so resume re-resolves stored names.
  */
 
+import { pathToFileURL } from "node:url";
 import type { ToolRegistration } from "@earendil-works/pi-durable";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { Context } from "@earendil-works/chord";
@@ -91,6 +92,64 @@ export function adaptAgentTool(
 		...(replaySafe ? { replay: "safe" as const } : {}),
 		execute,
 	} as ToolRegistration;
+}
+
+/**
+ * Captured tools from one installed extension package, per module entry path.
+ * Re-invoking an entry is only safe against a shim, never the live parent API,
+ * so results are cached for the process lifetime.
+ */
+const extensionToolCache = new Map<
+	string,
+	Promise<Map<string, AgentTool<any, any>>>
+>();
+
+/** Minimal ExtensionAPI surface registration-time code may touch. */
+function extensionCaptureShim(captured: Map<string, AgentTool<any, any>>): unknown {
+	return {
+		registerTool: (tool: AgentTool<any, any>) => {
+			if (
+				tool &&
+				typeof tool.name === "string" &&
+				typeof tool.execute === "function"
+			) {
+				captured.set(tool.name, tool);
+			}
+		},
+		on: () => () => {},
+		appendEntry: () => {},
+	};
+}
+
+/**
+ * Load the tools one installed extension package registers, by invoking its
+ * default export against a capturing shim instead of the parent's live
+ * ExtensionAPI. Only context-free tools actually work when re-hosted in the
+ * durable harness; a tool whose execute needs the extension runtime surfaces a
+ * tool error inside the child if ever called. Shim no-ops (appendEntry) can
+ * degrade side features (e.g. pi-search's stored fetch content for
+ * get_fetch_content) without breaking the tool's primary output.
+ */
+export function loadParentExtensionTools(
+	entryPath: string,
+): Promise<Map<string, AgentTool<any, any>>> {
+	const cached = extensionToolCache.get(entryPath);
+	if (cached) return cached;
+	const loading = (async () => {
+		const mod: unknown = await import(pathToFileURL(entryPath).href);
+		const create = (mod as { default?: unknown }).default ?? mod;
+		if (typeof create !== "function") {
+			return new Map<string, AgentTool<any, any>>();
+		}
+		const captured = new Map<string, AgentTool<any, any>>();
+		await (create as (api: unknown) => unknown)(
+			extensionCaptureShim(captured),
+		);
+		return captured;
+	})();
+	loading.catch(() => undefined);
+	extensionToolCache.set(entryPath, loading);
+	return loading;
 }
 
 /**

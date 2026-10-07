@@ -642,10 +642,25 @@ export default function (pi: ExtensionAPI) {
       let taskParams = parsedTaskParams;
 
       const { agents, piDir } = discoverAgents(ctx.cwd, BUNDLED_AGENT_DIR);
-      const parentToolNames = pi
-        .getAllTools()
-        .map((tool) => tool.name)
-        .filter(Boolean);
+      const parentToolNames: string[] = [];
+      // Entry module path per configured extension tool, so the durable bridge
+      // can re-host requested research tools (websearch, web_fetch, …) whose
+      // execute does not need Pi's extension runtime.
+      const parentExtensionToolSources: Record<string, string> = {};
+      for (const tool of pi
+        // Source-lint guard (test/prompt.test.ts) forbids the single-line form:
+        // enumeration belongs to task execution, never extension load.
+        .getAllTools()) {
+        if (!tool.name || tool.name === taskToolName) continue;
+        parentToolNames.push(tool.name);
+        if (
+          (tool.exposure === "direct" || tool.exposure === "model-only") &&
+          tool.sourceInfo?.origin === "package" &&
+          tool.sourceInfo.path
+        ) {
+          parentExtensionToolSources[tool.name] = tool.sourceInfo.path;
+        }
+      }
       const preflight = resolveTaskAgentPreflight(agents, taskParams.agent_type);
       if (!preflight.ok) {
         return {
@@ -1062,6 +1077,7 @@ export default function (pi: ExtensionAPI) {
           toolCallId,
           signal,
           fast: isolatedFast,
+          parentExtensionToolSources,
           isBackground,
           backgroundTasks,
           foregroundTasks,

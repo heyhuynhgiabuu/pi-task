@@ -3989,3 +3989,60 @@ test("durable Codex tasks request the priority service tier only under fast mode
     reasoning: { effort: "high", summary: "detailed" },
   }, "fast mode is off unless a predicate says otherwise");
 });
+
+test("durable children host requested parent extension tools via the module bridge", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-durable-ext-bridge-"));
+  const piDir = join(root, ".pi");
+  const databasePath = join(root, "durable.sqlite");
+  const fixturePath = join(root, "fixture-research-extension.mjs");
+  writeFileSync(
+    fixturePath,
+    [
+      "export default function fixtureExtension(pi) {",
+      "  pi.registerTool({",
+      '    name: "fixture_websearch",',
+      '    description: "Fixture external research tool.",',
+      "    parameters: { type: \"object\", properties: {} },",
+      "    execute: async () => ({ content: [{ type: \"text\", text: \"fixture ok\" }] }),",
+      "  });",
+      '  pi.on("session_start", () => {});',
+      "}",
+    ].join("\n"),
+    "utf-8",
+  );
+  const models = makeModels(["With bridge.", "Without bridge."]);
+  let handle: Awaited<ReturnType<typeof openDurableHarness>> | undefined;
+  try {
+    const withBridge = await runDurableTask({
+      piDir,
+      databasePath,
+      taskId: "t-ext-bridge-with",
+      task: "Use the bridged research tool.",
+      models,
+      tools: ["read", "fixture_websearch"],
+      parentExtensionToolSources: { fixture_websearch: fixturePath },
+    });
+    const withoutBridge = await runDurableTask({
+      piDir,
+      databasePath,
+      taskId: "t-ext-bridge-without",
+      task: "No catalog, no bridge.",
+      models,
+      tools: ["read", "fixture_websearch"],
+    });
+    handle = await openDurableHarness(piDir, { databasePath });
+    const toolNames = async (conversationId: string) => {
+      const conversation = await handle!.harness.conversation(
+        conversationId as never,
+        handle!.context,
+      );
+      assert.ok(conversation);
+      return (await conversation.agent(handle!.context)).tools.map((tool) => tool.name);
+    };
+    assert.deepEqual(await toolNames(withBridge.conversationId), ["read", "fixture_websearch"]);
+    assert.deepEqual(await toolNames(withoutBridge.conversationId), ["read"]);
+  } finally {
+    if (handle) await handle.harness.close(handle.context);
+    rmSync(root, { recursive: true, force: true });
+  }
+});

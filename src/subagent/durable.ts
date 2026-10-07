@@ -24,7 +24,11 @@ import {
 } from "../model-failover.js";
 import type { AgentModelSpec } from "../helpers.js";
 import { parseToolList, resolveAgentToolAllowlist } from "../agent-tools.js";
-import { loadDurableParentToolBridge } from "./durable-parent-tools.js";
+import {
+	adaptAgentTool,
+	loadDurableParentToolBridge,
+	loadParentExtensionTools,
+} from "./durable-parent-tools.js";
 import type {
   ChildBuiltinCommand,
   ChildBuiltinCommandResult,
@@ -85,6 +89,8 @@ export interface DurableHarnessHandle {
   module: DurableModule;
   context: ChordContext;
   models: import("@earendil-works/pi-ai").Models;
+  /** The live registry; later opens may install additional extensions. */
+  registry: import("@earendil-works/pi-durable").Registry;
   /** The harness-wide registrations; each conversation selects its own subset in pi.agent. */
   toolRegistrations: readonly import("@earendil-works/pi-durable").ToolRegistration[];
   /** Read-only lookup of an exact conversation-scoped submission identity. */
@@ -265,14 +271,15 @@ export function durableOwnerKey(taskId: string): string {
 }
 
 /** Resolve frontmatter permissions against the tools this durable harness installs. */
-function durableToolRegistrations(
+async function durableToolRegistrations(
   handle: DurableHarnessHandle,
   input: {
     tools?: string | string[];
     disallowedTools?: string[];
     readonly?: boolean;
+    parentExtensionToolSources?: Record<string, string>;
   },
-): import("@earendil-works/pi-durable").ToolRegistration[] {
+): Promise<import("@earendil-works/pi-durable").ToolRegistration[]> {
   const available = new Map(handle.toolRegistrations.map((tool) => [tool.name, tool]));
   // Containment holds by construction: the child only ever receives names from
   // `available`, minus the deny list. Names the durable harness cannot host
@@ -299,6 +306,39 @@ function durableToolRegistrations(
   // Without an explicit allowlist the durable surface stays the four CodingTools:
   // resolveAgent composes every installed extension when `tools` is unset, so
   // leaving it unset would silently widen the default surface to the bridge.
+  const requestedNames = (
+    parseToolList(input.tools).length > 0
+      ? parseToolList(input.tools)
+      : ["read", "write", "edit", "bash"]
+  ).filter((name) => !disallowedTools.includes(name));
+  // Host requested parent extension tools whose registration modules are known:
+  // the module is re-invoked against a capture shim (never the live parent API)
+  // and only names the policy asked for are hosted. A module that fails to load
+  // fails open like every other unhostable name: the child loses the tool.
+  const bridged: import("@earendil-works/pi-durable").ToolRegistration[] = [];
+  for (const [name, entryPath] of Object.entries(input.parentExtensionToolSources ?? {})) {
+    if (available.has(name) || !requestedNames.includes(name)) continue;
+    try {
+      const tool = (await loadParentExtensionTools(entryPath)).get(name);
+      if (tool) {
+        // Network-backed tools are not idempotent: keep the default "unsafe" replay.
+        bridged.push(adaptAgentTool(tool, { replaySafe: false }));
+      }
+    } catch {
+      // Fail open; the allowlist mapping below simply drops the name.
+    }
+  }
+  if (bridged.length > 0) {
+    // The conversation selects tools from the registry snapshot, so the bridge
+    // must be installed there, not only passed in the per-run list. install()
+    // is idempotent per extension name, and the per-run list stays authoritative
+    // for what this child may select.
+    handle.registry.install(handle.module.defineExtension({
+      name: "pi-task-parent-extension-tools",
+      tools: bridged,
+    }));
+    for (const tool of bridged) available.set(tool.name, tool);
+  }
   const allowedNames = resolveAgentToolAllowlist({
     tools: parseToolList(input.tools).length > 0 ? input.tools : ["read", "write", "edit", "bash"],
     disallowedTools,
@@ -457,6 +497,7 @@ export async function openDurableHarness(
       module: durable,
       context,
       models,
+      registry,
       hasSubmission: async (conversationId: ConversationId, requestId: string) =>
         (await storage.submissionByRequest(conversationId, requestId, context)) !== undefined,
       children,
@@ -1303,6 +1344,8 @@ export async function runDurableTask(input: {
   tools?: string | string[];
   /** Agent frontmatter deny list. */
   disallowedTools?: string[];
+  /** Parent extension module entry paths by tool name, for bridgeable research tools. */
+  parentExtensionToolSources?: Record<string, string>;
   /** Add bash/write/edit/apply_patch to the deny list, even with explicit tools. */
   readonly?: boolean;
   /**
@@ -1332,7 +1375,7 @@ export async function runDurableTask(input: {
     modelRegistry: input.modelRegistry,
     fast: input.fast,
   });
-  const toolRegistrations = durableToolRegistrations(handle, input);
+  const toolRegistrations = await durableToolRegistrations(handle, input);
   const attempts = buildDurableAttempts(input, handle);
   // Legacy (non-chain) callers fail on an invalid explicit model before any
   // child state exists, exactly as before failover existed.

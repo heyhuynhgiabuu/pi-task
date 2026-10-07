@@ -442,3 +442,52 @@ test("parser strips ANSI from tool results and keeps literal text intact", () =>
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+function durationFixture(results: Array<Record<string, unknown>>, calls: string[]): string {
+  const dir = mkdtempSync(join(tmpdir(), "pi-task-duration-"));
+  const file = join(dir, "session.jsonl");
+  const rows: string[] = [JSON.stringify({ type: "session", id: "s", timestamp: "2026-08-19T00:00:00.000Z" })];
+  if (calls.length > 0) {
+    rows.push(JSON.stringify({
+      type: "message",
+      timestamp: "2026-08-19T00:00:01.000Z",
+      message: {
+        role: "assistant",
+        content: calls.map((id) => ({ type: "toolCall", id, name: "bash", arguments: {} })),
+      },
+    }));
+  }
+  results.forEach((message, i) => rows.push(JSON.stringify({
+    type: "message",
+    // Wide timestamp gaps prove no delta inference.
+    timestamp: `2026-08-19T00:00:${String(10 + i * 10).padStart(2, "0")}.000Z`,
+    message: { role: "toolResult", toolName: "bash", content: "ok", ...message },
+  })));
+  writeFileSync(file, rows.join("\n"), "utf-8");
+  return file;
+}
+
+test("JSONL paired toolResult durationMs projects, zero is kept, invalid/missing stay absent", () => {
+  const file = durationFixture(
+    [
+      { toolCallId: "a", durationMs: 1500 },
+      { toolCallId: "b", durationMs: 0 },
+      { toolCallId: "c", durationMs: -5 },
+      { toolCallId: "d", durationMs: "7" },
+      { toolCallId: "e" },
+    ],
+    ["a", "b", "c", "d", "e"],
+  );
+  const tools = readTaskSessionFile(file).items.flatMap((i) => (i.type === "tool" ? [i] : []));
+  assert.deepEqual(tools.map((t) => t.durationMs), [1500, 0, undefined, undefined, undefined]);
+  assert.ok(tools.every((t) => !("startedAt" in t) && !("endedAt" in t)));
+});
+
+test("JSONL unpaired toolResult durationMs projects too", () => {
+  const file = durationFixture(
+    [{ toolCallId: "x", durationMs: 250 }, { toolCallId: "y", durationMs: Number.MAX_VALUE * 2 }, { toolCallId: "z" }],
+    [],
+  );
+  const tools = readTaskSessionFile(file).items.flatMap((i) => (i.type === "tool" ? [i] : []));
+  assert.deepEqual(tools.map((t) => t.durationMs), [250, undefined, undefined]);
+});

@@ -7,7 +7,7 @@ import type {
 import type { Message } from "@earendil-works/pi-ai";
 import type { ChildHistoryOption } from "../types.js";
 import type { ChildUsageMetadata } from "./child-metadata.js";
-import { MAX_TRANSCRIPT_ITEMS, type TranscriptItem } from "./transcript.js";
+import { MAX_TRANSCRIPT_ITEMS, authoritativeDurationMs, type TranscriptItem } from "./transcript.js";
 
 // Persisted pi-durable entry kinds (entries.ts, 1.0.4). Keep runtime imports
 // out of this always-loaded transcript adapter; the durable peer is optional.
@@ -115,6 +115,11 @@ function thinkingContent(content: unknown): string | undefined {
     .join("\n")
     .trim();
   return text || undefined;
+}
+
+/** pi-ai >= the duration release types `durationMs`; 1.0.4 typings lack it, so read it as data. */
+function messageDuration(message: Message): number | undefined {
+  return authoritativeDurationMs((message as { durationMs?: unknown }).durationMs);
 }
 
 function timestampOf(message: Message): string {
@@ -296,10 +301,15 @@ export class DurableTranscript {
           break;
         case "tool_execution_end":
           this.observeToolCall(event.toolCallId);
-          this.updateTool(event.toolCallId, (item) => ({
-            ...item,
-            inProgress: false,
-          }), event.toolName);
+          {
+            // Live end carries the committed toolResult (absent on fault/orphan).
+            const durationMs = this.endEventDuration(event);
+            this.updateTool(event.toolCallId, (item) => ({
+              ...item,
+              ...(durationMs === undefined ? {} : { durationMs }),
+              inProgress: false,
+            }), event.toolName);
+          }
           break;
         case "task_failed":
           this.append({
@@ -314,6 +324,17 @@ export class DurableTranscript {
     }
     this.trim();
     return this.items();
+  }
+
+  private endEventDuration(
+    event: Extract<AgentEvent, { type: "tool_execution_end" }>,
+  ): number | undefined {
+    for (const message of event.entry?.model ?? []) {
+      if (message.role === "toolResult" && message.toolCallId === event.toolCallId) {
+        return messageDuration(message);
+      }
+    }
+    return undefined;
   }
 
   private setAgentState(state: SnapshotEvent["agent"] | undefined): void {
@@ -443,6 +464,7 @@ export class DurableTranscript {
       this.snapshotToolCalls.delete(message.toolCallId);
       const result = textContent(message.content);
       const details = toolDetails(message.details);
+      const durationMs = messageDuration(message);
       const existingIndex = this.toolIndexes.get(message.toolCallId);
       if (existingIndex === undefined) {
         this.upsertTool({
@@ -451,6 +473,7 @@ export class DurableTranscript {
           toolCallId: message.toolCallId,
           args: {},
           ...(details === undefined ? {} : { details }),
+          ...(durationMs === undefined ? {} : { durationMs }),
           result: result || undefined,
           isError: Boolean(message.isError),
           timestamp,
@@ -463,6 +486,7 @@ export class DurableTranscript {
             ...existing,
             name: message.toolName || existing.name,
             ...(details === undefined ? {} : { details }),
+            ...(durationMs === undefined ? {} : { durationMs }),
             result: result || undefined,
             isError: Boolean(message.isError),
             inProgress: false,

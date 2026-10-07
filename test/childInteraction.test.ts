@@ -1082,23 +1082,33 @@ test("in-progress tools with partial output keep their Elapsed ticker", () => {
   pane.dispose();
 });
 
-test("settled tools render their real persisted duration via the built-in Took line", () => {
-  const items: TranscriptItem[] = [toolItem({
-    startedAt: Date.parse("2026-10-06T00:00:00Z"),
-    endedAt: Date.parse("2026-10-06T00:00:01.5Z"),
-  })];
-  const pane = makePane(items);
+function settledPaneText(over: Partial<Extract<TranscriptItem, { type: "tool" }>>): string {
+  const pane = makePane([toolItem(over)]);
   const lines = pane.render(80, 20).join("\n");
-  assert.ok(/Took 1\.5s/.test(lines), `expected a real Took duration, got: ${lines.slice(-200)}`);
   pane.dispose();
+  return lines;
+}
+
+test("settled tools render authoritative durationMs via the built-in Took line", () => {
+  const lines = settledPaneText({ durationMs: 1500 });
+  assert.ok(/Took 1\.5s/.test(lines), `expected Took 1.5s, got: ${lines.slice(-200)}`);
 });
 
-test("settled tools without persisted timings stay silent instead of showing 0.0s", () => {
-  const items: TranscriptItem[] = [toolItem()];
-  const pane = makePane(items);
-  const lines = pane.render(80, 20).join("\n");
-  assert.equal(/Took\s/.test(lines), false, "no fabricated duration without timings");
-  pane.dispose();
+test("a zero authoritative duration is valid and renders", () => {
+  const lines = settledPaneText({ durationMs: 0 });
+  assert.ok(/Took 0(\.0)?m?s/.test(lines), `expected a zero Took, got: ${lines.slice(-200)}`);
+});
+
+test("settled tools without durationMs stay silent, even with timestamps apart", () => {
+  const lines = settledPaneText({ timestamp: "2026-10-06T00:00:09Z" });
+  assert.equal(/Took\s/.test(lines), false, "no fabricated duration");
+});
+
+test("invalid durationMs values never render a Took line", () => {
+  for (const durationMs of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const lines = settledPaneText({ durationMs });
+    assert.equal(/Took\s/.test(lines), false, `no Took for ${durationMs}`);
+  }
 });
 
 test("pane lines carry no OSC 133 semantic-prompt markers", () => {

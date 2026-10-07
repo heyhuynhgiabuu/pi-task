@@ -371,3 +371,58 @@ test("durable transcript keeps distinct assistant text and thinking blocks durin
     "First thought\nSecond thought",
   );
 });
+
+function toolResultMessage(toolCallId: string, extra: Record<string, unknown> = {}) {
+  return {
+    role: "toolResult",
+    toolCallId,
+    toolName: "bash",
+    content: [{ type: "text", text: "ok" }],
+    isError: false,
+    ...extra,
+  };
+}
+
+function toolItems(transcript: DurableTranscript) {
+  return transcript.items().flatMap((item) => (item.type === "tool" ? [item] : []));
+}
+
+test("durable snapshot projects toolResult durationMs, paired and unpaired", () => {
+  const transcript = new DurableTranscript(makeSnapshot([
+    entry(1, assistant([
+      { type: "toolCall", id: "paired", name: "bash", arguments: {} },
+      { type: "toolCall", id: "zero", name: "bash", arguments: {} },
+      { type: "toolCall", id: "bad", name: "bash", arguments: {} },
+    ])),
+    entry(2, toolResultMessage("paired", { durationMs: 1500 })),
+    entry(3, toolResultMessage("zero", { durationMs: 0 })),
+    entry(4, toolResultMessage("bad", { durationMs: -1 })),
+    entry(5, toolResultMessage("unpaired", { durationMs: 40 })),
+    entry(6, toolResultMessage("missing")),
+  ]));
+  const byId = new Map(toolItems(transcript).map((t) => [t.toolCallId, t.durationMs]));
+  assert.deepEqual([...byId], [
+    ["paired", 1500], ["zero", 0], ["bad", undefined], ["unpaired", 40], ["missing", undefined],
+  ]);
+});
+
+test("durable live message_end and tool_execution_end carry durationMs", () => {
+  const transcript = new DurableTranscript(makeSnapshot());
+  transcript.apply([
+    { type: "tool_execution_start", toolCallId: "live", toolName: "bash", args: {} },
+    {
+      type: "tool_execution_end",
+      toolCallId: "live",
+      toolName: "bash",
+      entry: entry(1, toolResultMessage("live", { durationMs: 2000 })),
+    },
+    { type: "tool_execution_start", toolCallId: "msg", toolName: "bash", args: {} },
+    { type: "message_end", entry: entry(2, toolResultMessage("msg", { durationMs: 0 })) },
+    { type: "tool_execution_start", toolCallId: "none", toolName: "bash", args: {} },
+    { type: "tool_execution_end", toolCallId: "none", toolName: "bash" },
+  ] as never);
+  const items = toolItems(transcript);
+  assert.deepEqual(items.map((t) => [t.toolCallId, t.durationMs, t.inProgress]), [
+    ["live", 2000, false], ["msg", 0, false], ["none", undefined, false],
+  ]);
+});

@@ -50,9 +50,12 @@ export type TranscriptItem =
       isError?: boolean;
       /** True while the corresponding tool slot is still running. */
       inProgress?: boolean;
-      /** Real call/result timestamps from the transcript, when the source records both. */
-      startedAt?: number;
-      endedAt?: number;
+      /**
+       * Authoritative execution time from `ToolResultMessage.durationMs`.
+       * Finite and nonnegative (0 is valid); absent when the source recorded
+       * none. Never inferred from call/result timestamps.
+       */
+      durationMs?: number;
       timestamp: string;
     }
   | { type: "system"; text: string; timestamp: string };
@@ -97,6 +100,7 @@ interface JsonlEntry {
     content?: unknown;
     toolCallId?: string;
     toolName?: string;
+    durationMs?: unknown;
     details?: unknown;
     isError?: boolean;
     stopReason?: string;
@@ -106,6 +110,11 @@ interface JsonlEntry {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** Accept only a finite, nonnegative duration; anything else is treated as absent. */
+export function authoritativeDurationMs(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
 }
 
 function extractText(content: unknown): string {
@@ -339,7 +348,6 @@ export function readTaskSessionFile(file: string): TranscriptReadResult {
     if (entry.type !== "message" || !entry.message) continue;
     const msg = entry.message;
     const timestamp = entry.timestamp ?? "";
-    const timestampMs = Date.parse(timestamp);
     totalMessages++;
     hasUsage = addSessionUsage(usage, msg.usage) || hasUsage;
     if (msg.role === "user") userMessages++;
@@ -373,7 +381,6 @@ export function readTaskSessionFile(file: string): TranscriptReadResult {
           toolCallId: call.id,
           args: call.arguments,
           timestamp,
-          ...(Number.isFinite(timestampMs) ? { startedAt: timestampMs } : {}),
           inProgress: true,
         };
         pendingTools.set(call.id, item);
@@ -382,16 +389,14 @@ export function readTaskSessionFile(file: string): TranscriptReadResult {
     } else if (msg.role === "toolResult" && msg.toolCallId) {
       const text = stripAnsiCodes(extractText(msg.content));
       const details = isRecord(msg.details) ? msg.details : undefined;
+      const durationMs = authoritativeDurationMs(msg.durationMs);
       const existing = pendingTools.get(msg.toolCallId);
       if (existing) {
         existing.result = text || undefined;
         if (details) existing.details = details;
         existing.isError = Boolean(msg.isError);
         existing.inProgress = false;
-        // Real wall-clock duration for the built-in Took renderer.
-        if (Number.isFinite(timestampMs) && Number.isFinite(existing.startedAt) && timestampMs >= existing.startedAt!) {
-          existing.endedAt = timestampMs;
-        }
+        if (durationMs !== undefined) existing.durationMs = durationMs;
         pendingTools.delete(msg.toolCallId);
       } else {
         // Tool result without a paired call (older files or resumed sessions):
@@ -402,6 +407,7 @@ export function readTaskSessionFile(file: string): TranscriptReadResult {
           toolCallId: msg.toolCallId,
           args: {},
           ...(details ? { details } : {}),
+          ...(durationMs === undefined ? {} : { durationMs }),
           result: text || undefined,
           isError: Boolean(msg.isError),
           timestamp,

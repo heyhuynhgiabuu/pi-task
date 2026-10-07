@@ -30,7 +30,7 @@ import {
   type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
 
-import type { TranscriptItem } from "./transcript.js";
+import { authoritativeDurationMs, type TranscriptItem } from "./transcript.js";
 
 /** What a row of the pane's last render maps to, for native mouse routing. */
 export interface TaskTranscriptPaneHit {
@@ -191,35 +191,43 @@ export function createTaskTranscriptPane(
           tui,
           opts.cwd,
         );
-        // Settled historical items must not synthesize a duration:
-        // markExecutionStarted stamps startedAt=now, so a completed tool
-        // would always render "Took 0.0s". Instead, feed the renderer the
-        // real persisted call/result timestamps when the transcript has both;
-        // live items keep the ticker.
+        // Settled items must not synthesize a duration: markExecutionStarted
+        // stamps startedAt=now, so a completed tool would render "Took 0.0s".
+        // Only live items start the ticker; settled items show the
+        // authoritative `durationMs` or nothing (0 is a valid duration).
+        const durationMs = authoritativeDurationMs(item.durationMs);
         if (item.inProgress === true) {
           tool.markExecutionStarted();
-        } else if (item.startedAt !== undefined && item.endedAt !== undefined) {
+        } else if (durationMs !== undefined) {
+          // COMPAT SHIM (pi-coding-agent 1.0.4): `ToolExecutionComponent` has no
+          // public duration input, and the built-in shell renderer computes
+          // "Took" from private `rendererState.startedAt/endedAt`. Seed them
+          // from authoritative `durationMs` ONLY (never call/result timestamp
+          // deltas) so the real duration renders now. Newer pi forwards
+          // `durationMs` via updateResult below; remove this shim after the
+          // minimum supported pi does.
           const state = (tool as unknown as {
             rendererState?: { startedAt?: number; endedAt?: number };
           }).rendererState;
           if (state) {
-            state.startedAt = item.startedAt;
-            state.endedAt = item.endedAt;
+            state.startedAt = 0;
+            state.endedAt = durationMs;
           }
         }
         // Expansion belongs to this view, never the host's interactive mode.
         tool.setExpanded(toolExpansionOverrides.get(item.toolCallId) ?? toolsExpanded);
         if (item.result !== undefined || item.inProgress === false) {
-          tool.updateResult(
-            {
-              content: [{ type: "text", text: item.result ?? "" }],
-              // Pi's renderers read `details` (edit draws its diff from it); the
-              // projections keep it on the item, so hand it over unchanged.
-              ...(item.details === undefined ? {} : { details: item.details }),
-              isError: Boolean(item.isError),
-            },
-            item.inProgress ?? false,
-          );
+          // `durationMs` is public on newer pi's updateResult; 1.0.4 typings omit
+          // it, so pass through a widened local (excess-property check is literal-only).
+          const result: Parameters<typeof tool.updateResult>[0] & { durationMs?: number } = {
+            content: [{ type: "text", text: item.result ?? "" }],
+            // Pi's renderers read `details` (edit draws its diff from it); the
+            // projections keep it on the item, so hand it over unchanged.
+            ...(item.details === undefined ? {} : { details: item.details }),
+            isError: Boolean(item.isError),
+            ...(durationMs === undefined ? {} : { durationMs }),
+          };
+          tool.updateResult(result, item.inProgress ?? false);
         }
         comp = tool;
       }

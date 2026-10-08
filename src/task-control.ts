@@ -22,6 +22,16 @@ export type TaskLifecycleStatus =
 
 export type TaskControlSource = "active" | "registry" | "history";
 
+/**
+ * Single source for the reviewer handoff gate: runtime validation below and
+ * the task-tool roster marker in helpers.ts must agree on which agent types
+ * require parent_context/proposed_changes, or the marker would advertise a
+ * rule the parser does not enforce (or miss one it does).
+ */
+export function requiresReviewHandoff(agentType: string): boolean {
+  return agentType === "reviewer";
+}
+
 export interface TaskControlRequest {
   operation: "status" | "cancel";
   taskId: string;
@@ -280,7 +290,7 @@ function validateTaskStartRequest(value: unknown): TaskStartValidation {
 
   const parentContext = suppliedParentContext ?? parsedPromptHandoff.parentContext;
   const proposedChanges = suppliedProposedChanges ?? parsedPromptHandoff.proposedChanges;
-  if (candidate.agent_type === "reviewer") {
+  if (typeof candidate.agent_type === "string" && requiresReviewHandoff(candidate.agent_type)) {
     const missing: string[] = [];
     if (!parentContext) missing.push("parent_context");
     if (!proposedChanges?.length) missing.push("proposed_changes");

@@ -12,6 +12,7 @@ import {
   resolveAgentToolAllowlist,
 } from "./agent-tools.js";
 import { parseMergedDisallowedTools } from "./policy.js";
+import { requiresReviewHandoff } from "./task-control.js";
 import {
   TASK_BACKGROUND_RECEIPT_GUIDANCE,
   TASK_TIMEOUT_MS,
@@ -1008,7 +1009,12 @@ export function buildTaskToolDescription(agents: AgentConfig[]): string {
 export function formatAgentList(agents: AgentConfig[]): string {
   if (agents.length === 0) return "none available";
   return agents
-    .map((a) => `${a.name}: ${stripProactivePrefix(a.description)}`)
+    .map((a) => {
+      const marker = requiresReviewHandoff(a.name)
+        ? " [requires parent_context + proposed_changes]"
+        : "";
+      return `${a.name}: ${stripProactivePrefix(a.description)}${marker}`;
+    })
     .join("\n");
 }
 

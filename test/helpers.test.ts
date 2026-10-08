@@ -1206,6 +1206,33 @@ import {
 }
 
 {
+  const t = "formatAgentList marks the reviewer handoff requirement on reviewer lines only";
+  const agents: AgentConfig[] = [
+    {
+      name: "reviewer",
+      description: "Independent audit",
+      body: "",
+      source: "project",
+      path: "/a",
+    },
+    {
+      name: "general",
+      description: "Multi-step implementer",
+      body: "",
+      source: "user",
+      path: "/b",
+    },
+  ];
+  const r = formatAgentList(agents);
+  assert.match(
+    r,
+    /reviewer: Independent audit \[requires parent_context \+ proposed_changes\]/,
+    t + " marker on reviewer",
+  );
+  assert.ok(!r.includes("general: Multi-step implementer ["), t + " no marker on other agents");
+}
+
+{
   const t = "PROACTIVE block lists agent names without repeating their descriptions";
   const agents: AgentConfig[] = [
     {

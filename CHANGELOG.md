@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [0.11.3] - 2026-10-08
 
+### Changed
+
+- Task-tool roster lines mark agents that require the reviewer handoff fields
+  (`[requires parent_context + proposed_changes]`), sharing the same rule as
+  runtime validation so the marker and the parser cannot drift.
+
 ### Fixed
 
 - `conversation_id` now works on the durable backend without HerdR or tmux:

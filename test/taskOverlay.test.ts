@@ -221,7 +221,7 @@ function createOverlayContext() {
       if (typeof value === "function") widgetFactory = value as never;
       else if (value === undefined) widgetFactory = undefined;
     },
-    getEditorComponent: () => undefined,
+    getEditorComponent: () => editorFactory,
     setEditorComponent: (factory: never) => {
       editorFactory = factory;
     },
@@ -480,6 +480,52 @@ test("agents switcher falls back to the modal when another extension owns the ed
   assert.ok(lines.some((l) => l.includes("main") && l.includes("(shown)")), JSON.stringify(lines));
   overlay.handleInput("\x1b");
   assert.equal(await pending, true, "esc closes the fallback switcher");
+  controller.dispose();
+});
+
+test("inline agents picker scrolls with arrows when our editor still owns input", async () => {
+  const rows = new Map(Array.from({ length: 43 }, (_, i) => [`t${i}`, makeTask({ description: `task ${i}` })]));
+  const controller = createTaskWidgetController(rows, new Map());
+  const { context, getFactory, createEditor, customCalls } = createOverlayContext();
+  controller.ensureTaskWidget(context);
+  await controller.openAgentSwitcher(context);
+  const widget = getFactory()!({ terminal: { rows: 40 }, requestRender() {} }, null);
+  const editor = createEditor()!;
+  for (let i = 0; i < 43; i += 1) editor.handleInput(DOWN);
+  let lines = widget.render(120);
+  assert.ok(lines.length <= 18, "inline list fits its terminal row budget");
+  assert.ok(lines.find((line) => line.includes("❯"))?.includes("#t42"));
+  editor.handleInput(UP);
+  lines = widget.render(120);
+  assert.ok(lines.find((line) => line.includes("❯"))?.includes("#t41"));
+  assert.equal(customCalls.length, 0, "owned editor keeps the inline picker");
+  controller.dispose();
+});
+
+test("agents switcher captures arrows after another extension replaces our editor", async () => {
+  const controller = createTaskWidgetController(new Map([["t1", makeTask()]]), new Map());
+  const { context, customCalls } = createOverlayContext();
+  controller.ensureTaskWidget(context);
+  const installed = context.ui.getEditorComponent();
+  assert.equal(typeof installed, "function");
+  // Like pi-pretty's session_start: ownership changes AFTER our installation.
+  context.ui.setEditorComponent(() => ({ handleInput() {} }));
+  const pending = controller.openAgentSwitcher(context);
+  assert.equal(customCalls.length, 1, "stale installation flag must not choose inline input");
+  const modal = customCalls[0]!;
+  let repaints = 0;
+  const overlay = modal.factory(
+    { terminal: { rows: 40 }, requestRender: () => { repaints += 1; } },
+    null, {}, () => modal.resolve(undefined),
+  );
+  overlay.handleInput(DOWN);
+  assert.ok(renderLines(overlay).find((line) => line.includes("❯"))?.includes("#t1"));
+  overlay.handleInput(UP);
+  assert.ok(renderLines(overlay).find((line) => line.includes("❯"))?.includes("main"));
+  assert.equal(repaints, 2);
+  overlay.handleInput(ESC);
+  assert.equal(await pending, true);
+  assert.notEqual(context.ui.getEditorComponent(), installed, "foreign editor is preserved");
   controller.dispose();
 });
 

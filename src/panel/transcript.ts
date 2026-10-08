@@ -9,7 +9,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { ChildSessionInfo } from "../types.js";
-import type { ChildUsageMetadata } from "./child-metadata.js";
+import { assistantTokensPerSecond, type ChildUsageMetadata } from "./child-metadata.js";
 
 export const MAX_TRANSCRIPT_ITEMS = 400;
 
@@ -306,6 +306,7 @@ export function readTaskSessionFile(file: string): TranscriptReadResult {
   let toolResults = 0;
   let totalMessages = 0;
   let latestCacheHitRate: number | undefined;
+  let latestTokensPerSecond: number | undefined;
   const contextEntries: JsonlEntry[] = [];
 
   const content = readFileSync(file, "utf-8");
@@ -353,6 +354,7 @@ export function readTaskSessionFile(file: string): TranscriptReadResult {
     if (msg.role === "user") userMessages++;
     else if (msg.role === "assistant") {
       assistantMessages++;
+      latestTokensPerSecond = assistantTokensPerSecond(msg);
       toolCalls += extractToolCalls(msg.content).length;
       const promptTokens = promptTokensOf(msg.usage);
       latestCacheHitRate = promptTokens !== undefined && promptTokens > 0 && isRecord(msg.usage)
@@ -471,6 +473,7 @@ export function readTaskSessionFile(file: string): TranscriptReadResult {
       ...(meta.model === undefined ? {} : { model: meta.model }),
       usageTotals: { ...usage },
       ...(latestCacheHitRate === undefined ? {} : { latestCacheHitRate }),
+      ...(latestTokensPerSecond === undefined ? {} : { latestTokensPerSecond }),
       contextUsage: { tokens: contextTokens },
     },
   };

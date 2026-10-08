@@ -270,6 +270,7 @@ export function createTaskWidgetController(
   let taskMonitorVisible = true;
   let agentsSwitcher = false;
   let panelEditorInstalled = false;
+  let panelEditorFactory: ReturnType<ExtensionContext["ui"]["getEditorComponent"]>;
   /** The transcript the picker interrupted, so its row can keep a "(shown)" marker. */
   let switcherShownId: string | null = null;
   let switcherRestoreOverlayId: string | null = null;
@@ -432,6 +433,9 @@ export function createTaskWidgetController(
       ...(source?.latestCacheHitRate === undefined
         ? {}
         : { latestCacheHitRate: source.latestCacheHitRate }),
+      ...(source?.latestTokensPerSecond === undefined
+        ? {}
+        : { latestTokensPerSecond: source.latestTokensPerSecond }),
       contextUsage: {
         tokens: source?.contextUsage?.tokens ?? null,
         ...(contextWindow === undefined ? {} : { contextWindow }),
@@ -1647,7 +1651,7 @@ export function createTaskWidgetController(
     }
   }
 
-  function renderWidget(width: number): string[] {
+  function renderWidget(width: number, maxRows?: number): string[] {
     try {
       // Expire finished rows that outlived their linger window; without this
       // the idle widget would keep a done/failed row forever once the task
@@ -1666,6 +1670,7 @@ export function createTaskWidgetController(
           now: now(),
           width,
           theme: widgetTheme,
+          maxRows,
           ...(agentsSwitcher
             ? {
                 hint: `Switch to: ${panelRows().length + 1} agents — ↑↓ select · enter open · esc close`,
@@ -1764,20 +1769,22 @@ export function createTaskWidgetController(
     // Keyboard access needs the editor wrapper; step aside if another
     // extension owns a custom editor (the widget stays display-only).
     // Hosts without the editor APIs just get the display-only widget.
+    panelEditorInstalled = false;
     if (
-      targetCtx.hasUI &&
-      typeof targetCtx.ui.getEditorComponent === "function" &&
-      typeof targetCtx.ui.setEditorComponent === "function" &&
-      !targetCtx.ui.getEditorComponent()
-    ) {
-      panelEditorInstalled = true;
-      ignoreStaleExtensionCtx(() =>
-        targetCtx.ui.setEditorComponent(
-          (tui, theme, keybindings) =>
-            new TaskPanelEditor(tui, theme, keybindings, host),
-        ),
-      );
+      !targetCtx.hasUI ||
+      typeof targetCtx.ui.getEditorComponent !== "function" ||
+      typeof targetCtx.ui.setEditorComponent !== "function"
+    ) return;
+    const currentFactory = targetCtx.ui.getEditorComponent();
+    if (currentFactory) {
+      // Another extension can replace our editor after session_start.
+      panelEditorInstalled = currentFactory === panelEditorFactory;
+      return;
     }
+    panelEditorFactory ??= (tui, theme, keybindings) =>
+      new TaskPanelEditor(tui, theme, keybindings, host);
+    ignoreStaleExtensionCtx(() => targetCtx.ui.setEditorComponent(panelEditorFactory));
+    panelEditorInstalled = true;
   }
 
   function ensureTaskWidget(targetCtx: ExtensionContext): void {
@@ -1793,7 +1800,12 @@ export function createTaskWidgetController(
             widgetTheme = theme ?? null;
             requestWidgetRender = () => tui.requestRender();
             return {
-              render: (width: number) => renderWidget(width),
+              render: (width: number) => renderWidget(
+                width,
+                tui.terminal?.rows > 0
+                  ? Math.max(6, Math.min(24, Math.floor(tui.terminal.rows * 0.4)))
+                  : undefined,
+              ),
               invalidate: requestRender,
               dispose: () => {
                 widgetTheme = null;
@@ -1859,7 +1871,7 @@ export function createTaskWidgetController(
     overlayOpen = true;
     try {
       await targetCtx.ui.custom(
-        (_tui, theme, _keybindings, done) =>
+        (tui, theme, _keybindings, done) =>
           new TaskOverlay(
             {
               getRows: () => panelRows(),
@@ -1876,11 +1888,20 @@ export function createTaskWidgetController(
                 }
               },
               onClose: () => done(undefined),
-              requestRender,
+              // Request repaint directly, even if no widget factory has run.
+              requestRender: () => tui?.requestRender(),
             },
             theme,
             mode === "agents"
-              ? { mode, getShownTaskId: () => switcherShownId }
+              ? {
+                  mode,
+                  getShownTaskId: () => switcherShownId,
+                  visibleRows: () => {
+                    const rows = tui?.terminal?.rows ?? 0;
+                    if (rows <= 0) return undefined;
+                    return Math.max(6, Math.min(24, Math.floor(rows * 0.4)));
+                  },
+                }
               : {},
           ),
         {

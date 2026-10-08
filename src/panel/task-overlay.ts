@@ -41,6 +41,12 @@ export interface TaskOverlayOptions {
   shownTaskId?: string | null;
   /** Read the shown task live while the overlay is open. */
   getShownTaskId?: () => string | null;
+  /**
+   * Row budget for the list, read per render so terminal resizes apply live.
+   * Without it the panel renders every row and the terminal clips the tail,
+   * leaving long agent lists impossible to navigate.
+   */
+  visibleRows?: () => number | undefined;
 }
 
 /**
@@ -56,6 +62,7 @@ export class TaskOverlay implements Component {
   private readonly mode: "tasks" | "agents";
   private readonly getShownTaskId: () => string | null;
   private selectionFollowsShown = true;
+  private readonly visibleRows: (() => number | undefined) | undefined;
   private box: Box;
 
   constructor(
@@ -66,6 +73,7 @@ export class TaskOverlay implements Component {
     this.theme = theme;
     this.mode = options.mode ?? "tasks";
     this.getShownTaskId = options.getShownTaskId ?? (() => options.shownTaskId ?? null);
+    this.visibleRows = options.visibleRows;
     const rows = host.getRows();
     if (this.mode === "agents") {
       this.selection = this.selectionForShown(rows);
@@ -147,6 +155,7 @@ export class TaskOverlay implements Component {
       ...(this.mode === "agents"
         ? { shownTaskId: this.getShownTaskId(), showTaskIds: true }
         : {}),
+      maxRows: this.visibleRows?.(),
     });
   }
 

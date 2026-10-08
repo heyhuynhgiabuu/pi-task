@@ -1,5 +1,9 @@
 # TODO
 
+- [x] Add authoritative per-response child TPS and prepare verified v0.11.4 with approved picker fixes, advisor example, and prepack cleanup; 678 tests/typecheck/build/smoke pass and independent TPS review has no blockers. Authorized commit/tag/GitHub publication tracked in the work record; npm publish remains manual. Work record: [.pi/artifacts/TODO.md](.pi/artifacts/TODO.md).
+
+- [x] Fix `/agents` arrow-key routing after another extension replaces pi-task's editor; recheck factory ownership and use modal fallback. Window both inline/modal long lists. RED-first regressions and 677 tests/typecheck/build/smoke pass; independent review completed with no blockers; user confirmed the live behavior works well. Work record: [.pi/artifacts/TODO.md](.pi/artifacts/TODO.md).
+
 - [x] Prepare and verify v0.11.2 with Pi 1.1.0 dev pins, child tool padding, and the unreleased child fixes; 665 tests/typecheck/build/smoke and package-content checks pass. GitHub publishing tracked in [.pi/artifacts/TODO.md](.pi/artifacts/TODO.md).
 
 - [x] Simplify issue #29 fixture cleanup without production changes or weakened assertions; 663 tests/typecheck and both independent audits pass.

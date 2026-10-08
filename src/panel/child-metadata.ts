@@ -20,6 +20,8 @@ export interface ChildUsageMetadata {
   usageTotals: ChildUsageTotals;
   /** Cache-hit percent from the latest assistant response, not lifetime totals. */
   latestCacheHitRate?: number;
+  /** Latest completed response: output tokens / request duration, including wait/thinking, excluding tools. */
+  latestTokensPerSecond?: number;
   contextUsage?: ChildContextUsage;
   /** Proven only by the child runtime/provider. */
   usingSubscription?: boolean;
@@ -31,6 +33,24 @@ export interface FormattedChildMetadata {
   usage: string[];
   context: string;
   contextColor?: "warning" | "error";
+}
+
+/** No wall-clock inference: old/deferred responses without recorded timing remain unknown. */
+export function assistantTokensPerSecond(message: {
+  role?: unknown;
+  usage?: unknown;
+  durationMs?: unknown;
+  stopReason?: unknown;
+}): number | undefined {
+  if (message.role !== "assistant" || message.stopReason === "aborted" || message.stopReason === "error") return undefined;
+  const duration = message.durationMs;
+  const usage = message.usage;
+  if (typeof duration !== "number" || !Number.isFinite(duration) || duration <= 0 ||
+    typeof usage !== "object" || usage === null || !("output" in usage)) return undefined;
+  const output = usage.output;
+  if (typeof output !== "number" || !Number.isFinite(output) || output <= 0) return undefined;
+  const rate = output / (duration / 1_000);
+  return Number.isFinite(rate) ? rate : undefined;
 }
 
 /** Pi's compact footer token boundaries. */
@@ -58,6 +78,11 @@ export function formatChildMetadata(metadata: ChildUsageMetadata): FormattedChil
   }
   if (usageTotals.cost || metadata.usingSubscription === true) {
     usage.push(`$${usageTotals.cost.toFixed(3)}${metadata.usingSubscription === true ? " (sub)" : ""}`);
+  }
+
+  if (metadata.latestTokensPerSecond !== undefined &&
+    Number.isFinite(metadata.latestTokensPerSecond) && metadata.latestTokensPerSecond > 0) {
+    usage.push(`TPS ${metadata.latestTokensPerSecond.toFixed(1)}`);
   }
 
   const contextUsage = metadata.contextUsage;

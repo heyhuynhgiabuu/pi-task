@@ -22,7 +22,8 @@ For the full high-quality 89s @ 56 fps version, [download the MP4](https://githu
 - Agent frontmatter support: `model`, `thinking`, `fast`, `skills`, `tools`, `disallowed_tools`.
 - Per-call thinking control: an optional task `thinking` value uses Pi's canonical levels when the agent leaves `thinking` unset; frontmatter remains authoritative when present.
 - Task-local OpenAI/OpenAI-Codex Fast Mode: apply priority service tier to configured models without changing model, thinking level, or shared configuration.
-- Built-in starter agents: `scout`, `explore`, `general`, `reviewer`.
+- Child transcript stats show `TPS` for the latest completed assistant response when recorded timing exists: output tokens / response duration (including request wait and thinking, excluding tool execution). Legacy/deferred responses without duration show no TPS.
+- Built-in starter agents: `advisor`, `scout`, `explore`, `general`, `reviewer`.
 - Project/user agent overrides via `.pi/agents/*.md` or `~/.pi/agent/agents/*.md`.
 
 ## Install
@@ -181,7 +182,7 @@ For `compare: true`, the effective allowlist must contain only known non-mutatin
 
 If Pi restarts while a background comparison is still running, recovery rebuilds the group from durable records and replays the grouped report into the session that loads the extension after the restart (the new session), not the one that launched it. The report is delivered at most once per group; an already-delivered group is marked in `task-session-history.json` and never replayed.
 
-Bundled agents in `agents/`: `explore`, `scout`, `general`, `reviewer`. They declare role-specific native skills and defer model selection to the current Pi session; a user or project agent can set `model:` explicitly. Those declared skills must be installed in Pi's skill registry. `readonly` blocks mutating tools (write/edit/apply_patch), not `bash` outside comparison mode.
+Bundled starter agents in `agents/`: `advisor`, `explore`, `scout`, `general`, `reviewer`. They declare role-specific native skills. `advisor` provides read-only advice on concrete design trade-offs and includes preferred model profiles; the other starter agents defer model selection to the current Pi session. A user or project agent can set `model:` explicitly. Those declared skills must be installed in Pi's skill registry. `readonly` blocks mutating tools (write/edit/apply_patch), not `bash` outside comparison mode.
 
 When the child must actually run in another checkout, pass its absolute existing directory as `cwd`; otherwise the child inherits the caller cwd. For a mutating parallel task, the parent creates a Git worktree first, passes that worktree as `cwd`, then reviews, merges, and removes it after the task finishes. pi-task never creates, merges, or removes worktrees, and `workspace_group` only groups HerdR terminals—it is not filesystem isolation.
 

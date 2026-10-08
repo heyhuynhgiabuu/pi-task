@@ -299,6 +299,27 @@ function formatElapsed(startedAt: number, finishedAt: number | undefined, now: n
   return `${secs}s`;
 }
 
+/** Rows of context kept above the selection once a panel scrolls its window. */
+const PANEL_WINDOW_ANCHOR = 3;
+
+/**
+ * The visible slice for a windowed panel list: keep the selection inside the
+ * window, anchoring it `PANEL_WINDOW_ANCHOR` rows from the top once the list
+ * scrolls. `selIdx` below zero (main row selected) pins the window to the top.
+ */
+export function panelWindow(
+  total: number,
+  selIdx: number,
+  budget: number,
+): { start: number; count: number } {
+  const count = Math.max(1, Math.min(budget, total));
+  if (total <= count) return { start: 0, count: total };
+  const minStart = Math.max(0, selIdx - count + 1);
+  const maxStart = Math.min(selIdx, total - count);
+  const start = Math.max(0, Math.min(selIdx - PANEL_WINDOW_ANCHOR, maxStart));
+  return { start: Math.max(start, minStart), count };
+}
+
 export function renderTaskPanel(params: {
   rows: TaskPanelRow[];
   selection: PanelSelection;
@@ -312,6 +333,8 @@ export function renderTaskPanel(params: {
   shownTaskId?: string | null;
   /** Include task IDs in rows when the panel is used as an agent switcher. */
   showTaskIds?: boolean;
+  /** List-line budget including more indicators (excludes hint and main). */
+  maxRows?: number;
 }): string[] {
   const { rows, selection, viewTaskId, now, width, theme } = params;
   const maxWidth = Math.min(width, MAX_WIDTH);
@@ -326,6 +349,20 @@ export function renderTaskPanel(params: {
       ? `viewing @${viewTaskId} — typing goes to the task · ↓ switch · esc back to main`
       : `tasks (${rows.length}) — ↓ to select · enter to view · x to stop/dismiss · esc back`);
 
+  let start = 0;
+  let visible = rows;
+  let moreAbove = 0;
+  let moreBelow = 0;
+  if (params.maxRows !== undefined && rows.length > params.maxRows) {
+    // Reserve both indicator slots up-front so the panel stays bounded; a side
+    // without hidden rows simply renders one line fewer.
+    const count = Math.max(1, params.maxRows - 2);
+    start = panelWindow(rows.length, selIdx, count).start;
+    visible = rows.slice(start, start + count);
+    moreAbove = start;
+    moreBelow = rows.length - start - count;
+  }
+
   const lines = [truncateToWidth(color(theme, "dim", hint), maxWidth, "…")];
   const mainLabel = `  main${params.shownTaskId === null ? " (shown)" : ""}`;
   lines.push(
@@ -335,8 +372,11 @@ export function renderTaskPanel(params: {
       "…",
     ),
   );
-  rows.forEach((row, i) => {
-    const marker = selIdx === i ? "❯" : " ";
+  if (moreAbove > 0) {
+    lines.push(truncateToWidth(color(theme, "dim", `  ↑ ${moreAbove} more`), maxWidth, "…"));
+  }
+  visible.forEach((row, i) => {
+    const marker = selIdx === start + i ? "❯" : " ";
     const icon = color(theme, "accent", panelStatusIcon(row.status));
     const elapsed = formatElapsed(row.startedAt, row.finishedAt, now);
     const activity = row.activity ? ` · ${row.activity}` : "";
@@ -346,5 +386,8 @@ export function renderTaskPanel(params: {
       `${marker} ${icon} ${color(theme, "toolTitle", `${row.agentType}${identity}${shown}`)} — ${row.description}${activity} · ${elapsed}`;
     lines.push(truncateToWidth(text, maxWidth, "…"));
   });
+  if (moreBelow > 0) {
+    lines.push(truncateToWidth(color(theme, "dim", `  ↓ ${moreBelow} more`), maxWidth, "…"));
+  }
   return lines;
 }

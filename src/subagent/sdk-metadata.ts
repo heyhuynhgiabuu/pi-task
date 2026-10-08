@@ -2,7 +2,7 @@ import type {
   AgentSession,
   AgentSessionEvent,
 } from "@earendil-works/pi-coding-agent";
-import type { ChildContextUsage, ChildUsageMetadata } from "../panel/child-metadata.js";
+import { assistantTokensPerSecond, type ChildContextUsage, type ChildUsageMetadata } from "../panel/child-metadata.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -48,6 +48,7 @@ export function subscribeSdkChildMetadata(
 ): () => void {
   let active = true;
   let latestCacheHitRate: number | undefined;
+  let latestTokensPerSecond: number | undefined;
   let contextInvalidated = false;
   let streamedPromptTokens: number | undefined;
   let lastStats = session.getSessionStats();
@@ -86,6 +87,7 @@ export function subscribeSdkChildMetadata(
           cost: lastStats.cost,
         },
         ...(latestCacheHitRate === undefined ? {} : { latestCacheHitRate }),
+        ...(latestTokensPerSecond === undefined ? {} : { latestTokensPerSecond }),
         contextUsage,
         ...(usingSubscription === undefined ? {} : { usingSubscription }),
         autoCompactionEnabled: session.autoCompactionEnabled,
@@ -128,6 +130,7 @@ export function subscribeSdkChildMetadata(
     }
 
     if (event.type === "message_end" && event.message.role === "assistant") {
+      if (!session.isCompacting) latestTokensPerSecond = assistantTokensPerSecond(event.message);
       latestCacheHitRate = cacheHitRate(event.message.usage);
       const measured = promptTokens(event.message.usage);
       if (

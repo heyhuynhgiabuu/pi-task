@@ -14,7 +14,7 @@ const bundledAgentDir = fileURLToPath(new URL("../agents/", import.meta.url));
 
 test("bundled agents have catalog-safe prompts and tools", () => {
   const agents = loadAgentsFromDir(bundledAgentDir, "bundled");
-  assert.equal(agents.length, 5);
+  assert.equal(agents.length, 6);
   for (const agent of agents) {
     assert.notEqual(agent.description, ">", `${agent.name} has a folded description`);
     assert.doesNotMatch(
@@ -36,6 +36,7 @@ test("bundled agents declare role-appropriate native skills", () => {
   const skillsByAgent = new Map(
     loadAgentsFromDir(bundledAgentDir, "bundled").map((agent) => [agent.name, agent.skills]),
   );
+  assert.deepEqual(skillsByAgent.get("advisor"), ["pi-laws", "interface-and-module-design"]);
   assert.deepEqual(skillsByAgent.get("explore"), ["memory"]);
   assert.deepEqual(skillsByAgent.get("general"), [
     "memory",

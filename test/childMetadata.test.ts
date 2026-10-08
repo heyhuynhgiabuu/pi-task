@@ -42,6 +42,48 @@ test("child metadata matches Pi footer token, usage, cache-hit, and context form
   assert.equal(display.contextColor, undefined, "context below 70% has no warning color");
 });
 
+test("child TPS uses only the latest successful assistant response's authoritative duration", () => {
+  const message = {
+    role: "assistant", content: [{ type: "text", text: "answer" }],
+    usage: usage(100, 80, 20, 0, 0.1), stopReason: "stop", durationMs: 2_000,
+  };
+  const entry = { id: "a1", conversationId: "c1", kind: "pi.assistant", model: [message] };
+  const transcript = new DurableTranscript(durableSnapshot([entry] as never, message.usage));
+  assert.equal(transcript.usageMetadata().latestTokensPerSecond, 40);
+  assert.ok(formatChildMetadata(transcript.usageMetadata()).usage.includes("TPS 40.0"));
+  const midGeneration = new DurableTranscript({
+    ...durableSnapshot([entry] as never, message.usage),
+    generation: { message: { ...message, durationMs: undefined } },
+  } as unknown as SnapshotEvent);
+  assert.equal(midGeneration.usageMetadata().latestTokensPerSecond, 40, "reattach during generation retains the last completed response's TPS");
+
+  const dir = mkdtempSync(join(tmpdir(), "pi-task-child-tps-"));
+  const file = join(dir, "child.jsonl");
+  try {
+    writeFileSync(file, JSON.stringify({ type: "message", id: "a1", parentId: null, message }) + "\n");
+    assert.equal(readTaskSessionFile(file).childMetadata?.latestTokensPerSecond, 40);
+    appendFileSync(file, JSON.stringify({
+      type: "message", id: "tool", parentId: "a1",
+      message: { role: "toolResult", content: "slow tool", durationMs: 60_000 },
+    }) + "\n");
+    assert.equal(readTaskSessionFile(file).childMetadata?.latestTokensPerSecond, 40, "tool time cannot dilute TPS");
+    for (const patch of [{ durationMs: undefined }, { durationMs: 0 }, { durationMs: -1 },
+      { durationMs: Number.NaN }, { stopReason: "aborted" }, { stopReason: "error" },
+      { usage: { ...message.usage, output: 0 } }]) {
+      const next = { ...message, ...patch };
+      transcript.apply([{ type: "message_end", entry: { ...entry, model: [next] } } as never]);
+      assert.equal(transcript.usageMetadata().latestTokensPerSecond, undefined);
+      assert.ok(!formatChildMetadata(transcript.usageMetadata()).usage.some((part) => part.startsWith("TPS")));
+    }
+    appendFileSync(file, JSON.stringify({
+      type: "message", id: "legacy", parentId: "tool", message: { ...message, durationMs: undefined },
+    }) + "\n");
+    assert.equal(readTaskSessionFile(file).childMetadata?.latestTokensPerSecond, undefined, "never reuse an older rate for an unmeasured response");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("child context colors use Pi's strict 70/90 percent boundaries and unknowns stay unknown", () => {
   const line = (tokens: number | null, contextWindow = 100): ReturnType<typeof formatChildMetadata> =>
     formatChildMetadata({ usageTotals: zeroTotals, contextUsage: { tokens, contextWindow } });
@@ -327,7 +369,8 @@ test("SDK child metadata uses the child's runtime, refreshes per message, and in
 
   context = { tokens: 100, contextWindow: 100, percent: 100 };
   stats = { tokens: { input: 30, output: 3, cacheRead: 100, cacheWrite: 0 }, cost: 0.04 };
-  listener?.({ type: "message_end", message: { role: "assistant", usage: usage(30, 3, 100, 0, 0.04), stopReason: "stop" } });
+  listener?.({ type: "message_end", message: { role: "assistant", usage: usage(30, 3, 100, 0, 0.04), stopReason: "stop", durationMs: 1_500 } });
+  assert.equal(seen.at(-1)?.latestTokensPerSecond, 2, "SDK TPS measures only the completed response");
   assert.deepEqual(seen.at(-1)?.contextUsage, { tokens: 100, contextWindow: 100 }, "post-compaction response remeasures context");
   assert.equal(seen.at(-1)?.usageTotals.input, 30);
   assert.equal(statsReads, 2, "a completed message refreshes cumulative child session stats");
@@ -383,6 +426,7 @@ test("widget metadata stays attached to child A, resolves only A's model window,
   controller.ensureTaskWidget(context);
   const metadataA: ChildUsageMetadata = {
     model: "provider-a/child-a",
+    latestTokensPerSecond: 40,
     usageTotals: { input: 1_000, output: 20, cacheRead: 0, cacheWrite: 0, cost: 0.01 },
     contextUsage: { tokens: 5_000 },
   };
@@ -405,7 +449,7 @@ test("widget metadata stays attached to child A, resolves only A's model window,
 
   try {
     const first = strip();
-    assert.match(first, /↑1\.0k .*50\.0%\/10k/, "child A stats use A's exact model context window");
+    assert.match(first, /↑1\.0k .*TPS 40\.0 .*50\.0%\/10k/, "child A forwards its own TPS and exact model context window");
     assert.doesNotMatch(first, /18k|20\.0k|90\.0%\/20k|999k/, "neither child B nor the parent session leaks into A's line");
 
     controller.setLiveTranscript(
@@ -423,7 +467,7 @@ test("widget metadata stays attached to child A, resolves only A's model window,
         contextUsage: { tokens: null },
       },
     );
-    assert.match(strip(), /↑2\.0k .*\$0\.020 \?\/10k/, "child A's new metadata appears without scanning parent or sibling state");
+    assert.match(strip(), /↑2\.0k .*\$0\.020 .*\?\/10k/, "child A's new metadata appears without scanning parent or sibling state");
   } finally {
     controller.dispose();
   }

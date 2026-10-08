@@ -6,6 +6,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.11.4] - 2026-10-09
+
+### Added
+
+- Child transcript stats display TPS for the latest completed assistant response
+  using recorded output tokens and response duration, excluding tool time.
+  Durable, SDK, and persisted Pi JSONL metadata share the calculation; legacy,
+  deferred, aborted, errored, or untimed responses do not fabricate a rate.
+- Bundled read-only `advisor` example agent for concrete design trade-offs and
+  stalled approaches.
+
+### Fixed
+
+- `/agents` rechecks current editor ownership before opening the inline picker.
+  If another extension replaced pi-task's editor after initialization, it opens
+  the keyboard-capturing modal instead of an inline picker that cannot receive
+  arrow keys, without overwriting the other extension's editor.
+
+- `/agents` switcher and the focused task panel now window long lists around
+  the selection with `↑/↓ N more` indicators instead of rendering every row
+  and letting the terminal clip the tail, which made rows past the screen edge
+  unreachable by keyboard.
+
+- `prepack` now wipes `dist/` before building, so stale compiled modules
+  cannot re-enter published tarballs (the v0.11.3 npm tarball carried an
+  unused stale module; runtime was unaffected).
+
 ## [0.11.3] - 2026-10-08
 
 ### Changed

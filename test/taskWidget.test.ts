@@ -290,6 +290,81 @@ test("renderTaskPanel truncates rows to the terminal width", () => {
   }
 });
 
+function longRows(count: number) {
+  return Array.from({ length: count }, (_, i) => ({
+    id: `t${i}`,
+    agentType: "general",
+    description: `task ${i}`,
+    status: "done" as const,
+    startedAt: 1000,
+    finishedAt: 2000,
+  }));
+}
+
+test("renderTaskPanel windows long lists around the selection with more indicators", () => {
+  const lines = renderTaskPanel({
+    rows: longRows(43),
+    selection: { taskId: "t20" },
+    viewTaskId: null,
+    now: 10_000,
+    width: 120,
+    maxRows: 20,
+  });
+  assert.ok(
+    lines.length <= 22,
+    `expected a bounded panel, got ${lines.length} lines`,
+  );
+  const selected = lines.find((line) => line.includes("task 20"));
+  assert.ok(selected, "the selected row must stay visible");
+  assert.match(selected ?? "", /❯/);
+  assert.match(lines.join("\n"), /\u2191 \d+ more/);
+  assert.match(lines.join("\n"), /\u2193 \d+ more/);
+  assert.doesNotMatch(lines.join("\n"), /task 0\b/);
+});
+
+test("renderTaskPanel keeps the last row reachable without a lower indicator", () => {
+  const lines = renderTaskPanel({
+    rows: longRows(43),
+    selection: { taskId: "t42" },
+    viewTaskId: null,
+    now: 10_000,
+    width: 120,
+    maxRows: 20,
+  });
+  const selected = lines.find((line) => line.includes("task 42"));
+  assert.ok(selected, "the last row must be visible when selected");
+  assert.match(selected ?? "", /❯/);
+  assert.match(lines.join("\n"), /\u2191 \d+ more/);
+  assert.doesNotMatch(lines.join("\n"), /\u2193 \d+ more/);
+});
+
+test("renderTaskPanel keeps short lists untouched when a budget is set", () => {
+  const lines = renderTaskPanel({
+    rows: longRows(3),
+    selection: { taskId: "t1" },
+    viewTaskId: null,
+    now: 10_000,
+    width: 120,
+    maxRows: 20,
+  });
+  assert.equal(lines.length, 5);
+  assert.doesNotMatch(lines.join("\n"), /[\u2191\u2193] \d+ more/);
+});
+
+test("renderTaskPanel anchors the window at the top when main is selected", () => {
+  const lines = renderTaskPanel({
+    rows: longRows(43),
+    selection: "main",
+    viewTaskId: null,
+    now: 10_000,
+    width: 120,
+    maxRows: 20,
+  });
+  assert.match(lines[2] ?? "", /task 0/);
+  assert.doesNotMatch(lines.join("\n"), /\u2191 \d+ more/);
+  assert.match(lines.join("\n"), /\u2193 \d+ more/);
+});
+
 test("finished section renders failure/abort icons instead of a green check", () => {
   const failedLines = renderTaskWidget({
     foregroundTasks: [],

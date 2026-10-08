@@ -6,7 +6,7 @@ import type {
 } from "@earendil-works/pi-durable";
 import type { Message } from "@earendil-works/pi-ai";
 import type { ChildHistoryOption } from "../types.js";
-import type { ChildUsageMetadata } from "./child-metadata.js";
+import { assistantTokensPerSecond, type ChildUsageMetadata } from "./child-metadata.js";
 import { MAX_TRANSCRIPT_ITEMS, authoritativeDurationMs, type TranscriptItem } from "./transcript.js";
 
 // Persisted pi-durable entry kinds (entries.ts, 1.0.4). Keep runtime imports
@@ -201,6 +201,7 @@ export class DurableTranscript {
   private agent: DurableChildAgent = {};
   private usageState: UsageState = { models: {}, tools: {} };
   private latestCacheHitRate: number | undefined;
+  private latestTokensPerSecond: number | undefined;
   private contextTokens: number | null = null;
   private compactionInProgress = false;
   private partialAssistantIndex: number | undefined;
@@ -235,6 +236,7 @@ export class DurableTranscript {
       ...(this.latestCacheHitRate === undefined
         ? {}
         : { latestCacheHitRate: this.latestCacheHitRate }),
+      ...(this.latestTokensPerSecond === undefined ? {} : { latestTokensPerSecond: this.latestTokensPerSecond }),
       contextUsage: { tokens: this.contextTokens },
     };
   }
@@ -353,6 +355,7 @@ export class DurableTranscript {
     this.setAgentState(snapshot.agent);
     this.usageState = snapshot.usage ?? { models: {}, tools: {} };
     this.latestCacheHitRate = undefined;
+    this.latestTokensPerSecond = undefined;
     this.contextTokens = null;
     this.compactionInProgress = false;
     this.transcript = [];
@@ -370,7 +373,8 @@ export class DurableTranscript {
     if (snapshot.generation?.message) {
       const message = snapshot.generation.message as Message;
       this.rememberSnapshotToolCalls(message);
-      this.observeMessageMetadata(message);
+      // An in-flight snapshot has no final response timing yet.
+      if (message.role === "assistant") this.observeAssistantUsage(message.usage);
       this.writePartialAssistant(message);
     }
     for (const slot of snapshot.tools) {
@@ -406,7 +410,10 @@ export class DurableTranscript {
   }
 
   private observeMessageMetadata(message: Message): void {
-    if (message.role === "assistant") this.observeAssistantUsage(message.usage, message.stopReason);
+    if (message.role === "assistant") {
+      this.observeAssistantUsage(message.usage, message.stopReason);
+      if (!this.compactionInProgress) this.latestTokensPerSecond = assistantTokensPerSecond(message);
+    }
   }
 
   private observeAssistantUsage(value: unknown, stopReason?: string): void {

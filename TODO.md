@@ -1,5 +1,9 @@
 # TODO
 
+- [x] Simplify issue #29 fixture cleanup without production changes or weakened assertions; 663 tests/typecheck and both independent audits pass.
+
+- [x] Fix issue #29 by preserving native APPEND_SYSTEM discovery in Pi CLI children; verified on Pi 1.0.4 with 663 tests and independent review. Legacy hook contract covered; full Pi 1.0.0 runtime unverified. Work record: [.pi/artifacts/TODO.md](.pi/artifacts/TODO.md).
+
 - [x] Fix the child overlay blur band. Root cause (worker muwcevcf-d687, byte+pixel+Ghostty-source confirmed): pi's Assistant/UserMessageComponents prefix OSC 133;A semantic-prompt markers to their first line; the overlay's 1-cell left padding lands the marker at column 1, and spec-compliant terminals (OSC 133;A = fresh line: CR+index when x!=0; Ghostty Terminal.zig:2258-2276) abandon the rest of the row at default background — the grey blur band. Fix committed `aeaa4e2`: strip OSC 133 markers from pane lines (theme-independent, covers all pane subviews). Upstream report to pi recommended (those components emit OSC 133;A on their first line, breaking hosts that render them with left padding). Full gates 639/639 pass; awaiting user visual confirmation.
 - [x] Drop the synthetic "Took 0.0s" from settled historical tool rows (the remaining visible render artifact in the 12:40 screenshot). Committed `99c473c`: the pane only stamps execution start for live items (`inProgress === true`), so completed tools no longer fabricate a duration; live Elapsed ticker preserved and covered by tests. Full gates 633/633, typecheck/build/diff-check pass. User must /reload to pick this up.
 - [x] Restore subagent-configured tools on the durable backend without weakening containment. Committed `a176382`.

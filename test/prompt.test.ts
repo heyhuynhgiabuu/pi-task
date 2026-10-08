@@ -565,7 +565,8 @@ if (process.platform !== "win32") {
     // launch (system prompt path, initial prompt, watcher) instead.
     const scriptPath = command.replace(/^'/, "").replace(/'$/, "");
     const script = readFileSync(scriptPath, "utf8");
-    assert.ok(script.includes("--append-system-prompt"), t + " script contains pi argv");
+    assert.ok(script.includes("--task-role-prompt="), t + " script contains the child role flag");
+    assert.ok(!script.includes("--append-system-prompt"), t + " native append discovery stays enabled");
     assert.ok(script.includes("Check the huge prompt launch"), t + " script contains the task prompt");
   } finally {
     shutdown?.();

@@ -103,7 +103,7 @@ test("terminal argv isolates every fast task and preserves env-controlled isolat
     assert.equal(fastArgs.filter((arg) => arg === "--no-extensions").length, 1);
     assert.equal(normalArgs.filter((arg) => arg === "--no-extensions").length, 0);
     assert.equal(normalArgs.includes("--fast"), false);
-    assert.equal(normalArgs.includes("/fork/dist/index.js"), false);
+    assert.equal(normalArgs.includes("/fork/dist/index.js"), true, "normal children also load the role hook");
     assert.equal(fastArgs.includes("--model"), false);
     assert.equal(fastArgs.includes("--thinking"), false);
 
@@ -128,11 +128,10 @@ test("resuming terminal argv requires a resolved JSONL path", () => {
     resume: true,
     resumeSessionRef: "/tmp/task-fast-test/session.jsonl",
   });
-  assert.deepEqual(args.slice(-5), [
+  assert.deepEqual(args.slice(-4), [
     "--session",
     "/tmp/task-fast-test/session.jsonl",
-    "--append-system-prompt",
-    "",
+    "--task-role-prompt=",
     "perform the task",
   ]);
 });

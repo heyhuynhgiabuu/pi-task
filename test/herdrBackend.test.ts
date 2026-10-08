@@ -55,7 +55,8 @@ test("HerdR Pi argv defers the raw task prompt instead of using a file attachmen
     args.every((arg) => !/[\u0000-\u001f\u007f]/u.test(arg)),
     "HerdR rejects agent argv containing control characters",
   );
-  assert.ok(args.includes("/repo/.pi/tasks/reviewer/agent-system-prompt.md"));
+  assert.ok(args.includes("--task-role-prompt=/repo/.pi/tasks/reviewer/agent-system-prompt.md"));
+  assert.ok(!args.includes("--append-system-prompt"));
   assert.ok(!args.some((arg) => arg.startsWith("@")));
   assert.ok(!args.includes("# Task\n\nReview the current diff."));
   assert.ok(!args.includes(agent.body));

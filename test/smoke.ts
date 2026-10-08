@@ -130,9 +130,10 @@ try {
   assert.ok(args.includes(sessionDir), "buildPiArgs includes session dir");
   assert.ok(!args.includes("--session"), "no --session for fresh task");
   assert.ok(
-    args.includes("--append-system-prompt"),
-    "buildPiArgs includes --append-system-prompt",
+    args.some((arg) => arg.startsWith("--task-role-prompt=")),
+    "buildPiArgs includes the child role prompt",
   );
+  assert.ok(!args.includes("--append-system-prompt"), "native append discovery stays enabled");
   console.log("  PASS: buildPiArgs fresh");
 
   // Test buildPiArgs (resume task — includes --session)

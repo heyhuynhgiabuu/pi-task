@@ -2,12 +2,19 @@
  * Build child CLI argv for subagent spawns (pi / Claude Code runtimes).
  */
 
+import { fileURLToPath } from "node:url";
 import type { AgentConfig } from "../helpers.js";
+import { TASK_ROLE_PROMPT_FLAG } from "./child-role-prompt.js";
 import {
   parseToolList,
   resolveAgentToolAllowlist,
   resolveClaudeToolPolicy,
 } from "../agent-tools.js";
+
+const DEFAULT_TASK_EXTENSION_PATH = fileURLToPath(new URL(
+  import.meta.url.endsWith(".ts") ? "../index.ts" : "../index.js",
+  import.meta.url,
+));
 
 export type ChildRuntime = "pi" | "claude";
 
@@ -29,6 +36,7 @@ export interface BuildPiArgvOptions {
   /** Absolute skill paths passed to Pi's repeatable --skill option. */
   skillPaths?: string[];
   fast?: boolean;
+  /** Pi-task entry loaded for child role injection and the optional fast bridge. */
   fastExtensionPath?: string;
   /**
    * Extensions that must load even when discovery is disabled (--no-extensions).
@@ -62,17 +70,20 @@ export function buildPiArgv(opts: BuildPiArgvOptions): string[] {
       "This Pi child has MCP tools selected, but extension loading is disabled; enable extension loading to use MCP.",
     );
   }
+  if (opts.fast && !opts.fastExtensionPath) {
+    throw new Error("Fast task launch requires the pi-task extension path");
+  }
+  if (noDiscovery) args.push("--no-extensions");
+  const taskExtensionPath = opts.fastExtensionPath ?? DEFAULT_TASK_EXTENSION_PATH;
+  args.push("--extension", taskExtensionPath);
+  if (opts.fast) args.push("--fast");
   if (noDiscovery) {
-    args.push("--no-extensions");
+    const extensions = new Set([taskExtensionPath]);
     for (const extensionPath of opts.requiredExtensions ?? []) {
+      if (extensions.has(extensionPath)) continue;
+      extensions.add(extensionPath);
       args.push("--extension", extensionPath);
     }
-  }
-  if (opts.fast) {
-    if (!opts.fastExtensionPath) {
-      throw new Error("Fast task launch requires the pi-task extension path");
-    }
-    args.push("--extension", opts.fastExtensionPath, "--fast");
   }
   if (selectedMcpTools.length === 0) args.push("--no-mcp");
   if (agent.model) args.push("--model", agent.model);
@@ -89,10 +100,9 @@ export function buildPiArgv(opts: BuildPiArgvOptions): string[] {
     }
     args.push("--session", opts.resumeSessionRef);
   }
-  args.push(
-    "--append-system-prompt",
-    opts.promptLaunch?.systemPromptPath ?? agent.body,
-  );
+  // The built-in append flag replaces native APPEND_SYSTEM discovery. The child
+  // extension instead layers its role after Pi has resolved cwd and trust.
+  args.push(`--${TASK_ROLE_PROMPT_FLAG}=${opts.promptLaunch?.systemPromptPath ?? agent.body}`);
   if (!opts.promptLaunch?.deferTaskPrompt) args.push(promptContent);
   return args;
 }

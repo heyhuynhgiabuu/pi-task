@@ -4,6 +4,15 @@ All notable changes to `@heyhuynhgiabuu/pi-task` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- Pi CLI subagents retain native `APPEND_SYSTEM.md` discovery, including trusted
+  project precedence and the resumed session's working directory. Agent role
+  instructions are appended by a child-only hook instead of replacing the
+  discovered append sources (issue #29).
+
 ## [0.11.0] - 2026-10-06
 
 ### Added

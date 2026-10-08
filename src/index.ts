@@ -89,6 +89,7 @@ import {
 } from "./subagent/herdr.js";
 import { resolveTaskBackend } from "./subagent/selectBackend.js";
 import { buildClaudeArgs } from "./subagent/buildArgv.js";
+import { registerChildRolePrompt } from "./subagent/child-role-prompt.js";
 import { claudeSessionFilePath } from "./subagent/claudeSession.js";
 import {
   steerRunningBackgroundTask,
@@ -164,8 +165,8 @@ export default function (pi: ExtensionAPI) {
   });
   registerParentFastMode(pi);
 
-  // Recursive children never register task. An explicitly fast terminal child
-  // loads this same extension path only to install its isolated provider bridge.
+  // CLI children need the role hook even when recursive delegation is disabled.
+  registerChildRolePrompt(pi);
   if (process.env.PI_TASK_TOOL_DISABLED === "1") return;
 
   const taskToolName = process.env.PI_TASK_TOOL_NAME?.trim() || "task";

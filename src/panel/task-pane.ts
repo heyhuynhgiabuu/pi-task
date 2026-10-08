@@ -186,7 +186,7 @@ export function createTaskTranscriptPane(
           item.name,
           item.toolCallId,
           item.args,
-          {},
+          { outputPad: opts.outputPad },
           renderDefinitions.get(item.name),
           tui,
           opts.cwd,

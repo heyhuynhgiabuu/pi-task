@@ -6,7 +6,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.11.2] - 2026-10-08
+
+### Changed
+
+- Upgrade the Pi development dependency baseline to 1.1.0, keeping runtime peer
+  ranges and older-runtime compatibility shims unchanged.
+
 ### Fixed
+
+- Child transcripts preserve authoritative tool execution durations, including
+  zero durations, without inventing timings for older results that lack them.
+
+- Durable children bridge requested, context-free parent extension tools and
+  keep earlier children's bridged tools available across sibling launches.
+
+- Child transcript tool rows honor the configured `outputPad` on Pi 1.1.0,
+  including built-in renderers and generic tool output.
 
 - Pi CLI subagents retain native `APPEND_SYSTEM.md` discovery, including trusted
   project precedence and the resumed session's working directory. Agent role

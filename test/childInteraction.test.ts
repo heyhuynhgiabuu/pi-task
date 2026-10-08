@@ -216,6 +216,34 @@ test("pane honours the effective transcript padding", () => {
   flush.dispose();
 });
 
+for (const name of ["bash", "custom-padding-tool"]) {
+  test(`pane honours transcript padding for ${name} tool results`, (t) => {
+    const items = [toolItem({ name, result: "TOOL_PADDING_MARKER" })];
+    const padded = makePane(items, { outputPad: 1 });
+    const flush = makePane(items, { outputPad: 0 });
+    const defaults = makePane(items);
+    t.after(() => {
+      padded.dispose();
+      flush.dispose();
+      defaults.dispose();
+    });
+
+    const outputColumn = (pane: TaskTranscriptPane): number => {
+      const line = pane.render(80, 20)
+        .map((line) => line.replace(/\x1b\[[0-9;]*m/g, ""))
+        .find((line) => line.includes("TOOL_PADDING_MARKER"));
+      assert.ok(line, "the tool output is visible");
+      return line.indexOf("TOOL_PADDING_MARKER");
+    };
+    assert.equal(
+      outputColumn(padded) - outputColumn(flush),
+      1,
+      "outputPad changes the tool output indentation by one column",
+    );
+    assert.equal(outputColumn(defaults), outputColumn(padded), "omitted outputPad keeps the default padding");
+  });
+}
+
 test("task view receives effective Pi editor and transcript padding settings", () => {
   initTheme();
   const taskId = "t-settings";

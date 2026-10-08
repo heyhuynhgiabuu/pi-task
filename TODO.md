@@ -1,5 +1,7 @@
 # TODO
 
+- [x] Prepare and verify v0.11.2 with Pi 1.1.0 dev pins, child tool padding, and the unreleased child fixes; 665 tests/typecheck/build/smoke and package-content checks pass. GitHub publishing tracked in [.pi/artifacts/TODO.md](.pi/artifacts/TODO.md).
+
 - [x] Simplify issue #29 fixture cleanup without production changes or weakened assertions; 663 tests/typecheck and both independent audits pass.
 
 - [x] Fix issue #29 by preserving native APPEND_SYSTEM discovery in Pi CLI children; verified on Pi 1.0.4 with 663 tests and independent review. Legacy hook contract covered; full Pi 1.0.0 runtime unverified. Work record: [.pi/artifacts/TODO.md](.pi/artifacts/TODO.md).

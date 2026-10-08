@@ -53,6 +53,7 @@ export type { TerminalExecutionOptions } from "./terminal-execution.js";
 export { executeComparisonTask } from "./comparison-execution.js";
 export type { ComparisonExecutionOptions } from "./comparison-execution.js";
 export {
+  durableConversationRejection,
   materializeTaskExecution,
   prepareTaskExecution,
 } from "./task-preparation.js";

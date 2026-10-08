@@ -17,6 +17,36 @@ function isDurableBackendAvailable(): Promise<boolean> {
   return durableAvailability;
 }
 
+/** Whether `value` is a recognized backend preference (see {@link resolveRequestedBackendKind}). */
+export function isValidBackendPreference(value: string): boolean {
+  return ["auto", "sdk", "durable", "tmux", "herdr"].includes(value);
+}
+
+/**
+ * Requested backend kind before availability probing: legacy env vars beat
+ * `PI_TASK_BACKEND`, which beats the `taskBackend` setting, then auto. Shared
+ * by backend resolution and feature gates so they cannot disagree about what
+ * the launch would select. Blank env values are treated as unset so they
+ * cannot shadow the setting; a blank setting is preserved so the resolver's
+ * invalid-preference error fires. The result is an unparsed preference:
+ * validate it with {@link isValidBackendPreference} before acting on it.
+ */
+export function resolveRequestedBackendKind(
+  options: { settingsBackend?: string } = {},
+): string {
+  const legacyRequestedBackend = process.env.PI_TASK_USE_TMUX_BACKEND === "1"
+    ? "tmux"
+    : process.env.PI_TASK_USE_SDK_BACKEND === "1"
+      ? "sdk"
+      : undefined;
+  const envRaw = process.env.PI_TASK_BACKEND;
+  const envBackend = envRaw?.trim() ? envRaw : undefined;
+  const settingsBackend = typeof options.settingsBackend === "string"
+    ? options.settingsBackend.trim().toLowerCase()
+    : undefined;
+  return (legacyRequestedBackend ?? envBackend ?? settingsBackend ?? "auto").trim().toLowerCase();
+}
+
 export type TaskBackendResolution =
   | {
       ok: true;
@@ -39,21 +69,10 @@ export async function resolveTaskBackend(
     settingsBackend?: string;
   } = {},
 ): Promise<TaskBackendResolution> {
-  const legacyRequestedBackend = process.env.PI_TASK_USE_TMUX_BACKEND === "1"
-    ? "tmux"
-    : process.env.PI_TASK_USE_SDK_BACKEND === "1"
-      ? "sdk"
-      : undefined;
   // Blank env values are treated as unset so they cannot shadow the setting.
   const envRaw = process.env.PI_TASK_BACKEND;
-  const envBackend = envRaw?.trim() ? envRaw : undefined;
-  const settingsBackend = typeof options.settingsBackend === "string"
-    ? options.settingsBackend.trim().toLowerCase()
-    : undefined;
-  const requestedBackend = (
-    legacyRequestedBackend ?? envBackend ?? settingsBackend ?? "auto"
-  ).trim().toLowerCase();
-  if (!["auto", "sdk", "durable", "tmux", "herdr"].includes(requestedBackend)) {
+  const requestedBackend = resolveRequestedBackendKind({ settingsBackend: options.settingsBackend });
+  if (!isValidBackendPreference(requestedBackend)) {
     const source = requestedBackend === envRaw?.trim().toLowerCase()
       ? `PI_TASK_BACKEND=${requestedBackend}`
       : `taskBackend=${requestedBackend} (settings)`;

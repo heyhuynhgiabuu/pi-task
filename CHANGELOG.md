@@ -6,6 +6,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.11.3] - 2026-10-08
+
+### Fixed
+
+- `conversation_id` now works on the durable backend without HerdR or tmux:
+  the launch gate honors the `taskBackend` setting alongside `PI_TASK_BACKEND`,
+  allows explicit durable preferences without a terminal, and defers invalid
+  preferences to the backend resolver's precise error. Terminal and SDK
+  conversation behavior is unchanged.
+
 ## [0.11.2] - 2026-10-08
 
 ### Changed

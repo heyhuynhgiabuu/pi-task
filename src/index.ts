@@ -75,6 +75,7 @@ import {
   executeComparisonTask,
   materializeTaskExecution,
   prepareTaskExecution,
+  durableConversationRejection,
   resolveConversationResume,
   resolveTaskResume,
   createComparisonSettledHandler,
@@ -929,6 +930,14 @@ export default function (pi: ExtensionAPI) {
          sessionName = conversationId ?? `task-${id}`;
        }
 
+      // Backend selection: PI_TASK_BACKEND env > `taskBackend` setting > auto.
+      // Settings live on the extension API (pi.getSettings), not the tool ctx;
+      // headless harnesses may omit it, in which case the setting is absent.
+      const settings = typeof pi.getSettings === "function"
+        ? (pi.getSettings() as Record<string, unknown> | undefined)
+        : undefined;
+      const settingsBackend = typeof settings?.taskBackend === "string" ? settings.taskBackend : undefined;
+
       const taskPreparation = await prepareTaskExecution({
         taskParams,
         agent,
@@ -937,6 +946,7 @@ export default function (pi: ExtensionAPI) {
         id,
         conversationId,
         persistedTaskCwd,
+        settingsBackend,
       });
       if (taskPreparation.kind === "handled") return taskPreparation.result;
       const {
@@ -967,16 +977,9 @@ export default function (pi: ExtensionAPI) {
         : undefined;
 
       // ─── Build and run the sub-agent pi process ──────────────────────────
-      // Backend selection: PI_TASK_BACKEND env > `taskBackend` setting > auto.
-      // Settings live on the extension API (pi.getSettings), not the tool ctx;
-      // headless harnesses may omit it, in which case the setting is absent.
-      const settings = typeof pi.getSettings === "function"
-        ? (pi.getSettings() as Record<string, unknown> | undefined)
-        : undefined;
-      const settingsBackend = settings?.taskBackend;
       const backendResolution = await resolveTaskBackend({
         allowAcpSession: !claudeRuntime && !conversationId,
-        settingsBackend: typeof settingsBackend === "string" ? settingsBackend : undefined,
+        settingsBackend,
       });
       if (!backendResolution.ok) {
         return {
@@ -1018,20 +1021,7 @@ export default function (pi: ExtensionAPI) {
         };
       }
       if (conversationId && selectedBackend === "sdk") {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: "Durable conversations require an active HerdR or tmux terminal backend so Pi can save and reopen the subagent session. Start Pi inside HerdR, start tmux, or omit conversation_id for a one-shot SDK task.",
-            },
-          ],
-          details: {
-            phase: "failed" as const,
-            error: "tmux required for durable conversation",
-            conversation_id: conversationId,
-          },
-          isError: true,
-        };
+        return durableConversationRejection(conversationId);
       }
       if (selectedBackend === "durable") {
         if (claudeRuntime) {

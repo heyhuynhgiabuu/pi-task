@@ -7,12 +7,15 @@ import { join } from "node:path";
 import {
   formatChildMetadata,
   formatChildTokens,
+  createChildTpsRun,
+  childRunTokensPerSecond,
   type ChildUsageMetadata,
 } from "../src/panel/child-metadata.js";
 import { CompactionEntry, ResetEntry, type SnapshotEvent } from "@earendil-works/pi-durable";
 import { DurableTranscript } from "../src/panel/durable-transcript.js";
 import { readTaskSessionFile } from "../src/panel/transcript.js";
 import { subscribeSdkChildMetadata } from "../src/subagent/sdk-metadata.js";
+import { registerChildTps } from "../src/subagent/child-tps.js";
 import { createTaskWidgetController } from "../src/lifecycle/widget.js";
 import type { BackgroundTask } from "../src/types.js";
 import { initTheme } from "@earendil-works/pi-coding-agent";
@@ -42,45 +45,106 @@ test("child metadata matches Pi footer token, usage, cache-hit, and context form
   assert.equal(display.contextColor, undefined, "context below 70% has no warning color");
 });
 
-test("child TPS uses only the latest successful assistant response's authoritative duration", () => {
-  const message = {
-    role: "assistant", content: [{ type: "text", text: "answer" }],
-    usage: usage(100, 80, 20, 0, 0.1), stopReason: "stop", durationMs: 2_000,
-  };
-  const entry = { id: "a1", conversationId: "c1", kind: "pi.assistant", model: [message] };
-  const transcript = new DurableTranscript(durableSnapshot([entry] as never, message.usage));
-  assert.equal(transcript.usageMetadata().latestTokensPerSecond, 40);
-  assert.ok(formatChildMetadata(transcript.usageMetadata()).usage.includes("TPS 40.0"));
-  const midGeneration = new DurableTranscript({
-    ...durableSnapshot([entry] as never, message.usage),
-    generation: { message: { ...message, durationMs: undefined } },
-  } as unknown as SnapshotEvent);
-  assert.equal(midGeneration.usageMetadata().latestTokensPerSecond, 40, "reattach during generation retains the last completed response's TPS");
+test("child run TPS matches main-agent wall time minus overlapping UI prompt waits", () => {
+  const run = createChildTpsRun();
+  run.promptStart(0); // Outside a run: ignored.
+  assert.equal(run.end(0), null);
+  run.start(0);
+  run.promptStart(1_000);
+  run.promptStart(1_500);
+  run.promptEnd(2_000);
+  run.promptEnd(3_000);
+  const measurement = run.end(12_000)!;
+  assert.deepEqual(measurement, { elapsedMs: 12_000, waitMs: 2_000 });
+  assert.equal(childRunTokensPerSecond({ ...measurement, output: 100 }), 10);
+  assert.equal(childRunTokensPerSecond({ elapsedMs: 0, waitMs: 0, output: 100 }), undefined);
+  assert.equal(childRunTokensPerSecond({ ...measurement, output: 0 }), undefined);
+  assert.equal(childRunTokensPerSecond({ ...measurement, output: Number.NaN }), undefined);
+  run.start(20_000);
+  run.promptStart(21_000);
+  assert.deepEqual(run.end(23_000), { elapsedMs: 3_000, waitMs: 2_000 }, "an open prompt closes at run end");
+});
 
+test("durable child TPS counts whole runs including tools, excludes idle, and never infers historical timing", () => {
+  let now = 0;
+  const message = { role: "assistant", content: [{ type: "text", text: "answer" }],
+    usage: usage(100, 80, 20, 0, 0.1), stopReason: "toolUse", durationMs: 2_000 };
+  const entry = { id: 1, conversationId: 1, kind: "pi.assistant", model: [message] };
+  const snapshot = durableSnapshot([entry] as never, message.usage);
+  const transcript = new DurableTranscript(snapshot, () => now);
+  assert.equal(transcript.usageMetadata().latestTokensPerSecond, undefined, "response duration is not run duration");
+  transcript.apply([{ type: "run_start", inputs: [1] } as never]);
+  now = 2_000;
+  transcript.apply([{ type: "message_end", entry } as never]);
+  transcript.apply([{ type: "message_end", entry } as never]); // Duplicate observations cannot count twice.
+  assert.equal(transcript.usageMetadata().latestTokensPerSecond, undefined, "publish only at run end, like main TPS");
+  now = 10_000; // Includes 8 seconds executing a tool.
+  transcript.apply([{ type: "tool_execution_end", toolCallId: "slow", toolName: "bash" } as never]);
+  now = 12_000;
+  transcript.apply([
+    { type: "message_end", entry: { ...entry, id: 2, model: [{ ...message, usage: usage(10, 20, 0, 0, 0), stopReason: "stop" }] } },
+    { type: "run_end", inputs: [1] },
+  ] as never);
+  assert.equal(transcript.usageMetadata().latestTokensPerSecond, 100 / 12);
+  assert.ok(formatChildMetadata(transcript.usageMetadata()).usage.includes("TPS 8.3"));
+  now = 60_000;
+  transcript.apply([{ type: "run_start", inputs: [2] } as never]);
+  now = 62_000;
+  transcript.apply([
+    { type: "message_end", entry: { ...entry, id: 3, model: [{ ...message, usage: usage(10, 50, 0, 0, 0) }] } },
+    { type: "run_end", inputs: [2] },
+  ] as never);
+  assert.equal(transcript.usageMetadata().latestTokensPerSecond, 25, "idle between steering runs is not active run time");
+  transcript.apply([{ ...snapshot, run: { inputs: [3] } } as never]);
+  transcript.apply([{ type: "run_end", inputs: [3] } as never]);
+  assert.equal(transcript.usageMetadata().latestTokensPerSecond, undefined, "a snapshot gap invalidates unobserved run timing");
+});
+
+test("Pi child JSONL TPS requires a recorded run measurement, not assistant or tool durations", () => {
   const dir = mkdtempSync(join(tmpdir(), "pi-task-child-tps-"));
   const file = join(dir, "child.jsonl");
   try {
-    writeFileSync(file, JSON.stringify({ type: "message", id: "a1", parentId: null, message }) + "\n");
-    assert.equal(readTaskSessionFile(file).childMetadata?.latestTokensPerSecond, 40);
-    appendFileSync(file, JSON.stringify({
-      type: "message", id: "tool", parentId: "a1",
-      message: { role: "toolResult", content: "slow tool", durationMs: 60_000 },
-    }) + "\n");
-    assert.equal(readTaskSessionFile(file).childMetadata?.latestTokensPerSecond, 40, "tool time cannot dilute TPS");
-    for (const patch of [{ durationMs: undefined }, { durationMs: 0 }, { durationMs: -1 },
-      { durationMs: Number.NaN }, { stopReason: "aborted" }, { stopReason: "error" },
-      { usage: { ...message.usage, output: 0 } }]) {
-      const next = { ...message, ...patch };
-      transcript.apply([{ type: "message_end", entry: { ...entry, model: [next] } } as never]);
-      assert.equal(transcript.usageMetadata().latestTokensPerSecond, undefined);
-      assert.ok(!formatChildMetadata(transcript.usageMetadata()).usage.some((part) => part.startsWith("TPS")));
-    }
-    appendFileSync(file, JSON.stringify({
-      type: "message", id: "legacy", parentId: "tool", message: { ...message, durationMs: undefined },
-    }) + "\n");
-    assert.equal(readTaskSessionFile(file).childMetadata?.latestTokensPerSecond, undefined, "never reuse an older rate for an unmeasured response");
+    writeFileSync(file, JSON.stringify({ type: "message", id: "a1", parentId: null,
+      message: { role: "assistant", usage: usage(100, 80, 20, 0, 0.1), durationMs: 2_000 } }) + "\n");
+    assert.equal(readTaskSessionFile(file).childMetadata?.latestTokensPerSecond, undefined);
+    appendFileSync(file, JSON.stringify({ type: "custom", id: "tps", parentId: "a1", customType: "pi-task.run-tps",
+      data: { version: 1, output: 100, elapsedMs: 12_000, waitMs: 2_000 } }) + "\n");
+    assert.equal(readTaskSessionFile(file).childMetadata?.latestTokensPerSecond, 10);
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("native child TPS recorder is child-only and saves whole-run timing minus UI waits", () => {
+  const previous = process.env.PI_TASK_TOOL_DISABLED;
+  const handlers = new Map<string, (event: { messages: unknown[] }) => void>();
+  const entries: Array<{ type: string; data: unknown }> = [];
+  const pi = {
+    on(name: string, handler: (event: { messages: unknown[] }) => void) { handlers.set(name, handler); },
+    appendEntry(type: string, data: unknown) { entries.push({ type, data }); },
+  };
+  let now = 0;
+  const emit = (name: string, messages: unknown[] = []) => handlers.get(name)?.({ messages });
+  try {
+    delete process.env.PI_TASK_TOOL_DISABLED;
+    registerChildTps(pi as never, () => now);
+    assert.equal(handlers.size, 0, "never measure the parent agent here");
+    process.env.PI_TASK_TOOL_DISABLED = "1";
+    registerChildTps(pi as never, () => now);
+    emit("agent_start");
+    now = 1_000; emit("ui_prompt_start");
+    now = 1_500; emit("ui_prompt_start");
+    now = 2_000; emit("ui_prompt_end");
+    now = 3_000; emit("ui_prompt_end");
+    now = 12_000; emit("agent_end", [
+      { role: "assistant", usage: { output: 80 } },
+      { role: "toolResult", usage: { output: 1_000 } },
+      { role: "assistant", usage: { output: 20 }, stopReason: "aborted" },
+    ]);
+    assert.deepEqual(entries, [{ type: "pi-task.run-tps", data: { version: 1, elapsedMs: 12_000, waitMs: 2_000, output: 100 } }]);
+  } finally {
+    if (previous === undefined) delete process.env.PI_TASK_TOOL_DISABLED;
+    else process.env.PI_TASK_TOOL_DISABLED = previous;
   }
 });
 
@@ -332,6 +396,7 @@ test("overlay puts live child metadata between status and editor, updates live, 
 });
 
 test("SDK child metadata uses the child's runtime, refreshes per message, and invalidates on compaction", () => {
+  let now = 0;
   let listener: ((event: any) => void) | undefined;
   let statsReads = 0;
   let context = { tokens: 18, contextWindow: 100, percent: 18 };
@@ -349,7 +414,8 @@ test("SDK child metadata uses the child's runtime, refreshes per message, and in
     subscribe(callback: (event: any) => void) { listener = callback; return () => { listener = undefined; }; },
   };
   const seen: ChildUsageMetadata[] = [];
-  const unsubscribe = subscribeSdkChildMetadata(session as never, (metadata) => seen.push(metadata));
+  const unsubscribe = subscribeSdkChildMetadata(session as never, (metadata) => seen.push(metadata), () => now);
+  listener?.({ type: "agent_start" });
 
   assert.equal(seen.at(-1)?.model, "kimi-coding/sdk-child-model");
   assert.deepEqual(seen.at(-1)?.usageTotals, { input: 10, output: 2, cacheRead: 5, cacheWrite: 1, cost: 0.01 });
@@ -370,17 +436,24 @@ test("SDK child metadata uses the child's runtime, refreshes per message, and in
   context = { tokens: 100, contextWindow: 100, percent: 100 };
   stats = { tokens: { input: 30, output: 3, cacheRead: 100, cacheWrite: 0 }, cost: 0.04 };
   listener?.({ type: "message_end", message: { role: "assistant", usage: usage(30, 3, 100, 0, 0.04), stopReason: "stop", durationMs: 1_500 } });
-  assert.equal(seen.at(-1)?.latestTokensPerSecond, 2, "SDK TPS measures only the completed response");
+  assert.equal(seen.at(-1)?.latestTokensPerSecond, undefined, "response completion is not agent-run completion");
   assert.deepEqual(seen.at(-1)?.contextUsage, { tokens: 100, contextWindow: 100 }, "post-compaction response remeasures context");
   assert.equal(seen.at(-1)?.usageTotals.input, 30);
   assert.equal(statsReads, 2, "a completed message refreshes cumulative child session stats");
+  now = 8_000; // Includes tool execution, just like main agent TPS.
+  listener?.({ type: "agent_end", messages: [
+    { role: "assistant", usage: usage(30, 3, 100, 0, 0.04) },
+    { role: "toolResult", usage: usage(0, 1_000, 0, 0, 0), durationMs: 5_000 },
+    { role: "assistant", usage: usage(2, 2, 0, 0, 0), stopReason: "aborted" },
+  ] });
+  assert.equal(seen.at(-1)?.latestTokensPerSecond, 5 / 8, "sum this run's assistant output, not tool output or lifetime totals");
 
   listener?.({ type: "entry_appended", entry: { type: "context_edit" } });
   assert.deepEqual(seen.at(-1)?.contextUsage, { tokens: null, contextWindow: 100 }, "a child context edit cannot reuse the old measurement");
 
   unsubscribe();
   listener?.({ type: "message_update", message: { role: "assistant", usage: usage(1, 0, 0, 0, 0) } });
-  assert.equal(seen.length, 6, "unsubscription stops metadata updates");
+  assert.equal(seen.length, 7, "unsubscription stops metadata updates");
 });
 
 test("widget metadata stays attached to child A, resolves only A's model window, and live updates remain isolated", () => {

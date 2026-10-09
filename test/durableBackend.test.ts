@@ -40,6 +40,7 @@ import {
   createCompletionDeliveryQueue,
 } from "../src/lifecycle/completion.js";
 import { DeliveryGuard } from "../src/panel/delivery.js";
+import { DurableTranscript } from "../src/panel/durable-transcript.js";
 import { createTaskWidgetController } from "../src/lifecycle/widget.js";
 import { readTaskSessionHistory, upsertTaskSessionHistory } from "../src/conversation.js";
 import { reconcileStaleSdkBackgroundTasks } from "../src/subagent/sdkBackground.js";
@@ -557,6 +558,8 @@ test("runDurableTask streams the child conversation snapshot and committed messa
   const piDir = join(root, ".pi");
   const databasePath = join(root, "durable.sqlite");
   let snapshot: unknown;
+  let transcript: DurableTranscript | undefined;
+  let clock = 0;
   const events: { type: string }[] = [];
   let handle: Awaited<ReturnType<typeof openDurableHarness>> | undefined;
   try {
@@ -569,13 +572,21 @@ test("runDurableTask streams the child conversation snapshot and committed messa
       databasePath,
       taskId: "t-visible-events",
       task: "Say hello.",
-      onSnapshot: (value) => { snapshot = value; },
-      onEvents: (batch) => { events.push(...batch); },
+      onSnapshot: (value) => {
+        snapshot = value;
+        transcript = new DurableTranscript(value, () => (clock += 1_000));
+      },
+      onEvents: (batch) => { events.push(...batch); transcript?.apply(batch); },
     });
 
     assert.equal(result.answer, "Visible child answer.");
     assert.ok(snapshot, "watch attaches with an initial conversation snapshot");
     assert.ok(events.some((event) => event.type === "message_end"), "committed child messages reach the view");
+    assert.ok(events.some((event) => event.type === "run_start"));
+    assert.ok(events.some((event) => event.type === "run_end"), "run ends reach the view before watch cleanup");
+    const output = Object.values(result.usage.models).reduce((sum, usage) => sum + usage.outputTokens, 0);
+    assert.ok(output > 0);
+    assert.equal(transcript?.usageMetadata().latestTokensPerSecond, output, "one-second injected run clock yields actual child output TPS");
   } finally {
     if (handle) await handle.harness.close(handle.context);
     rmSync(root, { recursive: true, force: true });
@@ -1626,6 +1637,39 @@ test("a no-model admission failure does not leave a mapped child that can poison
   }
 });
 
+test("a resumed durable run without a measurement does not keep the previous run's TPS", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-durable-stale-tps-"));
+  const piDir = join(root, ".pi");
+  try {
+    upsertTaskSessionHistory(piDir, {
+      id: "t-stale-tps", agentType: "general", description: "resume", sessionName: "task-t-stale-tps",
+      startedAt: 1, piDir, dir: join(piDir, "artifacts"), cwd: root, backend: "durable",
+      status: "done", background: false, tokensPerSecond: 99,
+    } as never);
+    await executeDurableTask({
+      id: "t-stale-tps",
+      agent: { name: "general", description: "General task", body: "", source: "project", path: "test-agent.md" },
+      description: "resume", sessionName: "task-t-stale-tps", prompt: "Return.", cwd: root,
+      toolCallId: "call-stale-tps", ctx: { modelRegistry: {} } as never, pi: {} as never,
+      piDir, artifactsDir: join(piDir, "artifacts"), isBackground: false,
+      backgroundTasks: new Map(), foregroundTasks: new Map(), deliveryGuard: new DeliveryGuard(),
+      taskWidget: { openTaskView() {}, closeTaskView() {}, noteTaskFinished() {}, setLiveTranscript() {} } as never,
+      clearTaskWidgetIfIdle: () => {}, ensureTaskWidget: () => {}, enqueueDelivery: (delivery) => delivery(),
+      runTask: async () => ({
+        conversationId: "stale-tps-child",
+        answer: "Status: success\\nDone.",
+        usage: { models: {}, tools: {}, totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costTotal: 0 } },
+      }),
+    });
+    assert.equal(
+      readTaskSessionHistory(piDir).find((entry) => entry.id === "t-stale-tps")?.tokensPerSecond,
+      undefined,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("foreground durable work registers and opens its task view until the result is ready", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-task-durable-foreground-view-"));
   const foregroundTasks = new Map<string, import("../src/types.js").BackgroundTask>();
@@ -1688,6 +1732,8 @@ test("foreground durable work registers and opens its task view until the result
           agent: {},
           usage: { models: {}, tools: {}, totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costTotal: 0 } },
         } as never);
+        input.onEvents?.([{ type: "run_start", inputs: [1] } as never]);
+        await new Promise((resolve) => setTimeout(resolve, 5));
         input.onEvents?.([{
           type: "message_end",
           entry: {
@@ -1700,6 +1746,7 @@ test("foreground durable work registers and opens its task view until the result
                 { type: "text", text: "Live child progress." },
                 { type: "toolCall", id: "call-no-start", name: "read", arguments: {} },
               ],
+              usage: { input: 1, output: 50, cacheRead: 0, cacheWrite: 0, totalTokens: 51 },
               timestamp: 0,
             }],
           },
@@ -1711,7 +1758,7 @@ test("foreground durable work registers and opens its task view until the result
             kind: "pi.toolResult",
             model: [{ role: "toolResult", toolCallId: "call-no-start", toolName: "read", content: [], isError: false }],
           },
-        } as never]);
+        } as never, { type: "run_end", inputs: [1] } as never]);
         return {
           conversationId: "durable-foreground-child",
           answer: "Status: success\\nThe task view stayed active.",
@@ -1739,6 +1786,10 @@ test("foreground durable work registers and opens its task view until the result
       (entry) => entry.id === "t-foreground-view",
     );
     assert.equal(foregroundHistory?.backend, "durable", "foreground task history preserves backend identity");
+    assert.ok(
+      (foregroundHistory?.tokensPerSecond ?? 0) > 0,
+      "the observed run's TPS survives settlement so persisted read-only history can show it",
+    );
     assert.equal(
       foregroundHistory?.conversationId,
       "durable-foreground-child",

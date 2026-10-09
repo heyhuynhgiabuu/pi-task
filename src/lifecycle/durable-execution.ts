@@ -629,7 +629,23 @@ export async function executeDurableTask({
           // Best-effort attribution; a settled completion writes it again.
         }
       },
-    }).then((result) => ({ output: result.answer, usage: result.usage }));
+    }).then((result) => {
+      // The watcher saw run_end before cleanup; keep the measurement for read-only history.
+      const tokensPerSecond = progressTranscript?.usageMetadata().latestTokensPerSecond;
+      if (tokensPerSecond !== undefined) {
+        try {
+          upsertTaskSessionHistory(piDir, {
+            ...historyBase,
+            status: "running",
+            durableRequestId: historyRequestId,
+            tokensPerSecond,
+          });
+        } catch {
+          // Best-effort presentation data; the final status write follows.
+        }
+      }
+      return { output: result.answer, usage: result.usage };
+    });
 
   if (isBackground) {
     const backgroundTask: BackgroundTask = {
@@ -755,7 +771,8 @@ export async function executeDurableTask({
   // Foreground: the tool call waits for the child's answer, like the SDK
   // backend, but the run is durable — a parent crash resumes it instead of
   // losing it, and a later run of the same task id returns the same child.
-  upsertTaskSessionHistory(piDir, { ...historyBase, status: "running" });
+  // A new run must not inherit the previous run's TPS if it is never measured.
+  upsertTaskSessionHistory(piDir, { ...historyBase, status: "running", tokensPerSecond: undefined });
   const foregroundTask: BackgroundTask = {
     dir: artifactsDir,
     cwd,

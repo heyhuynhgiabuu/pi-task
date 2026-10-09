@@ -22,7 +22,7 @@ For the full high-quality 89s @ 56 fps version, [download the MP4](https://githu
 - Agent frontmatter support: `model`, `thinking`, `fast`, `skills`, `tools`, `disallowed_tools`.
 - Per-call thinking control: an optional task `thinking` value uses Pi's canonical levels when the agent leaves `thinking` unset; frontmatter remains authoritative when present.
 - Task-local OpenAI/OpenAI-Codex Fast Mode: apply priority service tier to configured models without changing model, thinking level, or shared configuration.
-- Child transcript stats show `TPS` for the latest completed assistant response when recorded timing exists: output tokens / response duration (including request wait and thinking, excluding tool execution). Legacy/deferred responses without duration show no TPS.
+- Child transcript stats show `TPS` using the same definition as the main TPS extension: total assistant output tokens in a run / (whole-run wall time, including tools, minus blocking UI prompt waits). It updates when the run ends, not after each response. SDK/durable children are headless (no UI prompt waits); native Pi terminal children record run timing and prompt-wait spans in their session. Durable children also record their last observed run TPS in task history so the persisted read-only view shows it; children that finished before this version, and runs attached mid-run, show no TPS rather than reconstructing it from response timestamps.
 - Built-in starter agents: `advisor`, `scout`, `explore`, `general`, `reviewer`.
 - Project/user agent overrides via `.pi/agents/*.md` or `~/.pi/agent/agents/*.md`.
 

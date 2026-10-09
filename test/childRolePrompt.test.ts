@@ -159,6 +159,26 @@ function addendumBody(addendum: string | undefined): string | undefined {
   return addendum?.replace(/^<addendum>\n/, "").replace(/\n<\/addendum>$/, "");
 }
 
+test("CLI child records run TPS through the actual extension entry without enabling delegation", async (t) => {
+  const f = fixture(t);
+  const manager = SessionManager.inMemory(f.cwd);
+  const run = await withEnv(CHILD_ENV, () => runChild(childArgv("ROLE"), {
+    cwd: f.cwd, agentDir: f.agentDir, sessionManager: manager,
+  }));
+  assert.deepEqual(run.extensionErrors, []);
+  assert.ok(!run.toolNames.includes("task"), "recursive delegation remains disabled");
+  const entries = manager.getEntries().filter((entry) => entry.type === "custom" && entry.customType === "pi-task.run-tps");
+  assert.equal(entries.length, 1, "child entry installs the run recorder before the disabled-task return");
+  const record = entries[0] as { data: { version: number; output: number; elapsedMs: number; waitMs: number } };
+  assert.equal(record.data.version, 1);
+  const output = manager.getEntries().reduce((total, entry) =>
+    entry.type === "message" && entry.message.role === "assistant" ? total + entry.message.usage.output : total, 0);
+  assert.ok(output > 0);
+  assert.equal(record.data.output, output);
+  assert.equal(record.data.waitMs, 0);
+  assert.ok(record.data.elapsedMs >= 0);
+});
+
 test("CLI child keeps the native APPEND_SYSTEM and appends the role second", async (t) => {
   const f = fixture(t);
   writeFileSync(join(f.agentDir, "APPEND_SYSTEM.md"), "NATIVE APPEND\n");

@@ -9,7 +9,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import type { ChildSessionInfo } from "../types.js";
-import { assistantTokensPerSecond, type ChildUsageMetadata } from "./child-metadata.js";
+import { CHILD_RUN_TPS_ENTRY_TYPE, childRunTokensPerSecond, type ChildUsageMetadata } from "./child-metadata.js";
 
 export const MAX_TRANSCRIPT_ITEMS = 400;
 
@@ -94,6 +94,8 @@ interface JsonlEntry {
   provider?: string;
   modelId?: string;
   thinkingLevel?: string;
+  customType?: string;
+  data?: unknown;
   usage?: unknown;
   message?: {
     role?: string;
@@ -325,6 +327,12 @@ export function readTaskSessionFile(file: string): TranscriptReadResult {
       continue;
     }
     contextEntries.push(entry);
+    if (entry.type === "custom" && entry.customType === CHILD_RUN_TPS_ENTRY_TYPE) {
+      if (isRecord(entry.data) && entry.data.version === 1) {
+        latestTokensPerSecond = childRunTokensPerSecond(entry.data);
+      }
+      continue;
+    }
     if (entry.type === "session_info") {
       if (typeof entry.name === "string" && entry.name) sessionName = entry.name;
       continue;
@@ -354,7 +362,6 @@ export function readTaskSessionFile(file: string): TranscriptReadResult {
     if (msg.role === "user") userMessages++;
     else if (msg.role === "assistant") {
       assistantMessages++;
-      latestTokensPerSecond = assistantTokensPerSecond(msg);
       toolCalls += extractToolCalls(msg.content).length;
       const promptTokens = promptTokensOf(msg.usage);
       latestCacheHitRate = promptTokens !== undefined && promptTokens > 0 && isRecord(msg.usage)

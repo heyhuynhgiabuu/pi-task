@@ -6,7 +6,7 @@ import type {
 } from "@earendil-works/pi-durable";
 import type { Message } from "@earendil-works/pi-ai";
 import type { ChildHistoryOption } from "../types.js";
-import { assistantTokensPerSecond, type ChildUsageMetadata } from "./child-metadata.js";
+import { childRunTokensPerSecond, createChildTpsRun, sumAssistantOutputTokens, type ChildUsageMetadata } from "./child-metadata.js";
 import { MAX_TRANSCRIPT_ITEMS, authoritativeDurationMs, type TranscriptItem } from "./transcript.js";
 
 // Persisted pi-durable entry kinds (entries.ts, 1.0.4). Keep runtime imports
@@ -202,13 +202,17 @@ export class DurableTranscript {
   private usageState: UsageState = { models: {}, tools: {} };
   private latestCacheHitRate: number | undefined;
   private latestTokensPerSecond: number | undefined;
+  private tpsRun = createChildTpsRun();
+  private tpsRunInput: Extract<AgentEvent, { type: "run_start" }>["inputs"][number] | undefined;
+  private tpsRunOutput = 0;
+  private tpsRunEntries = new Set<EntryRecord["id"]>();
   private contextTokens: number | null = null;
   private compactionInProgress = false;
   private partialAssistantIndex: number | undefined;
   private partialTextBlocks = new Map<number, string>();
   private partialThinkingBlocks = new Map<number, string>();
 
-  constructor(snapshot: SnapshotEvent) {
+  constructor(snapshot: SnapshotEvent, private readonly now: () => number = Date.now) {
     this.replaceSnapshot(snapshot);
   }
 
@@ -244,6 +248,20 @@ export class DurableTranscript {
   apply(events: readonly AgentEvent[]): TranscriptItem[] {
     for (const event of events) {
       switch (event.type) {
+        case "run_start":
+          this.tpsRun.start(this.now());
+          this.tpsRunInput = event.inputs[0];
+          this.tpsRunOutput = 0;
+          this.tpsRunEntries.clear();
+          break;
+        case "run_end":
+          if (this.tpsRunInput !== undefined && this.tpsRunInput === event.inputs[0]) {
+            const measurement = this.tpsRun.end(this.now());
+            const rate = measurement && childRunTokensPerSecond({ ...measurement, output: this.tpsRunOutput });
+            if (typeof rate === "number") this.latestTokensPerSecond = rate;
+            this.tpsRunInput = undefined;
+          }
+          break;
         case "snapshot":
           this.replaceSnapshot(event);
           break;
@@ -272,6 +290,10 @@ export class DurableTranscript {
           this.applyMessageChanges(event.changes);
           break;
         case "message_end":
+          if (this.tpsRunInput !== undefined && !this.tpsRunEntries.has(event.entry.id)) {
+            this.tpsRunEntries.add(event.entry.id);
+            this.tpsRunOutput += sumAssistantOutputTokens(event.entry.model ?? []);
+          }
           for (const message of event.entry.model ?? []) {
             this.observeMessageMetadata(message);
             this.appendMessage(message, true);
@@ -356,6 +378,11 @@ export class DurableTranscript {
     this.usageState = snapshot.usage ?? { models: {}, tools: {} };
     this.latestCacheHitRate = undefined;
     this.latestTokensPerSecond = undefined;
+    // Attachment/overflow snapshots have no trustworthy run start or prompt spans.
+    this.tpsRun = createChildTpsRun();
+    this.tpsRunInput = undefined;
+    this.tpsRunOutput = 0;
+    this.tpsRunEntries.clear();
     this.contextTokens = null;
     this.compactionInProgress = false;
     this.transcript = [];
@@ -412,7 +439,6 @@ export class DurableTranscript {
   private observeMessageMetadata(message: Message): void {
     if (message.role === "assistant") {
       this.observeAssistantUsage(message.usage, message.stopReason);
-      if (!this.compactionInProgress) this.latestTokensPerSecond = assistantTokensPerSecond(message);
     }
   }
 

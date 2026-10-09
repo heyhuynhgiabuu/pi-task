@@ -91,6 +91,7 @@ import {
 import { resolveTaskBackend } from "./subagent/selectBackend.js";
 import { buildClaudeArgs } from "./subagent/buildArgv.js";
 import { registerChildRolePrompt } from "./subagent/child-role-prompt.js";
+import { registerChildTps } from "./subagent/child-tps.js";
 import { claudeSessionFilePath } from "./subagent/claudeSession.js";
 import {
   steerRunningBackgroundTask,
@@ -166,8 +167,9 @@ export default function (pi: ExtensionAPI) {
   });
   registerParentFastMode(pi);
 
-  // CLI children need the role hook even when recursive delegation is disabled.
+  // CLI children need role and TPS hooks even when recursive delegation is disabled.
   registerChildRolePrompt(pi);
+  registerChildTps(pi);
   if (process.env.PI_TASK_TOOL_DISABLED === "1") return;
 
   const taskToolName = process.env.PI_TASK_TOOL_NAME?.trim() || "task";

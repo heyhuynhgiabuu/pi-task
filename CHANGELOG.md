@@ -6,6 +6,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.11.5] - 2026-10-09
+
+### Fixed
+
+- Child TPS (introduced per-response in 0.11.4) now matches the main-agent TPS extension: sum assistant output over
+  a complete run, include tool time, and subtract only blocking UI prompt waits.
+  SDK and durable children use run start/end events; native Pi terminal children
+  record run timing with overlapping prompt-wait accounting in a custom session
+  entry. Response durations no longer masquerade as whole-run TPS. Durable runs
+  persist the observed TPS in task history so the read-only persisted child view
+  shows it. Children finished before this version and runs attached mid-run
+  remain hidden.
+
 ## [0.11.4] - 2026-10-09
 
 ### Added

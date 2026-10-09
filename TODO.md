@@ -1,5 +1,7 @@
 # TODO
 
+- [x] Align child TPS with the user's main `tps.ts` definition (whole run including tools, minus UI prompt waits), not the per-response metric in GitHub v0.11.4. Local correction passes 682 tests/typecheck/build/smoke; independent review has no blockers, persisted read-only view records TPS (new children only); user live confirmation on a NEW child pending. No further bump/commit/tag/release before the user sees child TPS. Work record: [.pi/artifacts/TODO.md](.pi/artifacts/TODO.md).
+
 - [x] Add authoritative per-response child TPS and prepare verified v0.11.4 with approved picker fixes, advisor example, and prepack cleanup; 678 tests/typecheck/build/smoke pass and independent TPS review has no blockers. Authorized commit/tag/GitHub publication tracked in the work record; npm publish remains manual. Work record: [.pi/artifacts/TODO.md](.pi/artifacts/TODO.md).
 
 - [x] Fix `/agents` arrow-key routing after another extension replaces pi-task's editor; recheck factory ownership and use modal fallback. Window both inline/modal long lists. RED-first regressions and 677 tests/typecheck/build/smoke pass; independent review completed with no blockers; user confirmed the live behavior works well. Work record: [.pi/artifacts/TODO.md](.pi/artifacts/TODO.md).

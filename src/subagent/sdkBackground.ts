@@ -50,7 +50,7 @@ export interface SdkBackgroundTaskInput<
 type HistoryExtras = Partial<
   Pick<
     TaskSessionHistoryEntry,
-    "sessionRef" | "reportedStatus" | "rawStatus" | "resultValid" | "completedAt"
+    "sessionRef" | "reportedStatus" | "rawStatus" | "resultValid" | "completedAt" | "tokensPerSecond"
   >
 >;
 
@@ -111,7 +111,8 @@ export function startSdkBackgroundTask<TResult extends SdkBackgroundResult>(
   };
 
   try {
-    record("running");
+    // A new run must not inherit a previous run's recorded TPS.
+    record("running", { tokensPerSecond: undefined });
   } catch (error) {
     reportDurableRecordFailure(error, "launch");
     // A durable-write failure at launch must not prevent the task from

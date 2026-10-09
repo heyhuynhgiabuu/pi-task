@@ -2,7 +2,7 @@ import type {
   AgentSession,
   AgentSessionEvent,
 } from "@earendil-works/pi-coding-agent";
-import { assistantTokensPerSecond, type ChildContextUsage, type ChildUsageMetadata } from "../panel/child-metadata.js";
+import { childRunTokensPerSecond, createChildTpsRun, sumAssistantOutputTokens, type ChildContextUsage, type ChildUsageMetadata } from "../panel/child-metadata.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -45,10 +45,13 @@ function cacheHitRate(value: unknown): number | undefined {
 export function subscribeSdkChildMetadata(
   session: AgentSession,
   onUpdate: (metadata: ChildUsageMetadata) => void,
+  now: () => number = Date.now,
 ): () => void {
   let active = true;
   let latestCacheHitRate: number | undefined;
   let latestTokensPerSecond: number | undefined;
+  // SDK children are headless: no user-facing UI prompt waits to subtract.
+  const tpsRun = createChildTpsRun();
   let contextInvalidated = false;
   let streamedPromptTokens: number | undefined;
   let lastStats = session.getSessionStats();
@@ -101,6 +104,20 @@ export function subscribeSdkChildMetadata(
   const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
     if (!active) return;
 
+    if (event.type === "agent_start") {
+      tpsRun.start(now());
+      return;
+    }
+    if (event.type === "agent_end") {
+      const measurement = tpsRun.end(now());
+      const rate = measurement && childRunTokensPerSecond({
+        ...measurement, output: sumAssistantOutputTokens(event.messages),
+      });
+      if (typeof rate === "number") latestTokensPerSecond = rate;
+      publish(true);
+      return;
+    }
+
     if (event.type === "compaction_start" || event.type === "compaction_end") {
       contextInvalidated = true;
       streamedPromptTokens = undefined;
@@ -130,7 +147,6 @@ export function subscribeSdkChildMetadata(
     }
 
     if (event.type === "message_end" && event.message.role === "assistant") {
-      if (!session.isCompacting) latestTokensPerSecond = assistantTokensPerSecond(event.message);
       latestCacheHitRate = cacheHitRate(event.message.usage);
       const measured = promptTokens(event.message.usage);
       if (
@@ -151,7 +167,7 @@ export function subscribeSdkChildMetadata(
       publish(true);
       return;
     }
-    if (event.type === "agent_end" || event.type === "turn_end") publish(true);
+    if (event.type === "turn_end") publish(true);
   });
 
   return () => {

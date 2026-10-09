@@ -49,12 +49,19 @@ export async function readPersistedAgentHistoryTranscript(
       current.runtime === "claude" ||
       current.conversationId !== entry.conversationId
     ) return undefined;
+    // History JSON is a trust boundary; the live paths only produce finite positive rates.
+    const recordedTps = typeof current.tokensPerSecond === "number" &&
+      Number.isFinite(current.tokensPerSecond) && current.tokensPerSecond > 0
+      ? current.tokensPerSecond
+      : undefined;
     return historical.items.length > 0
       ? {
           items: historical.items,
           cwd: historical.agent.cwd ?? current.cwd,
           agent: historical.agent,
-          metadata: historical.metadata,
+          metadata: historical.metadata && recordedTps !== undefined
+            ? { ...historical.metadata, latestTokensPerSecond: recordedTps }
+            : historical.metadata,
         }
       : undefined;
   }

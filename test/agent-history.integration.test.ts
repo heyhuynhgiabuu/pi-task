@@ -998,6 +998,7 @@ test("/agents opens a settled durable child read-only when legacy history omits 
       sessionRef: undefined,
       status: "done",
       completedAt: Date.now(),
+      tokensPerSecond: 12.34,
     });
     upsertTaskSessionHistory(root, legacyEntry);
     const persistedEntry = readTaskSessionHistory(root).find(
@@ -1026,6 +1027,7 @@ test("/agents opens a settled durable child read-only when legacy history omits 
     const rendered = plain(overlay.render(100));
     assert.match(rendered, /settled durable child transcript body/);
     assert.match(rendered, /read-only/);
+    assert.match(rendered, /TPS 12\.3/, "the persisted run TPS recorded at settlement is shown read-only");
     assert.ok(
       !notices.some((notice) => /Could not read persisted transcript/.test(notice.message)),
       "a trusted byOwner binding avoids the false unavailable warning",

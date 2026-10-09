@@ -6,27 +6,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.11.5] - 2026-10-09
-
-### Fixed
-
-- Child TPS (introduced per-response in 0.11.4) now matches the main-agent TPS extension: sum assistant output over
-  a complete run, include tool time, and subtract only blocking UI prompt waits.
-  SDK and durable children use run start/end events; native Pi terminal children
-  record run timing with overlapping prompt-wait accounting in a custom session
-  entry. Response durations no longer masquerade as whole-run TPS. Durable runs
-  persist the observed TPS in task history so the read-only persisted child view
-  shows it. Children finished before this version and runs attached mid-run
-  remain hidden.
-
 ## [0.11.4] - 2026-10-09
 
 ### Added
 
-- Child transcript stats display TPS for the latest completed assistant response
-  using recorded output tokens and response duration, excluding tool time.
-  Durable, SDK, and persisted Pi JSONL metadata share the calculation; legacy,
-  deferred, aborted, errored, or untimed responses do not fabricate a rate.
+- Child transcript stats display TPS for the latest measured run: assistant
+  output over the whole run including tool time, minus blocking UI prompt waits,
+  matching the main-agent TPS extension. Durable, SDK, and persisted Pi JSONL
+  children share the calculation. Durable runs persist the observed TPS in task
+  history so the read-only persisted child view shows it. Children finished
+  before this version and runs attached mid-run show no TPS rather than a
+  reconstructed rate.
 - Bundled read-only `advisor` example agent for concrete design trade-offs and
   stalled approaches.
 
@@ -45,6 +35,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `prepack` now wipes `dist/` before building, so stale compiled modules
   cannot re-enter published tarballs (the v0.11.3 npm tarball carried an
   unused stale module; runtime was unaffected).
+
+- Child TPS no longer uses per-response durations. Native Pi terminal children
+  record run timing with overlapping prompt-wait accounting in a custom session
+  entry; SDK and durable children use run start/end events. Response durations
+  no longer masquerade as whole-run TPS.
 
 ## [0.11.3] - 2026-10-08
 

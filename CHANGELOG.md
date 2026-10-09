@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.11.5] - 2026-10-09
+
 ### Fixed
 
 - Durable child runs follow the parent's `retry` settings (`enabled`,

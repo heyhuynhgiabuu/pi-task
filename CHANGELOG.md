@@ -6,6 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Durable child runs follow the parent's `retry` settings (`enabled`,
+  `maxRetries`, `baseDelayMs`, `maxAgentDelayMs`) when a provider error is
+  transient, such as `WebSocket closed`. Before, they always used pi-durable's
+  defaults, so disabling or changing retries in Pi's settings had no effect on
+  durable children.
+
 ## [0.11.4] - 2026-10-09
 
 ### Added

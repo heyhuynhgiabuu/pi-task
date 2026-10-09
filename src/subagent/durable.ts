@@ -45,6 +45,7 @@ type DurableHarness = import("@earendil-works/pi-durable").Harness;
 type ChordContext = import("@earendil-works/chord").Context;
 type ConversationId = import("@earendil-works/pi-durable").ConversationId;
 type EntryId = import("@earendil-works/pi-durable").EntryId;
+type ConversationRetryPolicy = import("@earendil-works/pi-durable").ConversationRetryPolicy;
 
 type DurableRunRecord =
   | { taskId: string; status: "admitting"; ownerPid?: number }
@@ -123,6 +124,41 @@ type CachedHarness = {
 };
 
 const harnessCache = new Map<string, CachedHarness>();
+
+type RetrySettingsSource = () => Partial<ConversationRetryPolicy>;
+/** Until the extension registers its source, pi-durable keeps its own defaults. */
+let retrySettingsSource: RetrySettingsSource = () => ({});
+
+/**
+ * The parent's live retry policy for durable generation. pi-durable reads it at
+ * every attempt, so a cached or resumed harness follows the current settings
+ * without reopening.
+ */
+export function setDurableRetrySettingsSource(source: RetrySettingsSource): void {
+  retrySettingsSource = source;
+}
+
+/**
+ * Pi's `retry` settings in pi-durable's policy shape. settings.json is
+ * user-edited, so only well-typed keys are taken; absent keys keep pi-durable's
+ * defaults, which match Pi's own.
+ */
+export function durableRetryFromSettings(
+  settings: Record<string, unknown> | undefined,
+): Partial<ConversationRetryPolicy> {
+  const retry = settings?.retry;
+  if (typeof retry !== "object" || retry === null || Array.isArray(retry)) return {};
+  const record = retry as Record<string, unknown>;
+  const count = (value: unknown): number | undefined =>
+    typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+  const policy: Partial<ConversationRetryPolicy> = {};
+  if (typeof record.enabled === "boolean") policy.enabled = record.enabled;
+  for (const key of ["maxRetries", "baseDelayMs", "maxAgentDelayMs"] as const) {
+    const value = count(record[key]);
+    if (value !== undefined) policy[key] = value;
+  }
+  return policy;
+}
 
 /**
  * pi-durable 1.0.0 uses this Models subset for generation and compaction.
@@ -478,6 +514,7 @@ export async function openDurableHarness(
       {
         models,
         registry,
+        settings: { get retry() { return retrySettingsSource(); } },
         env: ({ cwd }: { cwd?: string }) =>
           new NodeExecutionEnv({ cwd: cwd ?? process.cwd() }),
       },

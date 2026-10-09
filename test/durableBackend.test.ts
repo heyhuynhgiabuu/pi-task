@@ -21,10 +21,12 @@ import {
   abortDurableTask,
   durableRequestId,
   DurableTaskCancelledError,
+  durableRetryFromSettings,
   executeDurableChildBuiltinCommand,
   openDurableHarness,
   resumeDurableTasks,
   runDurableTask,
+  setDurableRetrySettingsSource,
   steerDurableTask,
   createPiRuntimeModels,
   parseDurableThinkingLevel,
@@ -591,6 +593,59 @@ test("runDurableTask streams the child conversation snapshot and committed messa
     if (handle) await handle.harness.close(handle.context);
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+/** A provider whose first attempt fails with a transient WebSocket close, then answers. */
+function makeTransientFailureModels() {
+  const faux = fauxProvider();
+  faux.setResponses([
+    fauxAssistantMessage("", { stopReason: "error", errorMessage: "WebSocket closed 1000" }),
+    fauxAssistantMessage("Recovered answer."),
+  ]);
+  const models = createModels();
+  models.setProvider(faux.provider);
+  return { faux, models };
+}
+
+test("durable children follow the parent's retry setting for transient provider errors", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-durable-retry-setting-"));
+  const piDir = join(root, ".pi");
+  const databasePath = join(root, "durable.sqlite");
+  const { faux, models } = makeTransientFailureModels();
+  setDurableRetrySettingsSource(() => ({ enabled: false }));
+  try {
+    await assert.rejects(
+      runDurableTask({ piDir, databasePath, models: () => models, taskId: "t-retry-disabled", task: "Say hello." }),
+      /WebSocket closed 1000/,
+    );
+    assert.equal(faux.state.callCount, 1, "a disabled retry setting must not call the provider again");
+  } finally {
+    setDurableRetrySettingsSource(() => ({}));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("durable children retry transient provider errors by default", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-durable-retry-default-"));
+  const piDir = join(root, ".pi");
+  const databasePath = join(root, "durable.sqlite");
+  const { faux, models } = makeTransientFailureModels();
+  try {
+    const result = await runDurableTask({ piDir, databasePath, models: () => models, taskId: "t-retry-default", task: "Say hello." });
+    assert.equal(result.answer, "Recovered answer.");
+    assert.equal(faux.state.callCount, 2);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("durableRetryFromSettings takes only well-typed retry keys from Pi settings", () => {
+  assert.deepEqual(durableRetryFromSettings({}), {}, "no retry block leaves pi-durable defaults in place");
+  assert.deepEqual(
+    durableRetryFromSettings({ retry: { enabled: false, maxRetries: 1, baseDelayMs: 5, maxAgentDelayMs: 9, provider: { maxRetryDelayMs: 60000 } } }),
+    { enabled: false, maxRetries: 1, baseDelayMs: 5, maxAgentDelayMs: 9 },
+  );
+  assert.deepEqual(durableRetryFromSettings({ retry: { enabled: 1, maxRetries: "many", baseDelayMs: -1 } }), {});
 });
 
 test("steerDurableTask rejects an idle child without starting untracked work", async () => {

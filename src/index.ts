@@ -130,12 +130,12 @@ import {
   abortDurableTask,
   executeDurableChildBuiltinCommand,
   readDurableTaskHistoryTranscript,
-  durableRetryFromSettings,
+  retrySettingsSourceFrom,
   setDurableRetrySettingsSource,
   steerDurableTask,
   type DurableRuntimeModelRegistry,
 } from "./subagent/durable.js";
-import { ignoreStaleExtensionCtx, isStaleExtensionCtxError } from "./stale-ctx.js";
+import { ignoreStaleExtensionCtx } from "./stale-ctx.js";
 import { resolveTaskCwd } from "./task-cwd.js";
 import { serializeTaskAdmission } from "./task-admission.js";
 import { handleTaskControl } from "./task-control-api.js";
@@ -159,19 +159,14 @@ const BUNDLED_AGENT_DIR = join(
 
 export default function (pi: ExtensionAPI) {
   // Durable children retry transient provider errors under the parent's live
-  // `retry` settings. A replaced extension API (after reload) keeps Pi's defaults.
-  setDurableRetrySettingsSource(() => {
-    try {
-      return durableRetryFromSettings(
-        typeof pi.getSettings === "function"
-          ? (pi.getSettings() as Record<string, unknown> | undefined)
-          : undefined,
-      );
-    } catch (error) {
-      if (isStaleExtensionCtxError(error)) return {};
-      throw error;
-    }
-  });
+  // `retry` settings; retrySettingsSourceFrom covers a replaced extension API.
+  setDurableRetrySettingsSource(
+    retrySettingsSourceFrom(() =>
+      typeof pi.getSettings === "function"
+        ? (pi.getSettings() as Record<string, unknown> | undefined)
+        : undefined,
+    ),
+  );
   // The parent reads this to decide whether its children run fast, and a
   // terminal child launched with `--fast` reads it to install its isolated
   // provider bridge. Keep one owner for the flag: Pi's getFlag() is scoped to

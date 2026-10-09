@@ -15,6 +15,7 @@ import { join } from "node:path";
 
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { readTaskSessionHistory } from "../conversation.js";
+import { isStaleExtensionCtxError } from "../stale-ctx.js";
 import { DurableTranscript, type DurableChildHistoryTranscript } from "../panel/durable-transcript.js";
 import { createTaskFastModeModelMatcher } from "../fast-mode.js";
 import {
@@ -136,6 +137,26 @@ let retrySettingsSource: RetrySettingsSource = () => ({});
  */
 export function setDurableRetrySettingsSource(source: RetrySettingsSource): void {
   retrySettingsSource = source;
+}
+
+/**
+ * The live source behind `setDurableRetrySettingsSource`. A stale extension ctx
+ * (after a reload) keeps the last policy this source read, so a child that
+ * outlives its extension instance does not silently regain default retries.
+ * Before any successful read, Pi's defaults apply.
+ */
+export function retrySettingsSourceFrom(
+  readSettings: () => Record<string, unknown> | undefined,
+): RetrySettingsSource {
+  let lastGood: Partial<ConversationRetryPolicy> = {};
+  return () => {
+    try {
+      lastGood = durableRetryFromSettings(readSettings());
+    } catch (error) {
+      if (!isStaleExtensionCtxError(error)) throw error;
+    }
+    return lastGood;
+  };
 }
 
 /**

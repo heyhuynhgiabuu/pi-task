@@ -26,6 +26,7 @@ import {
   openDurableHarness,
   resumeDurableTasks,
   runDurableTask,
+  retrySettingsSourceFrom,
   setDurableRetrySettingsSource,
   steerDurableTask,
   createPiRuntimeModels,
@@ -625,16 +626,66 @@ test("durable children follow the parent's retry setting for transient provider 
   }
 });
 
-test("durable children retry transient provider errors by default", async () => {
-  const root = mkdtempSync(join(tmpdir(), "pi-task-durable-retry-default-"));
+test("durable children retry transient provider errors under the parent's retry settings", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-durable-retry-enabled-"));
   const piDir = join(root, ".pi");
   const databasePath = join(root, "durable.sqlite");
   const { faux, models } = makeTransientFailureModels();
+  setDurableRetrySettingsSource(() => ({ baseDelayMs: 1 }));
   try {
-    const result = await runDurableTask({ piDir, databasePath, models: () => models, taskId: "t-retry-default", task: "Say hello." });
+    const result = await runDurableTask({ piDir, databasePath, models: () => models, taskId: "t-retry-enabled", task: "Say hello." });
     assert.equal(result.answer, "Recovered answer.");
     assert.equal(faux.state.callCount, 2);
   } finally {
+    setDurableRetrySettingsSource(() => ({}));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a maxRetries of zero from the parent's settings stops after the first transient failure", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-durable-max-retries-"));
+  const piDir = join(root, ".pi");
+  const databasePath = join(root, "durable.sqlite");
+  const { faux, models } = makeTransientFailureModels();
+  setDurableRetrySettingsSource(() => ({ maxRetries: 0 }));
+  try {
+    await assert.rejects(
+      runDurableTask({ piDir, databasePath, models: () => models, taskId: "t-max-retries-zero", task: "Say hello." }),
+      /WebSocket closed 1000/,
+    );
+    assert.equal(faux.state.callCount, 1);
+  } finally {
+    setDurableRetrySettingsSource(() => ({}));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a cached durable harness follows a retry setting changed after it opened", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-durable-flip-retry-"));
+  const piDir = join(root, ".pi");
+  const databasePath = join(root, "durable.sqlite");
+  const faux = fauxProvider();
+  faux.setResponses([
+    fauxAssistantMessage("", { stopReason: "error", errorMessage: "WebSocket closed 1000" }),
+    fauxAssistantMessage("First answer."),
+    fauxAssistantMessage("", { stopReason: "error", errorMessage: "WebSocket closed 1000" }),
+    fauxAssistantMessage("Never reached."),
+  ]);
+  const models = createModels();
+  models.setProvider(faux.provider);
+  try {
+    const first = await runDurableTask({ piDir, databasePath, models: () => models, taskId: "t-flip-first", task: "First." });
+    assert.equal(first.answer, "First answer.");
+    assert.equal(faux.state.callCount, 2);
+
+    setDurableRetrySettingsSource(() => ({ enabled: false }));
+    await assert.rejects(
+      runDurableTask({ piDir, databasePath, taskId: "t-flip-second", task: "Second." }),
+      /WebSocket closed 1000/,
+    );
+    assert.equal(faux.state.callCount, 3, "the cached harness must read the new setting, not the one it opened with");
+  } finally {
+    setDurableRetrySettingsSource(() => ({}));
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -646,6 +697,36 @@ test("durableRetryFromSettings takes only well-typed retry keys from Pi settings
     { enabled: false, maxRetries: 1, baseDelayMs: 5, maxAgentDelayMs: 9 },
   );
   assert.deepEqual(durableRetryFromSettings({ retry: { enabled: 1, maxRetries: "many", baseDelayMs: -1 } }), {});
+  assert.deepEqual(durableRetryFromSettings({ retry: null }), {});
+  assert.deepEqual(durableRetryFromSettings({ retry: [] }), {});
+  assert.deepEqual(durableRetryFromSettings({ retry: { maxRetries: 0, baseDelayMs: Infinity } }), { maxRetries: 0 });
+});
+
+const STALE_CTX = "This extension ctx is stale after session replacement.";
+
+test("retrySettingsSourceFrom keeps the last good policy across a stale extension ctx", () => {
+  let stale = false;
+  const source = retrySettingsSourceFrom(() => {
+    if (stale) throw new Error(STALE_CTX);
+    return { retry: { enabled: false } };
+  });
+  assert.deepEqual(source(), { enabled: false });
+  stale = true;
+  assert.deepEqual(source(), { enabled: false }, "a stale ctx keeps the last successful policy");
+});
+
+test("retrySettingsSourceFrom uses Pi defaults when a stale ctx has no good read yet", () => {
+  const source = retrySettingsSourceFrom(() => {
+    throw new Error(STALE_CTX);
+  });
+  assert.deepEqual(source(), {});
+});
+
+test("retrySettingsSourceFrom rethrows failures that are not a stale extension ctx", () => {
+  const source = retrySettingsSourceFrom(() => {
+    throw new Error("settings file unreadable");
+  });
+  assert.throws(() => source(), /settings file unreadable/);
 });
 
 test("steerDurableTask rejects an idle child without starting untracked work", async () => {

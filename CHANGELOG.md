@@ -6,6 +6,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- A HerdR task whose `agent start` is rejected before any input reaches the
+  shell (`agent_start_input_failed`, e.g. an agent command line over the
+  terminal's 1024-byte canonical-mode limit, or `invalid_agent_argument`) no
+  longer leaves its freshly split pane, or new grouped workspace, behind as an
+  idle shell. The cleanup first re-checks that the pane still holds the
+  terminal this launch created and hosts no agent; every other startup failure
+  stays non-destructive.
+
 ## [0.13.0] - 2026-10-22
 
 ### Changed

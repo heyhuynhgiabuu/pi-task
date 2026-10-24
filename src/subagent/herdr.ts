@@ -383,6 +383,51 @@ async function closeCreatedResource(
   }
 }
 
+/**
+ * HerdR codes that reject `agent start` before any input reaches the pane's
+ * shell, for example an over-long command line or arguments the target shell
+ * cannot encode. Nothing ran, so the pane pi-task just created is still the
+ * bare shell it split.
+ */
+const START_REJECTED_BEFORE_INPUT_CODES = new Set([
+  "agent_start_input_failed",
+  "invalid_agent_argument",
+]);
+
+function isStartRejectedBeforeInput(error: unknown): boolean {
+  const code = errorCode(error);
+  return code !== undefined && START_REJECTED_BEFORE_INPUT_CODES.has(code);
+}
+
+/**
+ * Close the pane (or new grouped workspace) left behind by a rejected
+ * `agent start`. The generic cleanup stays non-destructive without agent
+ * identity, but a rejected start leaves no agent to capture, so a bare shell
+ * would leak forever. Ownership is re-proven instead: the pane must still be
+ * the terminal this launch created and must not host any agent.
+ */
+async function closeRejectedStartResource(
+  run: HerdrRun,
+  workspace: HerdrWorkspace | undefined,
+  created: HerdrPane,
+): Promise<void> {
+  try {
+    const current = paneFrom(
+      decode((await run(["pane", "get", created.pane_id])).stdout, "pane get"),
+    );
+    if (current.terminal_id !== created.terminal_id || current.agent) return;
+  } catch {
+    return;
+  }
+  if (workspace) {
+    await run(["workspace", "close", workspace.workspace_id]).catch(
+      () => undefined,
+    );
+  } else {
+    await run(["pane", "close", created.pane_id]).catch(() => undefined);
+  }
+}
+
 async function verifyPromptTimeout(
   run: HerdrRun,
   promptIdentity: HerdrAgentInfo,
@@ -775,6 +820,10 @@ export function createHerdrTerminalBackend(
               : {}),
           };
         } catch (error) {
+          if (created && !expectedAgent && isStartRejectedBeforeInput(error)) {
+            await closeRejectedStartResource(run, workspace, created);
+            throw error;
+          }
           await closeCreatedResource(
             run,
             workspace,

@@ -6,6 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- The task tool's declared `outputSchema` now names `usage`, the durable
+  backend's child spend ledger. It was already on `details` for every terminal
+  receipt, but codemode renders the model-visible tool declaration from the
+  schema, so `usage` was discoverable only by a script that tried it. The
+  schema also gains a fixture that carries the ledger, so a future strictness
+  change cannot drop it silently.
+
 ## [0.13.0] - 2026-10-22
 
 ### Changed

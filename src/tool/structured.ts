@@ -1,5 +1,13 @@
 import { Type } from "typebox";
 
+/** One `pi.usage` bucket of a durable child conversation, as `details.usage` reports it. */
+const durableUsageTotals = Type.Object({
+  inputTokens: Type.Number(),
+  outputTokens: Type.Number(),
+  totalTokens: Type.Number(),
+  costTotal: Type.Number({ description: "Provider-computed cost; 0 when unknown" }),
+});
+
 /**
  * The JSON contract codemode scripts receive instead of the text content once
  * the task tool declares an `outputSchema` (pi's codemode resolves nested calls
@@ -104,6 +112,15 @@ export function taskResultOutputSchema() {
     ),
     file: Type.Optional(
       Type.String({ description: "Durable file that could not be read" }),
+    ),
+    // Spend of the child conversation. Durable backend only: the other backends
+    // report none, so the field is absent rather than zeroed.
+    usage: Type.Optional(
+      Type.Object({
+        models: Type.Record(Type.String(), durableUsageTotals),
+        tools: Type.Record(Type.String(), durableUsageTotals),
+        totals: durableUsageTotals,
+      }),
     ),
   });
 }

@@ -85,6 +85,40 @@ const comparison: ToolResult = {
   },
 };
 
+// The durable backend attaches the child conversation's `pi.usage` ledger to
+// every terminal receipt. Without this fixture the schema could omit `usage`
+// and still pass: TypeBox leaves unknown keys allowed unless a schema declares
+// them, so the gap only shows up once the field has to be declared.
+const durableDone: ToolResult = {
+  content: [{ type: "text", text: "done" }],
+  details: {
+    phase: "done",
+    task_id: "t1",
+    backend: "durable",
+    status: "success",
+    result_valid: true,
+    summary: "one line",
+    tool_uses: 4,
+    usage: {
+      models: {
+        "anthropic/claude-haiku-5-5": {
+          inputTokens: 50,
+          outputTokens: 19_572,
+          totalTokens: 1_222_013,
+          costTotal: 0.03645517,
+        },
+      },
+      tools: {},
+      totals: {
+        inputTokens: 50,
+        outputTokens: 19_572,
+        totalTokens: 1_222_013,
+        costTotal: 0.03645517,
+      },
+    },
+  },
+};
+
 test("structuredContent mirrors details so scripts receive data", async () => {
   const execute = withTaskStructuredContent(async () => receipt);
   const result = await execute();
@@ -134,13 +168,34 @@ test("the wrapper forwards every execute argument", async () => {
 
 test("the declared schema accepts the shapes execute builds", () => {
   const validator = Compile(taskResultOutputSchema());
-  for (const shape of [receipt, report, failure, comparison]) {
+  for (const shape of [receipt, report, failure, comparison, durableDone]) {
     assert.equal(
       validator.Check(shape.details),
       true,
       JSON.stringify(shape.details),
     );
   }
+});
+
+test("the schema declares the durable usage ledger, not just tolerates it", () => {
+  // `usage` reached `details` from the durable backend but was absent from the
+  // schema, so codemode's rendered declaration never mentioned it and a script
+  // author had to discover it at runtime. Pin the declaration itself.
+  const { properties } = taskResultOutputSchema() as unknown as {
+    properties: Record<string, unknown>;
+  };
+  assert.ok("usage" in properties, "usage must be a declared property");
+
+  const validator = Compile(taskResultOutputSchema());
+  const ledger = durableDone.details!.usage as { totals: Record<string, unknown> };
+  assert.equal(
+    validator.Check({
+      ...durableDone.details,
+      usage: { ...ledger, totals: { ...ledger.totals, inputTokens: "no" } },
+    }),
+    false,
+    "a malformed ledger must not validate",
+  );
 });
 
 test("registration wires annotations, outputSchema, and structuredContent", async () => {

@@ -52,6 +52,7 @@ import {
   buildTaskEnvelope,
   envHardTimeoutMs,
   formatTaskIdPointer,
+  taskStateLine,
   parseResultXml,
   structuredResultPayload,
   taskResultContentText,
@@ -131,6 +132,7 @@ function failureMessage(error: unknown): string {
 
 export function formatDurableBackgroundReceipt(id: string): string {
   return [
+    taskStateLine(id, "running"),
     `Task ${id} is running on the durable backend.`,
     "Its work is committed to durable storage: if this Pi process dies, the next one resumes and delivers the result.",
     "Results are delivered automatically; do not poll.",
@@ -363,7 +365,7 @@ export async function resumeDurableAfterRestart(deps: {
       const summary = taskResultContentText(parsed, assessment) || output.trim();
       notify(
         completionDeliveryId(taskId, history?.startedAt ?? Date.now()),
-        `Background task ${taskId} (durable) resumed after restart and finished.\n\n${summary}`,
+        `${taskStateLine(taskId, "done")}\nBackground task ${taskId} (durable) resumed after restart and finished.\n\n${summary}`,
         {
           usage,
           agent_type: history?.agentType ?? "task",
@@ -409,7 +411,7 @@ export async function resumeDurableAfterRestart(deps: {
       }
       notify(
         completionDeliveryId(taskId, history?.startedAt ?? Date.now()),
-        `Background task ${taskId} (durable) ${phase === "timeout" ? "timed out" : "was cancelled"}.\n\n${timeoutLimitMs !== undefined ? timeoutMessage(timeoutLimitMs) : reason}`,
+        `${taskStateLine(taskId, phase)}\nBackground task ${taskId} (durable) ${phase === "timeout" ? "timed out" : "was cancelled"}.\n\n${timeoutLimitMs !== undefined ? timeoutMessage(timeoutLimitMs) : reason}`,
         {
           agent_type: history?.agentType ?? "task",
           description: history?.description ?? "",
@@ -443,7 +445,7 @@ export async function resumeDurableAfterRestart(deps: {
       }
       notify(
         completionDeliveryId(taskId, history?.startedAt ?? Date.now()),
-        `Background task ${taskId} (durable) did not survive the restart.\n\n${reason}`,
+        `${taskStateLine(taskId, "failed")}\nBackground task ${taskId} (durable) did not survive the restart.\n\n${reason}`,
         {
           agent_type: history?.agentType ?? "task",
           description: history?.description ?? "",
@@ -851,7 +853,7 @@ export async function executeDurableTask({
           taskResultContentText(parsed, assessment) ||
           "Durable subagent completed without assistant text.";
         return notify(
-          `Background task ${id} (${agent.name}) done.\n\n${summary}`,
+          `${taskStateLine(id, "done")}\nBackground task ${id} (${agent.name}) done.\n\n${summary}`,
           {
             agent_type: agent.name,
             description,
@@ -886,7 +888,7 @@ export async function executeDurableTask({
         backgroundTask.status = phase;
         const message = failureMessage(error);
         return notify(
-          `Background task ${id} (${agent.name}) ${phase}.\n\n${message}`,
+          `${taskStateLine(id, phase)}\nBackground task ${id} (${agent.name}) ${phase}.\n\n${message}`,
           {
             agent_type: agent.name,
             description,

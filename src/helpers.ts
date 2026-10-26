@@ -426,6 +426,17 @@ ${errorBlock}${summaryBlock}${formatSection("Findings", run.findings)}${formatSe
   return report;
 }
 
+export type TaskStateName = "running" | "done" | "failed" | "cancelled" | "timeout";
+
+/**
+ * One line the model reads before a task's text, so a receipt, a result, and a
+ * completion notice all state the task's outcome the same way, whatever the
+ * backend wording that follows. `details` carries the same state for tools.
+ */
+export function taskStateLine(id: string, state: TaskStateName): string {
+  return `<task id="${id}" state="${state}"/>`;
+}
+
 /**
  * Model-visible recovery pointer appended to a task result. `resumable` is
  * false for tasks that cannot reopen a prior session (SDK, Claude Code), so
@@ -610,6 +621,7 @@ export interface BackgroundReceiptInput {
 
 export function formatBackgroundReceipt(input: BackgroundReceiptInput): string {
   return [
+    taskStateLine(input.taskId, "running"),
     `⎿ Started task ${input.taskId} with ${input.agentType}.`,
     ...(input.backend ? [`  Backend: ${input.backend}${input.backendReason ? ` (${input.backendReason})` : ""}`] : []),
     `  Subagent sessions: ${input.sessionPath}`,

@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- Background receipts and completion notices (including replacements for lost
+  notices and recovered durable runs) open with a one-line state for the model,
+  `<task id="<id>" state="running|done|failed|cancelled|timeout"/>`, so the
+  outcome reads the same on every backend. The backend's own text follows
+  unchanged, `details` is unchanged, and foreground results are untouched.
 - HerdR launches run a short `echo` marker in the new pane and wait for its
   output before `agent start`. `agent start` types the whole command line into
   the pane, and HerdR rejects a line over 1024 bytes while the shell is still

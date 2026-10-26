@@ -14,8 +14,10 @@ import {
   completionDeliveryOptions,
   parseResultXml,
   structuredResultPayload,
+  taskStateLine,
   unrecognizedStatusWarning,
   type ParsedResult,
+  type TaskStateName,
 } from "../helpers.js";
 import { createSyncHerdrControl } from "../subagent/herdr.js";
 import { killAgentPaneStrict } from "../subagent/tmux.js";
@@ -495,12 +497,12 @@ export function createCompletionDeliveryQueue(windowMs = 200): CompletionDeliver
   };
 }
 
-const LOST_NOTICE_STATUSES: ReadonlySet<TaskSessionHistoryEntry["status"]> = new Set([
-  "done",
-  "failed",
-  "cancelled",
-  "timeout",
-]);
+type FinishedTaskEntry = TaskSessionHistoryEntry & { status: Exclude<TaskStateName, "running"> };
+
+function isFinishedTaskEntry(entry: TaskSessionHistoryEntry): entry is FinishedTaskEntry {
+  return entry.status === "done" || entry.status === "failed" ||
+    entry.status === "cancelled" || entry.status === "timeout";
+}
 
 /** Older lost notices are not replayed, so an upgrade cannot flood an old session. */
 export const LOST_NOTICE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
@@ -521,14 +523,14 @@ export function findLostCompletionNotices(input: {
   persisted: (deliveryIds: ReadonlySet<string>) => ReadonlySet<string>;
   now?: number;
   isProcessAlive?: (pid: number) => boolean;
-}): TaskSessionHistoryEntry[] {
+}): FinishedTaskEntry[] {
   const now = input.now ?? Date.now();
   const isAlive = input.isProcessAlive ?? isProcessAliveOrUnknown;
-  const candidates = input.history.filter((entry) =>
+  const candidates = input.history.filter((entry): entry is FinishedTaskEntry =>
+    isFinishedTaskEntry(entry) &&
     entry.background &&
     entry.comparisonGroupId === undefined &&
     entry.ownerSessionId === input.sessionId &&
-    LOST_NOTICE_STATUSES.has(entry.status) &&
     entry.completedAt !== undefined &&
     now - entry.completedAt <= LOST_NOTICE_MAX_AGE_MS &&
     (entry.ownerPid === undefined || (entry.ownerPid !== process.pid && !isAlive(entry.ownerPid)))
@@ -541,7 +543,7 @@ export function findLostCompletionNotices(input: {
 }
 
 /** The notice sent for a task found by {@link findLostCompletionNotices}. */
-export function lostCompletionNotice(entry: TaskSessionHistoryEntry): {
+export function lostCompletionNotice(entry: FinishedTaskEntry): {
   customType: "task-complete";
   content: string;
   display: true;
@@ -550,6 +552,7 @@ export function lostCompletionNotice(entry: TaskSessionHistoryEntry): {
   return {
     customType: "task-complete",
     content:
+      `${taskStateLine(entry.id, entry.status)}\n` +
       `Background task ${entry.id} (${entry.agentType}) ${entry.status} while Pi was not running, ` +
       `and its completion notice was not saved to this session. ` +
       `Read its outcome with /task status ${entry.id}, or continue it with task_id "${entry.id}".`,
@@ -791,7 +794,7 @@ export function completeTask({
     if (deliveryGuard && !deliveryGuard()) return "suppressed";
     return sendCompletionNotice(pi, {
       customType: "task-complete",
-      content: `Background task ${id} (${task.agentType}) ${phase}.\n\n${warning ? warning + "\n\n" : ""}${summaryText}`,
+      content: `${taskStateLine(id, phase)}\nBackground task ${id} (${task.agentType}) ${phase}.\n\n${warning ? warning + "\n\n" : ""}${summaryText}`,
       display: true,
       details: {
         task_id: id,

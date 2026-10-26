@@ -143,6 +143,7 @@ test("a background durable run that outlives the hard timeout is delivered and r
     });
     assert.equal(sent[0]?.details?.phase, "timeout");
     assert.match(String(sent[0]?.content), /timeout/i);
+    assert.ok(String(sent[0]?.content).startsWith('<task id="t-hard-timeout" state="timeout"/>\n'));
     await until(() => readTaskSessionHistory(join(root, ".pi")).find((e) => e.id === "t-hard-timeout")?.status === "timeout");
   } finally {
     rmSync(root, { recursive: true, force: true });

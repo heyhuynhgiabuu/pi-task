@@ -10,6 +10,7 @@ import {
   buildTaskEnvelope,
   envHardTimeoutMs,
   formatTaskIdPointer,
+  taskStateLine,
   parseResultXml,
   structuredResultPayload,
   subscribeToolEvents,
@@ -271,7 +272,7 @@ export async function executeSdkTask({
           "SDK subagent completed without assistant text.";
         return sendCompletionNotice(pi, {
           customType: "task-complete",
-          content: `Background task ${id} (${agent.name}) done.\n\n${summary}`,
+          content: `${taskStateLine(id, "done")}\nBackground task ${id} (${agent.name}) done.\n\n${summary}`,
           display: true,
           details: {
             ...buildAcpTaskSessionData(
@@ -314,7 +315,7 @@ export async function executeSdkTask({
         const message = error instanceof Error ? error.message : String(error);
         return sendCompletionNotice(pi, {
           customType: "task-complete",
-          content: `Background task ${id} (${agent.name}) ${phase}.\n\n${message}`,
+          content: `${taskStateLine(id, phase)}\nBackground task ${id} (${agent.name}) ${phase}.\n\n${message}`,
           display: true,
           details: {
             ...buildAcpTaskSessionData(

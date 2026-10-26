@@ -136,9 +136,9 @@ export type DurableConversationGateResolution =
   | { kind: "rejected"; result: TaskPreparationResult };
 
 /**
- * The shared durable-conversation rejection. The early launch gate and the
- * post-resolution SDK backstop in index.ts must stay one message, so both go
- * through here; `details.error` is a stable failure identifier.
+ * The shared named-conversation rejection. The early launch gate and the
+ * post-resolution SDK and durable backstops in index.ts must stay one message,
+ * so all go through here; `details.error` is a stable failure identifier.
  */
 export function durableConversationRejection(conversationId: string): TaskPreparationResult {
   return {
@@ -146,7 +146,7 @@ export function durableConversationRejection(conversationId: string): TaskPrepar
       {
         type: "text",
         text:
-          "Durable conversations need a backend that can reopen the child session: start Pi inside HerdR or tmux, select the durable backend with PI_TASK_BACKEND=durable (or the taskBackend setting), or omit conversation_id for a one-shot SDK task.",
+          "Named conversations (conversation_id) need a HerdR or tmux terminal backend to reopen the child session; the durable and SDK backends cannot. Start Pi inside HerdR or tmux, or omit conversation_id. On the durable backend, pass task_id to continue the same child.",
       },
     ],
     details: {
@@ -160,9 +160,9 @@ export function durableConversationRejection(conversationId: string): TaskPrepar
 
 /**
  * Whether `conversation_id` can resume on the backend the launch would select.
- * Durable keeps its conversation registry in SQLite and needs no terminal;
- * terminal conversations need an active HerdR context or tmux server; SDK
- * runs are one-shot and cannot reopen a session. The preference resolution
+ * Only terminal conversations can: they need an active HerdR context or tmux
+ * server. SDK runs are one-shot, and the durable backend continues a child
+ * through `task_id` instead. The preference resolution
  * mirrors `resolveTaskBackend` via `resolveRequestedBackendKind`, and an
  * invalid preference is allowed through so the resolver's precise error wins.
  */
@@ -176,7 +176,8 @@ export function evaluateDurableConversationGate(input: {
   const preference = resolveRequestedBackendKind({ settingsBackend: input.settingsBackend });
   if (!isValidBackendPreference(preference)) return { kind: "allowed" };
   const terminalAvailable = input.tmuxAvailable || input.herdrContextAvailable;
-  const conversationsSupported = preference === "durable" || (preference !== "sdk" && terminalAvailable);
+  const conversationsSupported =
+    preference !== "durable" && preference !== "sdk" && terminalAvailable;
   if (conversationsSupported) return { kind: "allowed" };
   return { kind: "rejected", result: durableConversationRejection(input.conversationId) };
 }

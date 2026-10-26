@@ -1289,12 +1289,13 @@ export default function (pi: ExtensionAPI) {
             isError: true,
           };
         }
-        if (conversationId || taskParams.compare) {
+        if (conversationId) return durableConversationRejection(conversationId);
+        if (taskParams.compare) {
           return {
             content: [
               {
                 type: "text" as const,
-                text: "The durable backend does not support durable conversations (conversation_id) or comparison mode. Omit both, or use a terminal backend.",
+                text: "The durable backend does not support comparison mode. Omit compare, or use a terminal backend.",
               },
             ],
             details: {

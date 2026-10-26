@@ -51,21 +51,23 @@ function gate(overrides: {
 	});
 }
 
-test("durable conversations survive without a terminal on every explicit durable preference", () => {
-	withPreferenceEnv({}, () => {
-		for (const overrides of [
-			{ settingsBackend: "durable" },
-			{ settingsBackend: "Durable" },
-		]) {
-			assert.equal(
-				gate({ conversationId: "conv-1", ...overrides }).kind,
-				"allowed",
-				`settings ${String(overrides.settingsBackend)} allows durable conversations`,
-			);
-		}
-	});
+test("an explicit durable preference rejects conversations even with a terminal", () => {
+	for (const overrides of [{ settingsBackend: "durable" }, { settingsBackend: "Durable" }]) {
+		withPreferenceEnv({}, () => {
+			const decision = gate({
+				conversationId: "conv-1",
+				tmuxAvailable: true,
+				herdrContextAvailable: true,
+				...overrides,
+			});
+			assert.equal(decision.kind, "rejected", `settings ${overrides.settingsBackend}`);
+			assert(decision.kind === "rejected");
+			assert.equal(decision.result.details.error, "tmux required for durable conversation");
+			assert.match(String(decision.result.content[0]?.text), /task_id/);
+		});
+	}
 	withPreferenceEnv({ PI_TASK_BACKEND: "durable" }, () => {
-		assert.equal(gate({ conversationId: "conv-1" }).kind, "allowed");
+		assert.equal(gate({ conversationId: "conv-1", tmuxAvailable: true }).kind, "rejected");
 	});
 	withPreferenceEnv({ PI_TASK_USE_TMUX_BACKEND: "1" }, () => {
 		assert.equal(gate({ conversationId: "conv-1" }).kind, "rejected");
@@ -115,7 +117,7 @@ test("an invalid backend preference defers to the backend resolver instead of th
 	});
 });
 
-test("prepareTaskExecution admits durable conversations without a terminal", async () => {
+test("prepareTaskExecution rejects a conversation under the durable preference", async () => {
 	const artifactsDir = mkdtempSync(join(tmpdir(), "pi-task-conversation-gate-"));
 	try {
 		const prepared = await withPreferenceEnv({ PI_TASK_BACKEND: "durable" }, () =>
@@ -131,7 +133,8 @@ test("prepareTaskExecution admits durable conversations without a terminal", asy
 				id: "t-gate-1",
 				conversationId: "conv-gate",
 			}));
-		assert.equal(prepared.kind, "continue", "a durable conversation must not be rejected for lacking tmux");
+		assert(prepared.kind === "handled", "the durable backend cannot reopen a named conversation");
+		assert.equal(prepared.result.details.error, "tmux required for durable conversation");
 	} finally {
 		rmSync(artifactsDir, { recursive: true, force: true });
 	}

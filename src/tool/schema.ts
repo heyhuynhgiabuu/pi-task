@@ -42,7 +42,7 @@ export function taskParametersSchema() {
     ),
     conversation_id: Type.Optional(
       Type.String({
-        description: "Start/resume a named conversation on supported backends; not task_id",
+        description: "Start/resume a named conversation on the HerdR and tmux backends; not task_id",
       }),
     ),
     parent_context: Type.Optional(

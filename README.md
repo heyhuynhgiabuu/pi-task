@@ -106,7 +106,7 @@ Background task:
 }
 ```
 
-Durable specialist conversation:
+Named specialist conversation (HerdR or tmux backends):
 
 ```
 {
@@ -118,7 +118,7 @@ Durable specialist conversation:
 }
 ```
 
-`conversation_id` maps to a durable subagent run. Reused across calls to keep specialist memory, e.g. a reusable research assistant. Use `/task list` to browse tracked task rows (or list durable conversation IDs headlessly) and `/agents` to switch among currently tracked transcripts.
+`conversation_id` maps to a persistent subagent session and needs the HerdR or tmux backend; the SDK and experimental durable backends reject it. On the durable backend, pass the earlier `task_id` to continue the same child. Reused across calls to keep specialist memory, e.g. a reusable research assistant. Use `/task list` to browse tracked task rows (or list durable conversation IDs headlessly) and `/agents` to switch among currently tracked transcripts.
 
         Stored files:
 

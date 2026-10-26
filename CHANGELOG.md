@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- `conversation_id` is rejected up front when the durable backend is selected,
+  with a message that points to `task_id` (the durable backend continues a child
+  through it) and to HerdR or tmux. The 0.11.3 note that it "now works on the
+  durable backend" was wrong: the launch gate admitted it, then the backend
+  refused it with a different message that sent the user back to the setting
+  that had just failed. The durable compare rejection is now a separate
+  message.
 - A HerdR task whose `agent start` is rejected before any input reaches the
   pane (`agent_start_input_failed`, `invalid_agent_argument`,
   `invalid_agent_name`) closes the bare shell pane it split, or the new grouped

@@ -170,6 +170,8 @@ export async function resumeDurableAfterRestart(deps: {
   onStoreFailure?: (databasePath: string, error: unknown) => void;
   models?: DurableModelsFactory;
   modelRegistry?: DurableRuntimeModelRegistry;
+  /** Test seam for the abort the recovery ceiling issues. */
+  abortTask?: typeof abortDurableTask;
   /** Restore the non-focusing task row before attaching its live transcript. */
   onTaskResumed?: (
     taskId: string,
@@ -248,22 +250,22 @@ export async function resumeDurableAfterRestart(deps: {
   // run while Pi was down.
   const recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const timedOutRecovered = new Map<string, number>();
-  const armRecoveryTimeout = (taskId: string) => {
-    const limitMs = hardTimeoutLimitMs();
-    if (limitMs === undefined) return;
+  const armRecoveryTimeout = (taskId: string, limitMs: number) => {
     const timer = setTimeout(() => {
       timedOutRecovered.set(taskId, limitMs);
       // abortDurableTask reports a missing child by returning a message, not
       // by throwing; either way nothing was aborted, so it was no timeout.
-      void abortDurableTask(piDir, taskId, {
+      void (deps.abortTask ?? abortDurableTask)(piDir, taskId, {
         databasePath: deps.databasePath,
         modelRegistry: deps.modelRegistry,
       }).then(
         (problem) => { if (problem !== null) timedOutRecovered.delete(taskId); },
         () => {
-          // The abort itself failed, so the run is still going: keep the ceiling.
-          timedOutRecovered.delete(taskId);
-          if (authorizedTasks.has(taskId)) armRecoveryTimeout(taskId);
+          // A throw cannot tell an abort that never reached the child from one
+          // that took effect and then failed. Keep the flag so a cancellation
+          // that does land is reported as this timeout, and arm the ceiling
+          // again in case the run is still going.
+          if (authorizedTasks.has(taskId)) armRecoveryTimeout(taskId, limitMs);
         },
       );
     }, limitMs);
@@ -301,7 +303,8 @@ export async function resumeDurableAfterRestart(deps: {
       }
       resumedHistory.set(taskId, durableHistory);
       authorizedTasks.add(taskId);
-      armRecoveryTimeout(taskId);
+      const limitMs = hardTimeoutLimitMs();
+      if (limitMs !== undefined) armRecoveryTimeout(taskId, limitMs);
       try {
         deps.onTaskResumed?.(taskId, durableHistory, conversationId);
       } catch {

@@ -189,7 +189,12 @@ test("a background durable run that outlives the hard timeout is delivered and r
   }
 });
 
-test("a recovered durable run gets a fresh ceiling and is aborted, recorded and delivered as a timeout", async () => {
+type AbortTask = typeof abortDurableTask;
+
+// A durable child recovered after a restart whose model is stuck in a long tool
+// call, resumed under a ~300 ms ceiling. `abortTask` replaces the abort the
+// ceiling issues, so its failure modes can be exercised.
+async function recoverUnderCeiling(abortTask?: (real: AbortTask) => AbortTask) {
   const root = mkdtempSync(join(tmpdir(), "pi-task-durable-timeout-recovered-"));
   const piDir = join(root, ".pi");
   const databasePath = join(piDir, "durable", "tasks.sqlite");
@@ -241,26 +246,58 @@ test("a recovered durable run gets a fresh ceiling and is aborted, recorded and 
       sessionId: "sess-timeout",
       databasePath,
       models: () => models,
+      ...(abortTask ? { abortTask: abortTask(abortDurableTask) } : {}),
       onTaskSettled: (_id, _history, status) => { settledStatus = status; },
     }));
-    await until(() => settledStatus !== undefined, 5_000);
-    assert.ok(
-      Date.now() - resumedAt >= RECOVERY_LIMIT_MS * 0.8,
-      "the ceiling counts from the recovery, not from when the run started",
-    );
-    assert.equal(
-      readTaskSessionHistory(piDir).find((entry) => entry.id === taskId)?.status,
-      "timeout",
-      "the hour already spent before the restart does not count against the ceiling",
-    );
-    assert.equal(sent.length, 1);
-    assert.equal(sent[0]?.details?.phase, "timeout");
-    assert.ok(String(sent[0]?.content).startsWith(`<task id="${taskId}" state="timeout"/>\n`));
-    assert.equal(settledStatus, "timeout", "the panel hook sees the timeout, not a cancel");
+    await until(() => settledStatus !== undefined, 8_000);
+    return {
+      sent,
+      settledStatus,
+      elapsedMs: Date.now() - resumedAt,
+      historyStatus: readTaskSessionHistory(piDir).find((entry) => entry.id === taskId)?.status,
+    };
   } finally {
     await abortDurableTask(piDir, taskId, { databasePath }).catch(() => null);
     await completion;
     if (handle) await handle.harness.close(handle.context);
     rmSync(root, { recursive: true, force: true });
   }
+}
+
+test("a recovered durable run gets a fresh ceiling and is aborted, recorded and delivered as a timeout", async () => {
+  const run = await recoverUnderCeiling();
+  assert.ok(
+    run.elapsedMs >= RECOVERY_LIMIT_MS * 0.8,
+    "the ceiling counts from the recovery, not from when the run started",
+  );
+  assert.equal(run.historyStatus, "timeout", "the hour already spent before the restart does not count");
+  assert.equal(run.sent.length, 1);
+  assert.equal(run.sent[0]?.details?.phase, "timeout");
+  assert.ok(String(run.sent[0]?.content).startsWith('<task id="t-recovered-timeout" state="timeout"/>\n'));
+  assert.equal(run.settledStatus, "timeout", "the panel hook sees the timeout, not a cancel");
+});
+
+test("an abort that took effect and then threw is still reported as the timeout it was", async () => {
+  const run = await recoverUnderCeiling((real) => async (...args) => {
+    await real(...args);
+    throw new Error("abort failed after it took effect");
+  });
+  assert.equal(run.sent.length, 1);
+  assert.equal(run.sent[0]?.details?.phase, "timeout");
+  assert.equal(run.historyStatus, "timeout");
+  assert.equal(run.settledStatus, "timeout", "the panel agrees with the notice");
+});
+
+test("an abort that failed leaves the run going, so the ceiling is armed again", async () => {
+  let calls = 0;
+  const run = await recoverUnderCeiling((real) => async (...args) => {
+    calls += 1;
+    if (calls === 1) throw new Error("abort could not reach the child");
+    return real(...args);
+  });
+  assert.equal(calls, 2, "the second ceiling aborted the run");
+  assert.ok(run.elapsedMs >= RECOVERY_LIMIT_MS * 1.6, "two full ceilings passed");
+  assert.equal(run.sent.length, 1);
+  assert.equal(run.sent[0]?.details?.phase, "timeout");
+  assert.equal(run.settledStatus, "timeout");
 });

@@ -560,6 +560,16 @@ export class DurableTaskCancelledError extends Error {
   }
 }
 
+/** The hard wall-clock ceiling aborted the run (`PI_TASK_HARD_TIMEOUT_MINUTES`). */
+export class DurableTaskTimeoutError extends Error {
+  readonly kind = "timeout" as const;
+
+  constructor(message = "Durable subagent timed out.") {
+    super(message);
+    this.name = "DurableTaskTimeoutError";
+  }
+}
+
 /**
  * Open (once per database) the harness that runs durable subagent tasks.
  * `modelRegistry` is Pi's live model/auth bridge; later opens refresh the

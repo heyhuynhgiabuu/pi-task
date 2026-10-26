@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A durable task now honors `PI_TASK_HARD_TIMEOUT_MINUTES` (default 30 min; `0`
+  disables it), which terminal and SDK tasks already did. Durable children had
+  no ceiling, so a stalled run could hold a task open forever. The run is
+  aborted and ends as `timeout` (a background task delivers a timeout notice);
+  a user cancel is still `cancelled`. A run recovered after a restart gets a
+  fresh ceiling from the recovery, so Pi's downtime does not count against it.
+  `max_turns` is still not enforced on durable tasks.
 - `conversation_id` is rejected up front when the durable backend is selected,
   with a message that points to `task_id` (the durable backend continues a child
   through it) and to HerdR or tmux. The 0.11.3 note that it "now works on the

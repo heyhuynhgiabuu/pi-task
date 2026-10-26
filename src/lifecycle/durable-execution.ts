@@ -20,7 +20,9 @@ import {
   durableSessionStore,
   resolveDurableStorePath,
   inspectDurableDatabasePath,
+  abortDurableTask,
   DurableTaskCancelledError,
+  DurableTaskTimeoutError,
   inspectDurableTaskAdmission,
   isDurableStorageFailure,
   parseDurableThinkingLevel,
@@ -44,9 +46,11 @@ import type {
   BackgroundTask,
   CompletionDeliveryOutcome,
 } from "../types.js";
+import { armableTimeoutMs } from "../subagent/runSdk.js";
 import {
   assessTaskResult,
   buildTaskEnvelope,
+  envHardTimeoutMs,
   formatTaskIdPointer,
   parseResultXml,
   structuredResultPayload,
@@ -101,6 +105,24 @@ export interface DurableTaskExecutionOptions {
 const STORAGE_FAILURE_NOTE =
   "The durable store failed mid-run, so this says nothing about the task itself. " +
   "The run is kept: it resumes when Pi next opens the store, and its result is delivered after a Pi restart.";
+
+/**
+ * The hard-timeout ceiling as a limit in ms, or undefined when it is disabled
+ * (`PI_TASK_HARD_TIMEOUT_MINUTES=0`). Durable children are not killed by the
+ * terminal polling loop, so the durable lifecycle arms its own timer.
+ */
+function hardTimeoutLimitMs(): number | undefined {
+  return armableTimeoutMs(envHardTimeoutMs());
+}
+
+function timeoutMessage(limitMs: number): string {
+  return `Durable subagent exceeded the ${Math.round(limitMs / 60_000)}-minute hard timeout (PI_TASK_HARD_TIMEOUT_MINUTES).`;
+}
+
+function failurePhase(error: unknown): "cancelled" | "timeout" | "failed" {
+  if (error instanceof DurableTaskTimeoutError) return "timeout";
+  return error instanceof DurableTaskCancelledError ? "cancelled" : "failed";
+}
 
 function failureMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
@@ -218,6 +240,24 @@ export async function resumeDurableAfterRestart(deps: {
   const resumedTranscripts = new Map<string, DurableTranscript>();
   const resumedHistory = new Map<string, TaskSessionHistoryEntry | undefined>();
   const authorizedTasks = new Set<string>();
+  // A recovered run keeps no in-process timer from before the restart. Its
+  // ceiling restarts here: Pi's downtime must not time out work that could not
+  // run while Pi was down.
+  const recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const timedOutRecovered = new Map<string, number>();
+  const armRecoveryTimeout = (taskId: string) => {
+    const limitMs = hardTimeoutLimitMs();
+    if (limitMs === undefined) return;
+    const timer = setTimeout(() => {
+      timedOutRecovered.set(taskId, limitMs);
+      void abortDurableTask(piDir, taskId, {
+        databasePath: deps.databasePath,
+        modelRegistry: deps.modelRegistry,
+      }).catch(() => timedOutRecovered.delete(taskId));
+    }, limitMs);
+    timer.unref();
+    recoveryTimers.set(taskId, timer);
+  };
   const hooks: Parameters<typeof resumeDurableTasks>[1] = {
     shouldRecover: (taskId, requestId) => {
       const history = owned(taskId);
@@ -248,6 +288,7 @@ export async function resumeDurableAfterRestart(deps: {
       }
       resumedHistory.set(taskId, durableHistory);
       authorizedTasks.add(taskId);
+      armRecoveryTimeout(taskId);
       try {
         deps.onTaskResumed?.(taskId, durableHistory, conversationId);
       } catch {
@@ -288,6 +329,8 @@ export async function resumeDurableAfterRestart(deps: {
       );
     },
     onSettled: (taskId, status) => {
+      clearTimeout(recoveryTimers.get(taskId));
+      recoveryTimers.delete(taskId);
       if (!authorizedTasks.delete(taskId)) return;
       const history = resumedHistory.get(taskId);
       resumedHistory.delete(taskId);
@@ -348,13 +391,16 @@ export async function resumeDurableAfterRestart(deps: {
       );
     },
     onCancelled: (taskId, reason, usage) => {
+      const timeoutLimitMs = timedOutRecovered.get(taskId);
+      timedOutRecovered.delete(taskId);
+      const phase = timeoutLimitMs !== undefined ? "timeout" as const : "cancelled" as const;
       const history = owned(taskId);
       if (history === "other-session" || (history && history.status !== "running")) return;
       if (history) {
         try {
           upsertTaskSessionHistory(piDir, {
             ...history,
-            status: "cancelled",
+            status: phase,
             completedAt: Date.now(),
           });
         } catch {
@@ -363,12 +409,12 @@ export async function resumeDurableAfterRestart(deps: {
       }
       notify(
         completionDeliveryId(taskId, history?.startedAt ?? Date.now()),
-        `Background task ${taskId} (durable) was cancelled.\n\n${reason}`,
+        `Background task ${taskId} (durable) ${phase === "timeout" ? "timed out" : "was cancelled"}.\n\n${timeoutLimitMs !== undefined ? timeoutMessage(timeoutLimitMs) : reason}`,
         {
           agent_type: history?.agentType ?? "task",
           description: history?.description ?? "",
-          phase: "cancelled",
-          execution_phase: "cancelled",
+          phase,
+          execution_phase: phase,
           status: "unknown",
           reported_status: "unknown",
           result_valid: false,
@@ -669,7 +715,7 @@ export async function executeDurableTask({
       // Best-effort; the in-flight attempt still settles normally.
     }
   };
-  const run = () =>
+  const runUntimed = () =>
     (runTaskOverride ?? runDurableTask)({
       piDir,
       taskId: id,
@@ -733,6 +779,30 @@ export async function executeDurableTask({
       }
       return { output: result.answer, usage: result.usage };
     });
+  // The ceiling covers the whole run, including model failover attempts. It
+  // aborts through the runner's signal, which settles as a cancellation; the
+  // flag tells that apart from a user cancel.
+  const run = async () => {
+    const limitMs = hardTimeoutLimitMs();
+    let timedOut = false;
+    const timer = limitMs === undefined
+      ? undefined
+      : setTimeout(() => {
+          timedOut = true;
+          runnerAbortController.abort();
+        }, limitMs);
+    timer?.unref();
+    try {
+      return await runUntimed();
+    } catch (error) {
+      if (timedOut && limitMs !== undefined && error instanceof DurableTaskCancelledError) {
+        throw new DurableTaskTimeoutError(timeoutMessage(limitMs));
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
 
   if (isBackground) {
     const backgroundTask: BackgroundTask = {
@@ -812,8 +882,7 @@ export async function executeDurableTask({
       keepRunningOnFailure: isDurableStorageFailure,
       onFailed: (error) => {
         if (!deliveryGuard.allows(sessionViewOf(ctx), id)) return "suppressed";
-        const cancelled = error instanceof DurableTaskCancelledError;
-        const phase = cancelled ? "cancelled" as const : "failed" as const;
+        const phase = failurePhase(error);
         backgroundTask.status = phase;
         const message = failureMessage(error);
         return notify(
@@ -927,8 +996,7 @@ export async function executeDurableTask({
       },
     };
   } catch (error) {
-    const cancelled = error instanceof DurableTaskCancelledError;
-    const phase = cancelled ? "cancelled" as const : "failed" as const;
+    const phase = failurePhase(error);
     const message = failureMessage(error);
     // A storage failure leaves the run resumable on disk: keep history `running`
     // so restart recovery claims it instead of orphaning a live run.
@@ -959,7 +1027,7 @@ export async function executeDurableTask({
         error: message,
         ...(terminalUsage ? { usage: terminalUsage } : {}),
       },
-      ...(cancelled ? {} : { isError: true }),
+      ...(phase === "failed" ? { isError: true } : {}),
     };
   } finally {
     signal?.removeEventListener("abort", forwardForegroundAbort);

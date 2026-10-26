@@ -41,7 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `conversation_id` still creates its named conversation.
 - A finished background task whose completion notice never reached the session
   is no longer silent. That happens when Pi exits or crashes before the notice
-  is saved, when a terminal task finishes while Pi is closed, and for stale-SDK
+  is saved, when a HerdR or tmux task finishes while Pi is closed, and for stale-SDK
   tasks reconciled as failed. Each time a session starts, it posts one short
   replacement per such task (outcome and a pointer to `/task status <task-id>`
   for the user, no result text), unless the delivery guard withholds it. It

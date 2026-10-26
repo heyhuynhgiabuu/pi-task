@@ -253,8 +253,8 @@ export async function resumeDurableAfterRestart(deps: {
   const armRecoveryTimeout = (taskId: string, limitMs: number) => {
     const timer = setTimeout(() => {
       timedOutRecovered.set(taskId, limitMs);
-      // abortDurableTask reports a missing child by returning a message, not
-      // by throwing; either way nothing was aborted, so it was no timeout.
+      // abortDurableTask reports a missing child by returning a message: nothing
+      // was aborted, so it was no timeout. A throw is handled below.
       void (deps.abortTask ?? abortDurableTask)(piDir, taskId, {
         databasePath: deps.databasePath,
         modelRegistry: deps.modelRegistry,

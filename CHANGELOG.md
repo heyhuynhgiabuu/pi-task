@@ -14,7 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   a durable task that used to run longer than 30 minutes now stops at the
   ceiling unless you raise or disable it. The run is aborted and ends as
   `timeout` (a background task delivers a timeout notice); a user cancel is
-  still `cancelled`. A run recovered after a restart gets a fresh ceiling from
+  still `cancelled`, except that a cancel landing after a failed ceiling abort
+  is reported as the timeout. A run recovered after a restart gets a fresh ceiling from
   the recovery, so Pi's downtime does not count against it. `max_turns` is
   still not enforced on durable tasks.
 - Receipts and completion notices of single background tasks (including

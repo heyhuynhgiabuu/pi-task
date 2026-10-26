@@ -194,7 +194,10 @@ type AbortTask = typeof abortDurableTask;
 // A durable child recovered after a restart whose model is stuck in a long tool
 // call, resumed under a ~300 ms ceiling. `abortTask` replaces the abort the
 // ceiling issues, so its failure modes can be exercised.
-async function recoverUnderCeiling(abortTask?: (real: AbortTask) => AbortTask) {
+async function recoverUnderCeiling(
+  abortTask?: (real: AbortTask) => AbortTask,
+  afterSettledMs = 0,
+) {
   const root = mkdtempSync(join(tmpdir(), "pi-task-durable-timeout-recovered-"));
   const piDir = join(root, ".pi");
   const databasePath = join(piDir, "durable", "tasks.sqlite");
@@ -250,6 +253,7 @@ async function recoverUnderCeiling(abortTask?: (real: AbortTask) => AbortTask) {
       onTaskSettled: (_id, _history, status) => { settledStatus = status; },
     }));
     await until(() => settledStatus !== undefined, 8_000);
+    if (afterSettledMs > 0) await new Promise((resolve) => setTimeout(resolve, afterSettledMs));
     return {
       sent,
       settledStatus,
@@ -300,4 +304,20 @@ test("an abort that failed leaves the run going, so the ceiling is armed again",
   assert.equal(run.sent.length, 1);
   assert.equal(run.sent[0]?.details?.phase, "timeout");
   assert.equal(run.settledStatus, "timeout");
+});
+
+test("an abort that rejects after the run settled does not arm the ceiling again", async () => {
+  let calls = 0;
+  await recoverUnderCeiling(
+    (real) => async (...args) => {
+      calls += 1;
+      await real(...args);
+      // The run settles while this is pending, then the rejection lands.
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      throw new Error("late failure after the run settled");
+    },
+    // Longer than a full second ceiling after the late rejection.
+    1_200,
+  );
+  assert.equal(calls, 1, "nothing re-armed for a settled task");
 });

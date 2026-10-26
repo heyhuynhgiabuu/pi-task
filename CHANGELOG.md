@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- The task tool's agent roster is re-rendered every turn through
+  `prepareLoadout`, instead of once at registration. A session started in a
+  subdirectory used to keep the launch directory's agents while `execute`
+  resolved them from `ctx.cwd`, and a role file added or edited mid-session was
+  invisible to the model.
 - The task tool's declared `outputSchema` now names `usage`, the durable
   backend's child spend ledger. It was already on `details` for every terminal
   receipt, but codemode renders the model-visible tool declaration from the

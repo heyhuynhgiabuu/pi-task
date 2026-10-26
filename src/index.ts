@@ -740,11 +740,13 @@ export default function (pi: ExtensionAPI) {
     }
 
     try {
-      replayLostCompletionNotices({
+      // Without a session file there is nothing to check a notice against, so
+      // every start would replay every finished task.
+      const sessionFile = ctx.sessionManager.getSessionFile?.();
+      if (sessionFile) replayLostCompletionNotices({
         history: readTaskSessionHistory(piDir),
         sessionId: sessionId ?? "",
-        persisted: (ids) =>
-          persistedCompletionDeliveryIds(ctx.sessionManager.getSessionFile?.(), ids),
+        persisted: (ids) => persistedCompletionDeliveryIds(sessionFile, ids),
         pi,
         queue: completionDeliveryQueue,
         allows: (taskId) => deliveryGuard.allows(currentSession, taskId),

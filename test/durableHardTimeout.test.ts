@@ -86,7 +86,7 @@ test("a foreground durable run that outlives the hard timeout ends as a timeout,
     const result = await withHardTimeout(SHORT_LIMIT, () => executeDurableTask(options));
     assert.equal(result.details.phase, "timeout");
     assert.equal("isError" in result, false, "a timeout is not an error result, like the SDK backend");
-    assert.match(String(result.content[0]?.text), /hard timeout/);
+    assert.match(String(result.content[0]?.text), /hard timeout of \d+(\.\d+)?m?s /);
     assert.equal(readTaskSessionHistory(join(root, ".pi")).find((e) => e.id === "t-hard-timeout")?.status, "timeout");
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -256,6 +256,7 @@ test("a recovered durable run gets a fresh ceiling and is aborted, recorded and 
     assert.equal(sent.length, 1);
     assert.equal(sent[0]?.details?.phase, "timeout");
     assert.ok(String(sent[0]?.content).startsWith(`<task id="${taskId}" state="timeout"/>\n`));
+    assert.equal(settledStatus, "timeout", "the panel hook sees the timeout, not a cancel");
   } finally {
     await abortDurableTask(piDir, taskId, { databasePath }).catch(() => null);
     await completion;

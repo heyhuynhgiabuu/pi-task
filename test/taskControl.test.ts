@@ -1019,3 +1019,36 @@ test("an unknown task_id is an error rather than a silent fresh start", () => {
   assert.equal(firstUse.resume, false);
   assert.equal(firstUse.sessionName, "research-ai");
 });
+
+test("a task_id with stray whitespace still finds its task", () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-resume-trim-"));
+  upsertTaskSessionHistory(piDir, {
+    id: "task-trim",
+    agentType: "explore",
+    description: "Original durable task",
+    sessionName: "task-task-trim",
+    piDir,
+    dir: join(piDir, "artifacts"),
+    backend: "durable",
+    startedAt: 100,
+    completedAt: 200,
+    status: "done",
+    background: false,
+  });
+  const resolution = resolveTaskResume({
+    requestedTaskId: " task-trim\n",
+    taskParams: { agent_type: "explore", description: "Continue", prompt: "Carry on.", task_id: " task-trim\n" },
+    agentName: "explore",
+    piDir,
+    artifactsDir: join(piDir, "artifacts"),
+    extensionPiDir: piDir,
+    ctx: {} as never,
+    backgroundTasks: new Map(),
+    deliveryGuard: new DeliveryGuard(),
+    registryEntryStatus: () => "missing",
+  });
+  assert.equal(resolution.kind, "continue");
+  assert(resolution.kind === "continue");
+  assert.equal(resolution.id, "task-trim");
+  assert.equal(resolution.resume, true);
+});

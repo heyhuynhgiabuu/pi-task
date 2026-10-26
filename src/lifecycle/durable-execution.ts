@@ -51,6 +51,7 @@ import {
   assessTaskResult,
   buildTaskEnvelope,
   envHardTimeoutMs,
+  formatMs,
   formatTaskIdPointer,
   taskStateLine,
   parseResultXml,
@@ -117,7 +118,7 @@ function hardTimeoutLimitMs(): number | undefined {
 }
 
 function timeoutMessage(limitMs: number): string {
-  return `Durable subagent exceeded the ${Math.round(limitMs / 60_000)}-minute hard timeout (PI_TASK_HARD_TIMEOUT_MINUTES).`;
+  return `Durable subagent exceeded the hard timeout of ${formatMs(Math.round(limitMs))} (PI_TASK_HARD_TIMEOUT_MINUTES).`;
 }
 
 function failurePhase(error: unknown): "cancelled" | "timeout" | "failed" {
@@ -192,7 +193,7 @@ export async function resumeDurableAfterRestart(deps: {
   onTaskSettled?: (
     taskId: string,
     history: TaskSessionHistoryEntry | undefined,
-    status: "done" | "failed" | "cancelled",
+    status: "done" | "failed" | "cancelled" | "timeout",
   ) => void;
   enqueueDelivery?: (
     deliveryId: string,
@@ -339,12 +340,14 @@ export async function resumeDurableAfterRestart(deps: {
     onSettled: (taskId, status) => {
       clearTimeout(recoveryTimers.get(taskId));
       recoveryTimers.delete(taskId);
+      // onCancelled has already reported it; settling is the last hook.
+      const timedOut = timedOutRecovered.delete(taskId);
       if (!authorizedTasks.delete(taskId)) return;
       const history = resumedHistory.get(taskId);
       resumedHistory.delete(taskId);
       resumedTranscripts.delete(taskId);
       try {
-        deps.onTaskSettled?.(taskId, history, status);
+        deps.onTaskSettled?.(taskId, history, timedOut ? "timeout" : status);
       } catch {
         // A UI cleanup failure must not alter the recovered result.
       }
@@ -400,7 +403,6 @@ export async function resumeDurableAfterRestart(deps: {
     },
     onCancelled: (taskId, reason, usage) => {
       const timeoutLimitMs = timedOutRecovered.get(taskId);
-      timedOutRecovered.delete(taskId);
       const timedOut = timeoutLimitMs !== undefined;
       const phase = timedOut ? "timeout" as const : "cancelled" as const;
       const history = owned(taskId);

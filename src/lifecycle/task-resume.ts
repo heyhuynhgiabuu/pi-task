@@ -65,7 +65,7 @@ export interface TaskResumeOptions {
 }
 
 export function resolveTaskResume({
-  requestedTaskId,
+  requestedTaskId: rawTaskId,
   taskParams,
   agentName,
   piDir,
@@ -77,6 +77,8 @@ export function resolveTaskResume({
   deliveryGuard,
   registryEntryStatus,
 }: TaskResumeOptions): TaskResumeResolution {
+  // A stray space from the model must not turn a real id into an unknown one.
+  const requestedTaskId = rawTaskId.trim();
   const entries = readRegistry(piDir);
   const registryEntry = entries.find(
     (entry) => entry.id === requestedTaskId || entry.sessionName === requestedTaskId,

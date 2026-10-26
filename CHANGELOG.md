@@ -6,7 +6,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- HerdR launches run a short `echo` marker in the new pane and wait for its
+  output before `agent start`. `agent start` types the whole command line into
+  the pane, and HerdR rejects a line over 1024 bytes while the shell is still
+  loading its startup files, so a slow or busy shell used to fail the launch
+  with `agent_start_input_failed`. The wait is best effort: a timeout or a
+  failed marker never fails the launch. It defaults to 10 s and is set with
+  `PI_TASK_HERDR_SHELL_READY_TIMEOUT_MS` (`0` skips it). Thanks @bailob (#32).
+
 ### Fixed
+
+- A HerdR task whose `agent start` is rejected before any input reaches the
+  pane (`agent_start_input_failed`, `invalid_agent_argument`,
+  `invalid_agent_name`) closes the bare shell pane it split, or the new grouped
+  workspace, instead of leaking it. The pane is closed only if it still holds
+  the terminal this launch created and hosts no agent. Thanks @bailob (#31).
 
 - The task tool's agent roster is re-rendered every turn through
   `prepareLoadout`, instead of once at registration. A session started in a

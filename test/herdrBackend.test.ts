@@ -1180,7 +1180,7 @@ async function launchWithRejectedStart(options: {
       agentArgs: ["--tools", "x".repeat(2_000)],
       ...(options.workspaceGroup ? { workspaceGroup: options.workspaceGroup } : {}),
     }),
-    /agent_start_input_failed|invalid_agent_argument|start failed/i,
+    /agent_start_input_failed|invalid_agent_argument|invalid_agent_name|start failed/i,
   );
   return calls;
 }
@@ -1212,6 +1212,20 @@ test("HerdR also cleans up when agent start rejects the arguments as unencodable
     rejection: startRejection(
       "invalid_agent_argument",
       "agent arguments cannot be encoded safely for the target shell",
+    ),
+  });
+  assert.deepEqual(
+    calls.filter((args) => args[1] === "close"),
+    [["pane", "close", "w1:p2"]],
+  );
+});
+
+test("HerdR also cleans up when agent start rejects the agent name", async () => {
+  const calls = await launchWithRejectedStart({
+    paneGet: paneGetResult("term-2"),
+    rejection: startRejection(
+      "invalid_agent_name",
+      "agent name must start with a lowercase letter and contain only lowercase letters, digits, '-' or '_' (1-32 characters)",
     ),
   });
   assert.deepEqual(
@@ -1268,32 +1282,29 @@ test("HerdR keeps the pane when it cannot confirm the rejected-start pane is sti
   assert.equal(calls.some((args) => args[1] === "close"), false);
 });
 
-async function launchWithUnreadyShell(options: {
-  paneGet: ReturnType<typeof paneGetResult>;
-  workspaceGroup?: string;
+// A launch whose marker step fails (wait-output times out, or `pane run`
+// errors) and whose `agent start` then either succeeds or is rejected.
+async function launchWithSlowShell(options: {
+  failing?: "wait-output" | "run";
+  startRejection?: Error;
+  env?: Record<string, string>;
   shellReadyTimeoutMs?: number;
 }) {
   const calls: string[][] = [];
+  const timeouts: Array<number | undefined> = [];
   const backend = createHerdrTerminalBackend({
     env: {
       HERDR_ENV: "1",
       HERDR_PANE_ID: "w1:p1",
       HERDR_SOCKET_PATH: "/tmp/herdr.sock",
+      ...options.env,
     },
     ...(options.shellReadyTimeoutMs !== undefined
       ? { shellReadyTimeoutMs: options.shellReadyTimeoutMs }
       : {}),
-    run: async (_command, args) => {
+    run: async (_command, args, runOptions) => {
       calls.push([...args]);
-      if (args[0] === "workspace" && args[1] === "create") {
-        return {
-          stdout: JSON.stringify({
-            workspace: { workspace_id: "w2" },
-            root_pane: { pane_id: "w1:p2" },
-          }),
-          stderr: "",
-        };
-      }
+      timeouts.push(runOptions?.timeoutMs);
       if (args[0] === "pane" && args[1] === "split") {
         return {
           stdout: JSON.stringify({
@@ -1302,22 +1313,21 @@ async function launchWithUnreadyShell(options: {
           stderr: "",
         };
       }
-      if (args[0] === "pane" && args[1] === "wait-output") {
+      if (args[0] === "pane" && args[1] === options.failing) {
         throw startRejection("timeout", "timed out waiting for output match");
       }
-      if (args[0] === "pane" && args[1] === "get") return options.paneGet;
+      if (args[0] === "agent" && args[1] === "start") {
+        throw options.startRejection ?? new Error("stop after agent start");
+      }
+      if (args[0] === "pane" && args[1] === "get") return paneGetResult("term-2");
       return { stdout: "", stderr: "" };
     },
   });
   await assert.rejects(
-    backend.launch({
-      cwd: "/repo",
-      agentArgs: ["--session", "task"],
-      ...(options.workspaceGroup ? { workspaceGroup: options.workspaceGroup } : {}),
-    }),
-    /shell .*not become ready/i,
+    backend.launch({ cwd: "/repo", agentArgs: ["--session", "task"] }),
+    /stop after agent start|agent_start_input_failed|invalid_agent_name/,
   );
-  return calls;
+  return { calls, timeouts };
 }
 
 test("HerdR waits for the pane's shell to run a marker command before starting the agent", async () => {
@@ -1362,29 +1372,60 @@ test("HerdR waits for the pane's shell to run a marker command before starting t
   assert.deepEqual(normalizeShellReadyMarker(wait), shellReadyCalls("w1:p2", 4_321)[1]);
 });
 
-test("HerdR closes its pane and never starts the agent when the shell does not become ready", async () => {
-  const calls = await launchWithUnreadyShell({ paneGet: paneGetResult("term-2") });
-  assert.equal(calls.some((args) => args[0] === "agent" && args[1] === "start"), false);
+test("HerdR still starts the agent when the shell-ready wait times out", async () => {
+  const { calls } = await launchWithSlowShell({ failing: "wait-output" });
+  assert.ok(calls.some((args) => args[0] === "agent" && args[1] === "start"));
+  assert.equal(calls.some((args) => args[1] === "close"), false);
+});
+
+test("HerdR still starts the agent when the shell-ready marker cannot be run", async () => {
+  const { calls } = await launchWithSlowShell({ failing: "run" });
+  assert.ok(calls.some((args) => args[0] === "agent" && args[1] === "start"));
+  assert.equal(calls.some((args) => args[1] === "wait-output"), false);
+});
+
+test("HerdR closes the pane when a slow shell's agent start is then rejected", async () => {
+  const { calls } = await launchWithSlowShell({
+    failing: "wait-output",
+    startRejection: OVERLONG_INPUT_REJECTION,
+  });
   assert.deepEqual(
     calls.filter((args) => args[1] === "close"),
     [["pane", "close", "w1:p2"]],
   );
 });
 
-test("HerdR closes the new grouped workspace when its shell does not become ready", async () => {
-  const calls = await launchWithUnreadyShell({
-    paneGet: paneGetResult("term-2"),
-    workspaceGroup: "unready-shell-group",
+test("HerdR gives the marker wait a kill timeout longer than its own", async () => {
+  const { calls, timeouts } = await launchWithSlowShell({
+    shellReadyTimeoutMs: 60_000,
   });
-  assert.deepEqual(
-    calls.filter((args) => args[1] === "close"),
-    [["workspace", "close", "w2"]],
-  );
+  const wait = calls.findIndex((args) => args[1] === "wait-output");
+  assert.equal(calls[wait]![calls[wait]!.indexOf("--timeout") + 1], "60000");
+  assert.equal(timeouts[wait]! > 60_000, true);
 });
 
-test("HerdR keeps an unready pane that now hosts an agent", async () => {
-  const calls = await launchWithUnreadyShell({ paneGet: paneGetResult("term-2", "pi") });
-  assert.equal(calls.some((args) => args[1] === "close"), false);
+test("HerdR reads the shell-ready wait from PI_TASK_HERDR_SHELL_READY_TIMEOUT_MS", async () => {
+  const { calls } = await launchWithSlowShell({
+    env: { PI_TASK_HERDR_SHELL_READY_TIMEOUT_MS: "2500" },
+  });
+  const wait = calls.find((args) => args[1] === "wait-output")!;
+  assert.equal(wait[wait.indexOf("--timeout") + 1], "2500");
+});
+
+test("HerdR ignores an invalid PI_TASK_HERDR_SHELL_READY_TIMEOUT_MS", async () => {
+  const { calls } = await launchWithSlowShell({
+    env: { PI_TASK_HERDR_SHELL_READY_TIMEOUT_MS: "soon" },
+  });
+  const wait = calls.find((args) => args[1] === "wait-output")!;
+  assert.equal(wait[wait.indexOf("--timeout") + 1], "10000");
+});
+
+test("HerdR skips the shell-ready wait when the timeout is 0", async () => {
+  const { calls } = await launchWithSlowShell({ shellReadyTimeoutMs: 0 });
+  assert.equal(
+    calls.some((args) => args[1] === "run" || args[1] === "wait-output"),
+    false,
+  );
 });
 
 test("HerdR cleans up after a prompt failure once identity was captured", async () => {

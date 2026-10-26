@@ -39,19 +39,15 @@ interface HerdrAgentInfo {
   foreground_process_group_id?: number;
 }
 
-type HerdrRun = (args: readonly string[]) => Promise<CommandResult>;
+type HerdrRun = (
+  args: readonly string[],
+  options?: { timeoutMs?: number },
+) => Promise<CommandResult>;
 
 class HerdrIdentityError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "HerdrIdentityError";
-  }
-}
-
-class HerdrShellNotReadyError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "HerdrShellNotReadyError";
   }
 }
 
@@ -400,6 +396,7 @@ async function closeCreatedResource(
 const START_REJECTED_BEFORE_INPUT_CODES = new Set([
   "agent_start_input_failed",
   "invalid_agent_argument",
+  "invalid_agent_name",
 ]);
 
 function isStartRejectedBeforeInput(error: unknown): boolean {
@@ -408,16 +405,8 @@ function isStartRejectedBeforeInput(error: unknown): boolean {
 }
 
 /**
- * Failures that leave the pane pi-task just created as a bare shell: the shell
- * never became ready, or HerdR rejected `agent start` before any input.
- */
-function leavesBareShell(error: unknown): boolean {
-  return error instanceof HerdrShellNotReadyError || isStartRejectedBeforeInput(error);
-}
-
-/**
  * Close the pane (or new grouped workspace) left behind as a bare shell by a
- * launch that never started its agent. The generic cleanup stays
+ * launch whose `agent start` was rejected. The generic cleanup stays
  * non-destructive without agent identity, but such a launch leaves no agent to
  * capture, so the shell would leak forever. Ownership is re-proven instead: the
  * pane must still be the terminal this launch created and must not host any
@@ -446,39 +435,47 @@ async function closeBareShellResource(
 }
 
 /**
- * Wait until the pane's shell is reading commands. `agent start` types the
- * whole agent command line into the pane; until the shell's line editor takes
- * over, the terminal is still in canonical mode, and HerdR rejects any line
- * over its 1024-byte limit (`agent_start_input_failed`). A short marker
- * command is buffered safely in that state and prints the marker on a line of
- * its own only once the shell runs it; the echoed `echo` input line never
- * matches the anchored pattern. The unwrapped scrollback keeps a narrow pane
- * from splitting the marker across rows. The leading space keeps the command
- * out of history for shells that ignore space-prefixed commands.
+ * Wait, best effort, until the pane's shell is reading commands. `agent start`
+ * types the whole agent command line into the pane; until the shell's line
+ * editor takes over, the terminal is still in canonical mode, and HerdR rejects
+ * any line over its 1024-byte limit (`agent_start_input_failed`). A short
+ * marker command is buffered safely in that state and prints the marker on a
+ * line of its own only once the shell runs it; the echoed `echo` input line
+ * never matches the anchored pattern. The unwrapped scrollback keeps a narrow
+ * pane from splitting the marker across rows. The leading space keeps the
+ * command out of history for shells that ignore space-prefixed commands.
+ *
+ * This never fails the launch. A short command line is buffered and runs fine
+ * in a slow shell, and an older HerdR may not support these flags; either way
+ * `agent start` decides, and a rejected start is cleaned up by the caller.
+ * A `timeoutMs` of 0 skips the wait.
  */
 async function waitForShellReady(
   run: HerdrRun,
   paneId: string,
   timeoutMs: number,
 ): Promise<void> {
+  if (timeoutMs <= 0) return;
   const marker = `__PI_TASK_SHELL_READY_${randomUUID().replaceAll("-", "")}__`;
   try {
     await run(["pane", "run", paneId, ` echo ${marker}`]);
-    await run([
-      "pane",
-      "wait-output",
-      paneId,
-      "--regex",
-      `^${marker}$`,
-      "--source",
-      "recent-unwrapped",
-      "--timeout",
-      String(timeoutMs),
-    ]);
-  } catch (error) {
-    throw new HerdrShellNotReadyError(
-      `HerdR pane ${paneId} shell did not become ready within ${timeoutMs} ms: ${errorText(error).trim()}`,
+    await run(
+      [
+        "pane",
+        "wait-output",
+        paneId,
+        "--regex",
+        `^${marker}$`,
+        "--source",
+        "recent-unwrapped",
+        "--timeout",
+        String(timeoutMs),
+      ],
+      // Outlive herdr's own timeout, which would otherwise race the default kill.
+      { timeoutMs: timeoutMs + 5_000 },
     );
+  } catch {
+    // Fall through to `agent start`.
   }
 }
 
@@ -674,13 +671,22 @@ export function resolveHerdrPiIntegrationExtension(
   return undefined;
 }
 
+function parseTimeoutMs(value: string | undefined): number | undefined {
+  const text = value?.trim();
+  return text && /^\d+$/.test(text) ? Number(text) : undefined;
+}
+
 export interface HerdrTerminalBackendOptions {
   run?: CommandRunner["run"];
   env?: NodeJS.ProcessEnv;
   promptTimeoutMs?: number;
   retryTimeoutMs?: number;
   retryPollMs?: number;
-  /** How long a new pane's shell may take to start reading commands. */
+  /**
+   * How long to wait for a new pane's shell to start reading commands before
+   * `agent start`. Defaults to `PI_TASK_HERDR_SHELL_READY_TIMEOUT_MS`, then
+   * 10 s; 0 skips the wait.
+   */
   shellReadyTimeoutMs?: number;
 }
 
@@ -693,10 +699,16 @@ export function createHerdrTerminalBackend(
   const promptTimeoutMs = options.promptTimeoutMs ?? 8_000;
   const retryTimeoutMs = options.retryTimeoutMs ?? promptTimeoutMs;
   const retryPollMs = options.retryPollMs ?? 100;
-  const shellReadyTimeoutMs = options.shellReadyTimeoutMs ?? 10_000;
-  const run = (args: readonly string[]) =>
+  const shellReadyTimeoutMs =
+    options.shellReadyTimeoutMs ??
+    parseTimeoutMs(env.PI_TASK_HERDR_SHELL_READY_TIMEOUT_MS) ??
+    10_000;
+  const run: HerdrRun = (args, runOptions) =>
     runner("herdr", args, {
       env: { ...env, HERDR_SOCKET_PATH: socketPath },
+      ...(runOptions?.timeoutMs !== undefined
+        ? { timeoutMs: runOptions.timeoutMs }
+        : {}),
     });
 
   const verifyOwnership = async (
@@ -790,7 +802,9 @@ export function createHerdrTerminalBackend(
         let created: HerdrPane | undefined;
         let expectedAgent: HerdrAgentInfo | undefined;
         // A pane/terminal id alone is not sufficient ownership proof; startup
-        // failures stay non-destructive until agent identity is captured.
+        // failures stay non-destructive until agent identity is captured. The
+        // one exception is a rejected `agent start`, which re-proves ownership
+        // (same terminal, no agent) in closeBareShellResource.
         let requireAgentIdentity = true;
         try {
           if (workspace) {
@@ -878,7 +892,7 @@ export function createHerdrTerminalBackend(
               : {}),
           };
         } catch (error) {
-          if (created && !expectedAgent && leavesBareShell(error)) {
+          if (created && !expectedAgent && isStartRejectedBeforeInput(error)) {
             await closeBareShellResource(run, workspace, created);
             throw error;
           }

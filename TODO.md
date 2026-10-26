@@ -1,5 +1,7 @@
 # TODO
 
+- [x] Prepare v0.14.0: HerdR rejected-start cleanup and shell-ready wait (#31, #32), durable hard timeout, lost-notice replay, `conversation_id` rejected on durable, `unknown_task_id`, task state line. Typecheck, build, tests (823+) and two independent review passes done locally; `max_turns` on durable, a subagent depth counter and removing `compare` are not done. npm publish remains manual.
+
 - [x] Upgrade to `@earendil-works/*` 1.4.0 and fix the resulting breakage (released in 0.13.0). Adapter gains `getAuth`, which pi-ai ≥1.4 binds eagerly in `withClientIdentity` — without it `Harness.open` throws `Cannot read properties of undefined (reading 'bind')` before any task is admitted (20 of 84 `durableBackend` tests fail without it). Both docs got the now-required `checkpointWhen` (base every 64 deltas); `restartLimit: Infinity` restores pre-1.4 resume behavior; fast mode forwards `telemetry`/`identity`. Verified: typecheck, build, 769/769 tests; durable backend runs against pi-durable 1.3.0 and 1.4.0, old build reproduces the crash on 1.4.0; v1→v2 migration exercised on a copy of the real 5690-task store. Note the migration is one-way.
 
 - [x] Agent messaging, steps 0–2 (uncommitted; see CHANGELOG Unreleased). Durable store lock (`src/subagent/durable-store-lock.ts`), one store per session, in-session messaging (`src/agent-messaging.ts`), cross-session mesh (`src/session-mesh.ts`). Verified by tests and live on two Pi sessions.

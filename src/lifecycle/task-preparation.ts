@@ -146,7 +146,7 @@ export function durableConversationRejection(conversationId: string): TaskPrepar
       {
         type: "text",
         text:
-          "Named conversations (conversation_id) need a HerdR or tmux terminal backend to reopen the child session; the durable and SDK backends cannot. Start Pi inside HerdR or tmux, or omit conversation_id. On the durable backend, pass task_id to continue the same child.",
+          "Named conversations (conversation_id) need the HerdR or tmux terminal backend to reopen the child session; the durable and SDK backends cannot. Run Pi inside HerdR or tmux with that backend selected, or omit conversation_id. On the durable backend, pass task_id to continue the same child.",
       },
     ],
     details: {

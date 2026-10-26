@@ -61,6 +61,30 @@ test("completion preserves the child-reported outcome separately from execution"
   assert.equal(details?.result_valid, true);
 });
 
+test("a completion notice opens with the task's state line", () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-completion-state-line-"));
+  const task: BackgroundTask = {
+    dir: join(piDir, "artifacts", "tasks", "task-state"),
+    agentType: "general",
+    sessionName: "task-task-state",
+    originalPane: null,
+    description: "state line",
+    startedAt: Date.now() - 1000,
+    toolUses: 0,
+    turns: 0,
+  };
+  let content: string | undefined;
+  completeTask({
+    pi: { sendMessage: (message: { content: string }) => { content = message.content; } } as never,
+    id: "task-state",
+    task,
+    content: "<status>success</status>\n<summary>Fine</summary>",
+    phase: "timeout",
+    piDir,
+  });
+  assert.ok(content?.startsWith('<task id="task-state" state="timeout"/>\nBackground task task-state'));
+});
+
 test("settlement forwards the durable claudeSessionId into history", () => {
   // issue #22: completion/history records must carry the durable Claude
   // session UUID so a restart can rebuild the transcript path from

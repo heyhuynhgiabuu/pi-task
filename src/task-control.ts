@@ -319,7 +319,11 @@ function validateTaskStartRequest(value: unknown): TaskStartValidation {
       ...(proposedChanges !== undefined ? { proposed_changes: proposedChanges } : {}),
       ...(typeof candidate.workspace_group === "string" ? { workspace_group: candidate.workspace_group } : {}),
       ...(typeof candidate.cwd === "string" ? { cwd: candidate.cwd } : {}),
-      ...(typeof candidate.task_id === "string" ? { task_id: candidate.task_id } : {}),
+      // A stray space or newline must not turn a real id into an unknown one,
+      // and a blank id means no id.
+      ...(typeof candidate.task_id === "string" && candidate.task_id.trim()
+        ? { task_id: candidate.task_id.trim() }
+        : {}),
       ...(typeof candidate.conversation_id === "string" ? { conversation_id: candidate.conversation_id } : {}),
       ...(typeof candidate.background === "boolean" ? { background: candidate.background } : {}),
       ...(typeof candidate.compare === "boolean" ? { compare: candidate.compare } : {}),

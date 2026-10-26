@@ -8,12 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- A durable task now honors `PI_TASK_HARD_TIMEOUT_MINUTES` (default 30 min; `0`
+  disables it), which terminal and SDK tasks already did. Durable children had
+  no ceiling, so a stalled run could hold a task open forever. **Upgrade note:**
+  a durable task that used to run longer than 30 minutes now stops at the
+  ceiling unless you raise or disable it. The run is aborted and ends as
+  `timeout` (a background task delivers a timeout notice); a user cancel is
+  still `cancelled`. A run recovered after a restart gets a fresh ceiling from
+  the recovery, so Pi's downtime does not count against it. `max_turns` is
+  still not enforced on durable tasks.
 - Receipts and completion notices of single background tasks (including
-  replacements for lost notices and recovered durable runs) open with a one-line state for the model,
+  replacements for lost notices and recovered durable runs) open with a
+  one-line state for the model,
   `<task id="<id>" state="running|done|failed|cancelled|timeout"/>`, so the
   outcome reads the same on every backend. The backend's own text follows
-  unchanged, `details` is unchanged, and comparison messages and foreground results are
-  untouched.
+  unchanged, `details` is unchanged, and comparison messages and foreground
+  results are untouched.
 - HerdR launches run a short `echo` marker in the new pane and wait for its
   output before `agent start`. `agent start` types the whole command line into
   the pane, and HerdR rejects a line over 1024 bytes while the shell is still
@@ -29,21 +39,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   instead of silently starting a fresh task and dropping the memory the caller
   asked to keep (stray whitespace around the id is ignored). A first use of a
   `conversation_id` still creates its named conversation.
-- A background task whose completion notice was lost because Pi exited or
-  crashed before the notice was saved is no longer silent: the next start of
-  that session posts one short replacement per task (outcome and a pointer to
-  `/task status <task-id>` for the user, no result text), unless the delivery
-  guard withholds it. It checks the saved session file for each task's
-  delivery id, so a notice that was saved is never repeated, and covers tasks
-  finished within the last 7 days. This also surfaces stale-SDK tasks that were
-  reconciled as failed without any notice.
-- A durable task now honors `PI_TASK_HARD_TIMEOUT_MINUTES` (default 30 min; `0`
-  disables it), which terminal and SDK tasks already did. Durable children had
-  no ceiling, so a stalled run could hold a task open forever. The run is
-  aborted and ends as `timeout` (a background task delivers a timeout notice);
-  a user cancel is still `cancelled`. A run recovered after a restart gets a
-  fresh ceiling from the recovery, so Pi's downtime does not count against it.
-  `max_turns` is still not enforced on durable tasks.
+- A finished background task whose completion notice never reached the session
+  is no longer silent. That happens when Pi exits or crashes before the notice
+  is saved, when a terminal task finishes while Pi is closed, and for stale-SDK
+  tasks reconciled as failed. Each time a session starts, it posts one short
+  replacement per such task (outcome and a pointer to `/task status <task-id>`
+  for the user, no result text), unless the delivery guard withholds it. It
+  checks the saved session file for each task's delivery id, so a notice that
+  was saved is never repeated, and covers tasks finished within the last 7
+  days. **Upgrade note:** each replacement can start a model turn when the
+  session opens, so the first open after upgrading may replay tasks from the
+  last 7 days.
 - `conversation_id` is rejected up front when the durable backend is selected,
   with a message that points to `task_id` (the durable backend continues a child
   through it) and to HerdR or tmux. The 0.11.3 note that it "now works on the
@@ -56,7 +62,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   `invalid_agent_name`) closes the bare shell pane it split, or the new grouped
   workspace, instead of leaking it. The pane is closed only if it still holds
   the terminal this launch created and hosts no agent. Thanks @bailob (#31).
-
 - The task tool's agent roster is re-rendered every turn through
   `prepareLoadout`, instead of once at registration. A session started in a
   subdirectory used to keep the launch directory's agents while `execute`

@@ -260,7 +260,11 @@ export async function resumeDurableAfterRestart(deps: {
         modelRegistry: deps.modelRegistry,
       }).then(
         (problem) => { if (problem !== null) timedOutRecovered.delete(taskId); },
-        () => { timedOutRecovered.delete(taskId); },
+        () => {
+          // The abort itself failed, so the run is still going: keep the ceiling.
+          timedOutRecovered.delete(taskId);
+          if (authorizedTasks.has(taskId)) armRecoveryTimeout(taskId);
+        },
       );
     }, limitMs);
     timer.unref();
@@ -347,7 +351,7 @@ export async function resumeDurableAfterRestart(deps: {
       resumedHistory.delete(taskId);
       resumedTranscripts.delete(taskId);
       try {
-        deps.onTaskSettled?.(taskId, history, timedOut ? "timeout" : status);
+        deps.onTaskSettled?.(taskId, history, timedOut && status === "cancelled" ? "timeout" : status);
       } catch {
         // A UI cleanup failure must not alter the recovered result.
       }

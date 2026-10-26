@@ -3689,6 +3689,7 @@ test("SIGKILL mid-tool: the next process resumes and delivers exactly once", () 
     await waitForDelivery();
     assert.equal(sent.length, 1, `exactly one delivery, got ${sent.length}`);
     assert.match(sent[0]!.content ?? "", /resumed after restart and finished/);
+    assert.ok((sent[0]!.content ?? "").startsWith('<task id="t-crash" state="done"/>\n'));
     assert.equal(sent[0]!.details?.task_id, "t-crash");
     assert.equal(sent[0]!.details?.backend, "durable");
     assert.equal(sent[0]!.details?.resumed, true);

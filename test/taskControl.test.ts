@@ -983,3 +983,39 @@ test("cancel control reports cleanup pending and preserves the durable receipt",
   assert.equal(status.details.status, "cancelled");
   assert.equal(status.details.cleanup_pending, true);
 });
+
+test("an unknown task_id is an error rather than a silent fresh start", () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-resume-unknown-"));
+  const resolve = (conversationId?: string) =>
+    resolveTaskResume({
+      requestedTaskId: "never-existed",
+      taskParams: {
+        agent_type: "explore",
+        description: "Continue",
+        prompt: "Carry on.",
+        task_id: "never-existed",
+      },
+      agentName: "explore",
+      piDir,
+      artifactsDir: join(piDir, "artifacts"),
+      ...(conversationId ? { conversationId } : {}),
+      extensionPiDir: piDir,
+      ctx: {} as never,
+      backgroundTasks: new Map(),
+      deliveryGuard: new DeliveryGuard(),
+      registryEntryStatus: () => "missing",
+    });
+
+  const unknown = resolve();
+  assert.equal(unknown.kind, "handled");
+  assert(unknown.kind === "handled");
+  assert.equal(unknown.result.isError, true);
+  assert.equal(unknown.result.details.error, "unknown_task_id");
+  assert.equal(unknown.result.details.task_id, "never-existed");
+
+  const firstUse = resolve("research-ai");
+  assert.equal(firstUse.kind, "continue", "a first-use conversation_id still creates its conversation");
+  assert(firstUse.kind === "continue");
+  assert.equal(firstUse.resume, false);
+  assert.equal(firstUse.sessionName, "research-ai");
+});

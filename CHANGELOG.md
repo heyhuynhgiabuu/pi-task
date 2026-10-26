@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A `task_id` that matches no known task is now an `unknown_task_id` error
+  instead of silently starting a fresh task and dropping the memory the caller
+  asked to keep. A first use of a `conversation_id` still creates its named
+  conversation.
 - A background task whose completion notice was lost because Pi exited or
   crashed before the notice was saved is no longer silent: the next start of
   that session posts one short replacement per task (outcome and `/task status

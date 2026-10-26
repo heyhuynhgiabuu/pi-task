@@ -37,7 +37,7 @@ export function taskParametersSchema() {
     })),
     task_id: Type.Optional(
       Type.String({
-        description: "Resume this task instead of starting a fresh one",
+        description: "Resume this existing task instead of starting a fresh one; an unknown id is an error",
       }),
     ),
     conversation_id: Type.Optional(

@@ -136,6 +136,22 @@ export function resolveTaskResume({
       },
     };
   }
+  // An unknown task_id used to start a fresh task silently, dropping the
+  // child's memory the caller asked to keep. A first-use `conversation_id`
+  // still creates its named conversation here.
+  if (!entry && !conversationId) {
+    return {
+      kind: "handled",
+      result: {
+        content: [{
+          type: "text",
+          text: `Unknown task_id "${requestedTaskId}": no task with that id or session name was found in this project. Omit task_id to start a new task, or use an id from an earlier Task ID line or /task list.`,
+        }],
+        details: { phase: "failed", error: "unknown_task_id", task_id: requestedTaskId },
+        isError: true,
+      },
+    };
+  }
   if (!entry) {
     const id = `${Date.now().toString(36)}-${randomUUID().slice(0, 4)}`;
     return {

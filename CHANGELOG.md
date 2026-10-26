@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A background task whose completion notice was lost because Pi exited or
+  crashed before the notice was saved is no longer silent: the next start of
+  that session posts one short replacement per task (outcome and `/task status
+  <task-id>`, no result text). It checks the saved session file for each task's
+  delivery id, so a notice that was saved is never repeated, and covers tasks
+  finished within the last 7 days. This also surfaces stale-SDK tasks that were
+  reconciled as failed without any notice.
 - A durable task now honors `PI_TASK_HARD_TIMEOUT_MINUTES` (default 30 min; `0`
   disables it), which terminal and SDK tasks already did. Durable children had
   no ceiling, so a stalled run could hold a task open forever. The run is

@@ -61,8 +61,12 @@ export type {
 } from "./comparison-restore.js";
 import {
   completeTask,
+  completionDeliveryId,
   createCompletionDeliveryQueue,
   createPersistedCompletionDeliveryScanner,
+  findLostCompletionNotices,
+  lostCompletionNotice,
+  sendCompletionNotice,
   createTaskWidgetController,
   executeTerminalTask,
   restoreActiveBackgroundTasks,
@@ -735,6 +739,24 @@ export default function (pi: ExtensionAPI) {
     } catch (error) {
       console.error(
         `[pi-task] durable admission reconciliation skipped: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    try {
+      for (const entry of findLostCompletionNotices({
+        history: readTaskSessionHistory(piDir),
+        sessionId: sessionId ?? "",
+        persisted: (ids) =>
+          persistedCompletionDeliveryIds(ctx.sessionManager.getSessionFile?.(), ids),
+      })) {
+        completionDeliveryQueue.enqueue(
+          completionDeliveryId(entry.id, entry.startedAt),
+          () => sendCompletionNotice(pi, lostCompletionNotice(entry)),
+        );
+      }
+    } catch (error) {
+      console.error(
+        `[pi-task] lost completion notice replay skipped: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
 

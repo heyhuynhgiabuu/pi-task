@@ -20,10 +20,12 @@ import {
 import { createSyncHerdrControl } from "../subagent/herdr.js";
 import { killAgentPaneStrict } from "../subagent/tmux.js";
 import { isStaleExtensionCtxError } from "../stale-ctx.js";
+import { isProcessAliveOrUnknown } from "../process.js";
 import type {
   BackgroundTask,
   CompletionDeliveryOutcome,
   RegistryEntry,
+  TaskSessionHistoryEntry,
 } from "../types.js";
 
 function closeTaskResource(task: BackgroundTask): void {
@@ -489,6 +491,79 @@ export function createCompletionDeliveryQueue(windowMs = 200): CompletionDeliver
       pending.clear();
       persistedCallbacks.clear();
       persistedDeliveryIdsReader = undefined;
+    },
+  };
+}
+
+const LOST_NOTICE_STATUSES: ReadonlySet<TaskSessionHistoryEntry["status"]> = new Set([
+  "done",
+  "failed",
+  "cancelled",
+  "timeout",
+]);
+
+/** Older lost notices are not replayed, so an upgrade cannot flood an old session. */
+export const LOST_NOTICE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * A background task is recorded terminal before its completion notice is saved
+ * to the Pi session, so a crash or exit in that gap loses the notice. Find the
+ * terminal background tasks of this session whose notice never reached the
+ * session file, so startup can say so once. The check is the saved notice
+ * itself (`persisted` reads the session JSONL by delivery id), not a flag, so
+ * a notice that was saved is never repeated and rows from before this check
+ * need no migration. Comparison siblings keep their own delivered marker, and
+ * a task whose owner process is still alive is that process's to deliver.
+ */
+export function findLostCompletionNotices(input: {
+  history: readonly TaskSessionHistoryEntry[];
+  sessionId: string;
+  persisted: (deliveryIds: ReadonlySet<string>) => ReadonlySet<string>;
+  now?: number;
+  isProcessAlive?: (pid: number) => boolean;
+}): TaskSessionHistoryEntry[] {
+  const now = input.now ?? Date.now();
+  const isAlive = input.isProcessAlive ?? isProcessAliveOrUnknown;
+  const candidates = input.history.filter((entry) =>
+    entry.background &&
+    entry.comparisonGroupId === undefined &&
+    entry.ownerSessionId === input.sessionId &&
+    LOST_NOTICE_STATUSES.has(entry.status) &&
+    entry.completedAt !== undefined &&
+    now - entry.completedAt <= LOST_NOTICE_MAX_AGE_MS &&
+    (entry.ownerPid === undefined || (entry.ownerPid !== process.pid && !isAlive(entry.ownerPid)))
+  );
+  if (candidates.length === 0) return [];
+  const saved = input.persisted(
+    new Set(candidates.map((entry) => completionDeliveryId(entry.id, entry.startedAt))),
+  );
+  return candidates.filter((entry) => !saved.has(completionDeliveryId(entry.id, entry.startedAt)));
+}
+
+/** The notice sent for a task found by {@link findLostCompletionNotices}. */
+export function lostCompletionNotice(entry: TaskSessionHistoryEntry): {
+  customType: "task-complete";
+  content: string;
+  display: true;
+  details: Record<string, unknown>;
+} {
+  return {
+    customType: "task-complete",
+    content:
+      `Background task ${entry.id} (${entry.agentType}) ${entry.status} while Pi was not running, ` +
+      `and its completion notice was not saved to this session. ` +
+      `Read its outcome with /task status ${entry.id}, or continue it with task_id "${entry.id}".`,
+    display: true,
+    details: {
+      agent_type: entry.agentType,
+      description: entry.description,
+      phase: entry.status,
+      execution_phase: entry.status,
+      background: true,
+      backend: entry.backend,
+      task_id: entry.id,
+      replayed: true,
+      completion_delivery_id: completionDeliveryId(entry.id, entry.startedAt),
     },
   };
 }

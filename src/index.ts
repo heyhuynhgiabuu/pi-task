@@ -114,6 +114,7 @@ import {
   taskResultOutputSchema,
   withTaskStructuredContent,
 } from "./tool/structured.js";
+import { rosterLoadoutChange } from "./tool/task-roster.js";
 import type {
   BackgroundTask,
   ChildBuiltinCommand,
@@ -825,9 +826,14 @@ export default function (pi: ExtensionAPI) {
       abortDurable: (taskId) => abortDurableTask(piDir, taskId, { modelRegistry }),
     });
 
+  // prepareLoadout gets no session context, so the roster reads the last cwd
+  // this session actually ran in. Updated at session start and on each call.
+  let lastCwd = process.cwd();
+
   // ── Panel ready at session start ───────────────────────────────────────
 
   pi.on("session_start", (_event, ctx) => {
+    lastCwd = ctx.cwd;
     ignoreStaleExtensionCtx(() => taskWidget.ensurePanelEditor(ctx));
   });
 
@@ -849,6 +855,10 @@ export default function (pi: ExtensionAPI) {
     name: taskToolName,
     label: taskToolName,
     description: buildTaskToolDescription(discoverAgents(process.cwd(), BUNDLED_AGENT_DIR).agents),
+    // The declared roster above is only the registration-time value. pi calls
+    // prepareLoadout on every turn, so the roster follows the session's cwd and
+    // picks up an added or edited role file without a restart.
+    prepareLoadout: (loadout) => rosterLoadoutChange(loadout, lastCwd, BUNDLED_AGENT_DIR, taskToolName),
     promptSnippet: "Delegate work to a specialist agent",
     // Permission extensions read these hints (docs/extensions.md, "Tool
     // exposure"): a task spawns external agent processes (open world) and
@@ -878,6 +888,7 @@ export default function (pi: ExtensionAPI) {
 
       let taskParams = parsedTaskParams;
 
+      lastCwd = ctx.cwd;
       const { agents, piDir } = discoverAgents(ctx.cwd, BUNDLED_AGENT_DIR);
       const parentToolNames: string[] = [];
       // Entry module path per configured extension tool, so the durable bridge

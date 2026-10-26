@@ -549,15 +549,17 @@ export function lostCompletionNotice(entry: FinishedTaskEntry): {
   display: true;
   details: Record<string, unknown>;
 } {
+  const summary =
+    `Its completion notice was not saved to this session, possibly because Pi exited first. ` +
+    `The task's outcome is recorded; the user can read it with /task status ${entry.id}.`;
   return {
     customType: "task-complete",
     content:
       `${taskStateLine(entry.id, entry.status)}\n` +
-      `Background task ${entry.id} (${entry.agentType}) ${entry.status} while Pi was not running, ` +
-      `and its completion notice was not saved to this session. ` +
-      `Read its outcome with /task status ${entry.id}, or continue it with task_id "${entry.id}".`,
+      `Background task ${entry.id} (${entry.agentType}) ${entry.status}.\n\n${summary}`,
     display: true,
     details: {
+      summary,
       agent_type: entry.agentType,
       description: entry.description,
       phase: entry.status,
@@ -569,6 +571,29 @@ export function lostCompletionNotice(entry: FinishedTaskEntry): {
       completion_delivery_id: completionDeliveryId(entry.id, entry.startedAt),
     },
   };
+}
+
+/**
+ * Queue a replacement notice for each task {@link findLostCompletionNotices}
+ * finds. Delivery re-checks the guard, so a notice that was withheld on
+ * purpose (another conversation or `/tree` branch) is not replayed into
+ * whichever one is current now.
+ */
+export function replayLostCompletionNotices(
+  input: Parameters<typeof findLostCompletionNotices>[0] & {
+    pi: Pick<ExtensionAPI, "sendMessage">;
+    queue: Pick<CompletionDeliveryQueue, "enqueue">;
+    allows: (taskId: string) => boolean;
+  },
+): void {
+  for (const entry of findLostCompletionNotices(input)) {
+    input.queue.enqueue(
+      completionDeliveryId(entry.id, entry.startedAt),
+      () => input.allows(entry.id)
+        ? sendCompletionNotice(input.pi, lostCompletionNotice(entry))
+        : "suppressed",
+    );
+  }
 }
 
 export type CompletionPhase = "done" | "cancelled" | "timeout" | "failed";

@@ -8,11 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- Background receipts and completion notices (including replacements for lost
-  notices and recovered durable runs) open with a one-line state for the model,
+- Receipts and completion notices of single background tasks (including
+  replacements for lost notices and recovered durable runs) open with a one-line state for the model,
   `<task id="<id>" state="running|done|failed|cancelled|timeout"/>`, so the
   outcome reads the same on every backend. The backend's own text follows
-  unchanged, `details` is unchanged, and foreground results are untouched.
+  unchanged, `details` is unchanged, and comparison messages and foreground results are
+  untouched.
 - HerdR launches run a short `echo` marker in the new pane and wait for its
   output before `agent start`. `agent start` types the whole command line into
   the pane, and HerdR rejects a line over 1024 bytes while the shell is still
@@ -30,8 +31,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   conversation.
 - A background task whose completion notice was lost because Pi exited or
   crashed before the notice was saved is no longer silent: the next start of
-  that session posts one short replacement per task (outcome and `/task status
-  <task-id>`, no result text). It checks the saved session file for each task's
+  that session posts one short replacement per task (outcome and a pointer to
+  `/task status <task-id>` for the user, no result text), unless the delivery
+  guard withholds it. It checks the saved session file for each task's
   delivery id, so a notice that was saved is never repeated, and covers tasks
   finished within the last 7 days. This also surfaces stale-SDK tasks that were
   reconciled as failed without any notice.

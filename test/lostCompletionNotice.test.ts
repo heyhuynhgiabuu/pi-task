@@ -3,9 +3,11 @@ import test from "node:test";
 
 import {
   completionDeliveryId,
+  createCompletionDeliveryQueue,
   findLostCompletionNotices,
   LOST_NOTICE_MAX_AGE_MS,
   lostCompletionNotice,
+  replayLostCompletionNotices,
 } from "../src/lifecycle/completion.js";
 import type { TaskSessionHistoryEntry } from "../src/types.js";
 
@@ -30,13 +32,17 @@ function entry(overrides: Partial<TaskSessionHistoryEntry> = {}): TaskSessionHis
   } as TaskSessionHistoryEntry;
 }
 
-function find(history: TaskSessionHistoryEntry[], saved: string[] = []) {
+function find(
+  history: TaskSessionHistoryEntry[],
+  saved: string[] = [],
+  isProcessAlive: (pid: number) => boolean = (pid) => pid !== DEAD_PID,
+) {
   return findLostCompletionNotices({
     history,
     sessionId: "sess-1",
     persisted: (ids) => new Set([...ids].filter((id) => saved.includes(id))),
     now: NOW,
-    isProcessAlive: (pid) => pid !== DEAD_PID,
+    isProcessAlive,
   });
 }
 
@@ -62,7 +68,7 @@ test("only this session's finished, background, non-comparison tasks are candida
 });
 
 test("a task whose owner process is alive is left to that process", () => {
-  assert.deepEqual(find([entry({ ownerPid: process.pid })]), []);
+  assert.deepEqual(find([entry({ ownerPid: process.pid })], [], () => false), [], "this process, even if probed as dead");
   assert.deepEqual(find([entry({ ownerPid: 1234 })]), [], "another live process");
   assert.deepEqual(find([entry({ ownerPid: undefined })]).map((e) => e.id), ["t-1"]);
 });
@@ -84,7 +90,54 @@ test("the replayed notice names the task, its outcome, and where to read it", ()
   assert.equal(notice.customType, "task-complete");
   assert.match(notice.content, /t-1 \(scout\) timeout/);
   assert.match(notice.content, /\/task status t-1/);
+  assert.equal(notice.details.summary !== undefined, true, "the TUI renders the summary");
   assert.equal(notice.details.completion_delivery_id, completionDeliveryId("t-1", NOW - 60_000));
   assert.equal(notice.details.phase, "timeout");
   assert.equal(notice.details.replayed, true);
+});
+
+function replay(allows: (taskId: string) => boolean, history = [entry()]) {
+  const sent: unknown[] = [];
+  const queue = createCompletionDeliveryQueue(0);
+  replayLostCompletionNotices({
+    history,
+    sessionId: "sess-1",
+    persisted: () => new Set(),
+    now: NOW,
+    isProcessAlive: () => false,
+    pi: { sendMessage: (message: unknown) => { sent.push(message); } } as never,
+    queue,
+    allows,
+  });
+  return { sent, queue };
+}
+
+async function settle(queue: { hasPending(): boolean }) {
+  for (let waited = 0; waited < 1_000 && queue.hasPending(); waited += 10) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+test("the replay queues one replacement notice for a lost task and delivers it", async () => {
+  const { sent, queue } = replay(() => true);
+  try {
+    assert.deepEqual(queue.pendingDeliveryIds(), [completionDeliveryId("t-1", NOW - 60_000)]);
+    for (let waited = 0; waited < 1_000 && sent.length === 0; waited += 10) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.equal(sent.length, 1);
+  } finally {
+    queue.dispose();
+  }
+});
+
+test("the replay never delivers into a conversation the delivery guard withholds", async () => {
+  const { sent, queue } = replay(() => false);
+  try {
+    await settle(queue);
+    assert.equal(sent.length, 0, "a notice withheld on purpose is not replayed");
+    assert.equal(queue.hasPending(), false, "and it does not stay queued");
+  } finally {
+    queue.dispose();
+  }
 });

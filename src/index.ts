@@ -61,12 +61,9 @@ export type {
 } from "./comparison-restore.js";
 import {
   completeTask,
-  completionDeliveryId,
   createCompletionDeliveryQueue,
   createPersistedCompletionDeliveryScanner,
-  findLostCompletionNotices,
-  lostCompletionNotice,
-  sendCompletionNotice,
+  replayLostCompletionNotices,
   createTaskWidgetController,
   executeTerminalTask,
   restoreActiveBackgroundTasks,
@@ -743,17 +740,15 @@ export default function (pi: ExtensionAPI) {
     }
 
     try {
-      for (const entry of findLostCompletionNotices({
+      replayLostCompletionNotices({
         history: readTaskSessionHistory(piDir),
         sessionId: sessionId ?? "",
         persisted: (ids) =>
           persistedCompletionDeliveryIds(ctx.sessionManager.getSessionFile?.(), ids),
-      })) {
-        completionDeliveryQueue.enqueue(
-          completionDeliveryId(entry.id, entry.startedAt),
-          () => sendCompletionNotice(pi, lostCompletionNotice(entry)),
-        );
-      }
+        pi,
+        queue: completionDeliveryQueue,
+        allows: (taskId) => deliveryGuard.allows(currentSession, taskId),
+      });
     } catch (error) {
       console.error(
         `[pi-task] lost completion notice replay skipped: ${error instanceof Error ? error.message : String(error)}`,

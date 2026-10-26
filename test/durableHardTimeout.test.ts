@@ -20,6 +20,9 @@ import {
 
 // About 50 ms; PI_TASK_HARD_TIMEOUT_MINUTES accepts fractional minutes.
 const SHORT_LIMIT = "0.00083";
+// 0.005 minutes = 300 ms, long enough to tell a fresh ceiling from an immediate abort.
+const RECOVERY_LIMIT = "0.005";
+const RECOVERY_LIMIT_MS = 300;
 
 async function withHardTimeout<T>(minutes: string | undefined, run: () => Promise<T>): Promise<T> {
   const saved = process.env.PI_TASK_HARD_TIMEOUT_MINUTES;
@@ -104,7 +107,28 @@ test("a user cancel of a foreground durable run is still a cancellation while th
   }
 });
 
-test("a durable run that finishes inside the ceiling completes and leaves no timer behind", async () => {
+test("a cancel already in flight when the ceiling fires stays a cancellation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-durable-timeout-race-"));
+  try {
+    const parent = new AbortController();
+    // The child takes longer to settle its cancel than the ceiling allows.
+    const slowToCancel = (input: DurableTaskRunInput) =>
+      new Promise<never>((_, reject) => {
+        input.signal?.addEventListener("abort", () => {
+          setTimeout(() => reject(new DurableTaskCancelledError()), 150);
+        }, { once: true });
+      });
+    const { options } = executeOptions(root, { runTask: slowToCancel, signal: parent.signal });
+    const running = withHardTimeout(SHORT_LIMIT, () => executeDurableTask(options));
+    setTimeout(() => parent.abort(), 10);
+    const result = await running;
+    assert.equal(result.details.phase, "cancelled");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a durable run that finishes inside the ceiling completes", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-task-durable-timeout-ok-"));
   try {
     const { options } = executeOptions(root, {
@@ -128,6 +152,21 @@ test("PI_TASK_HARD_TIMEOUT_MINUTES=0 disables the durable ceiling", async () => 
     });
     const result = await withHardTimeout("0", () => executeDurableTask(options));
     assert.equal(result.details.phase, "done");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a background durable run that finishes delivers a done notice with a state line", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-durable-notice-done-"));
+  try {
+    const { sent, options } = executeOptions(root, {
+      isBackground: true,
+      runTask: async () => ({ conversationId: "child", answer: "<status>success</status>\n<summary>Done.</summary>", usage }),
+    });
+    await executeDurableTask(options);
+    await until(() => sent.length === 1);
+    assert.ok(String(sent[0]?.content).startsWith('<task id="t-hard-timeout" state="done"/>\n'));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -195,7 +234,8 @@ test("a recovered durable run gets a fresh ceiling and is aborted, recorded and 
     await submitted;
     await new Promise((resolve) => setTimeout(resolve, 100));
 
-    await withHardTimeout(SHORT_LIMIT, () => resumeDurableAfterRestart({
+    const resumedAt = Date.now();
+    await withHardTimeout(RECOVERY_LIMIT, () => resumeDurableAfterRestart({
       pi: { sendMessage: (message: (typeof sent)[number]) => { sent.push(message); } } as never,
       piDir,
       sessionId: "sess-timeout",
@@ -204,6 +244,10 @@ test("a recovered durable run gets a fresh ceiling and is aborted, recorded and 
       onTaskSettled: (_id, _history, status) => { settledStatus = status; },
     }));
     await until(() => settledStatus !== undefined, 5_000);
+    assert.ok(
+      Date.now() - resumedAt >= RECOVERY_LIMIT_MS * 0.8,
+      "the ceiling counts from the recovery, not from when the run started",
+    );
     assert.equal(
       readTaskSessionHistory(piDir).find((entry) => entry.id === taskId)?.status,
       "timeout",
@@ -211,6 +255,7 @@ test("a recovered durable run gets a fresh ceiling and is aborted, recorded and 
     );
     assert.equal(sent.length, 1);
     assert.equal(sent[0]?.details?.phase, "timeout");
+    assert.ok(String(sent[0]?.content).startsWith(`<task id="${taskId}" state="timeout"/>\n`));
   } finally {
     await abortDurableTask(piDir, taskId, { databasePath }).catch(() => null);
     await completion;

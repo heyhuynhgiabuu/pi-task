@@ -252,12 +252,18 @@ export async function resumeDurableAfterRestart(deps: {
     if (limitMs === undefined) return;
     const timer = setTimeout(() => {
       timedOutRecovered.set(taskId, limitMs);
+      // abortDurableTask reports a missing child by returning a message, not
+      // by throwing; either way nothing was aborted, so it was no timeout.
       void abortDurableTask(piDir, taskId, {
         databasePath: deps.databasePath,
         modelRegistry: deps.modelRegistry,
-      }).catch(() => timedOutRecovered.delete(taskId));
+      }).then(
+        (problem) => { if (problem !== null) timedOutRecovered.delete(taskId); },
+        () => { timedOutRecovered.delete(taskId); },
+      );
     }, limitMs);
     timer.unref();
+    clearTimeout(recoveryTimers.get(taskId));
     recoveryTimers.set(taskId, timer);
   };
   const hooks: Parameters<typeof resumeDurableTasks>[1] = {
@@ -790,6 +796,8 @@ export async function executeDurableTask({
     const timer = limitMs === undefined
       ? undefined
       : setTimeout(() => {
+          // A cancel already in flight keeps its own outcome.
+          if (runnerAbortController.signal.aborted) return;
           timedOut = true;
           runnerAbortController.abort();
         }, limitMs);

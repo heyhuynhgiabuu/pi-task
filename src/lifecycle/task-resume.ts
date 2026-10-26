@@ -145,7 +145,7 @@ export function resolveTaskResume({
       result: {
         content: [{
           type: "text",
-          text: `Unknown task_id "${requestedTaskId}": no task with that id or session name was found in this project. Omit task_id to start a new task, or use an id from an earlier Task ID line or /task list.`,
+          text: `Unknown task_id "${requestedTaskId}": no task with that id or session name was found in this project. Omit task_id to start a new task, or use the id from an earlier "Task ID:" line.`,
         }],
         details: { phase: "failed", error: "unknown_task_id", task_id: requestedTaskId },
         isError: true,

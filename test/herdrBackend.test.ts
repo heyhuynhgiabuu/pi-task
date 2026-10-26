@@ -1140,6 +1140,7 @@ async function launchWithRejectedStart(options: {
   paneGet: ReturnType<typeof paneGetResult>;
   rejection?: Error;
   workspaceGroup?: string;
+  closeError?: Error;
 }) {
   const calls: string[][] = [];
   const backend = createHerdrTerminalBackend({
@@ -1171,6 +1172,7 @@ async function launchWithRejectedStart(options: {
         throw options.rejection ?? OVERLONG_INPUT_REJECTION;
       }
       if (args[0] === "pane" && args[1] === "get") return options.paneGet;
+      if (args[1] === "close" && options.closeError) throw options.closeError;
       return { stdout: "", stderr: "" };
     },
   });
@@ -1232,6 +1234,107 @@ test("HerdR also cleans up when agent start rejects the agent name", async () =>
     calls.filter((args) => args[1] === "close"),
     [["pane", "close", "w1:p2"]],
   );
+});
+
+test("HerdR rethrows the rejected start when closing the pane also fails", async () => {
+  const calls = await launchWithRejectedStart({
+    paneGet: paneGetResult("term-2"),
+    closeError: new Error("herdr socket went away"),
+  });
+  assert.deepEqual(
+    calls.filter((args) => args[1] === "close"),
+    [["pane", "close", "w1:p2"]],
+  );
+});
+
+test("HerdR closes only the new pane, never the shared workspace, when a start in an existing group is rejected", async () => {
+  const group = "existing-group-rejected";
+  const firstLaunch = [
+    JSON.stringify({
+      workspace: { workspace_id: "w2" },
+      root_pane: { pane_id: "w2:p1" },
+    }),
+    JSON.stringify({ pane: { pane_id: "w2:p1", terminal_id: "term-1" } }),
+    "",
+    "",
+    JSON.stringify({ agent: { pane_id: "w2:p1", terminal_id: "term-1" } }),
+    JSON.stringify({ process_info: { pane_id: "w2:p1", foreground_process_group_id: 42 } }),
+    JSON.stringify({ agent: { pane_id: "w2:p1", terminal_id: "term-1", name: "a", agent_status: "working", state_change_seq: 1 } }),
+    JSON.stringify({ process_info: { pane_id: "w2:p1", foreground_process_group_id: 42 } }),
+  ];
+  const calls: string[][] = [];
+  let secondLaunch = false;
+  const backend = createHerdrTerminalBackend({
+    env: {
+      HERDR_ENV: "1",
+      HERDR_PANE_ID: "w1:p1",
+      HERDR_SOCKET_PATH: "/tmp/herdr.sock",
+    },
+    run: async (_command, args) => {
+      if (!secondLaunch) return { stdout: firstLaunch.shift() ?? "", stderr: "" };
+      calls.push([...args]);
+      if (args[0] === "pane" && args[1] === "split") {
+        return {
+          stdout: JSON.stringify({ pane: { pane_id: "w2:p2", terminal_id: "term-2" } }),
+          stderr: "",
+        };
+      }
+      if (args[0] === "agent" && args[1] === "start") throw OVERLONG_INPUT_REJECTION;
+      if (args[0] === "pane" && args[1] === "get") {
+        return {
+          stdout: JSON.stringify({
+            result: { pane: { pane_id: "w2:p2", terminal_id: "term-2", agent_status: "unknown" } },
+          }),
+          stderr: "",
+        };
+      }
+      return { stdout: "", stderr: "" };
+    },
+  });
+  await backend.launch({ cwd: "/repo", agentArgs: ["--session", "a"], workspaceGroup: group });
+  secondLaunch = true;
+  await assert.rejects(
+    backend.launch({ cwd: "/repo", agentArgs: ["--session", "b"], workspaceGroup: group }),
+    /agent_start_input_failed/,
+  );
+  assert.deepEqual(
+    calls.filter((args) => args[1] === "close"),
+    [["pane", "close", "w2:p2"]],
+  );
+});
+
+test("HerdR does not take the bare-shell cleanup for a rejection code raised after the agent started", async () => {
+  const calls: string[][] = [];
+  const backend = createHerdrTerminalBackend({
+    env: {
+      HERDR_ENV: "1",
+      HERDR_PANE_ID: "w1:p1",
+      HERDR_SOCKET_PATH: "/tmp/herdr.sock",
+    },
+    run: async (_command, args) => {
+      calls.push([...args]);
+      if (args[0] === "pane" && args[1] === "split") {
+        return {
+          stdout: JSON.stringify({ pane: { pane_id: "w1:p2", terminal_id: "term-2" } }),
+          stderr: "",
+        };
+      }
+      if (args[0] === "agent" && args[1] === "start") {
+        return {
+          stdout: JSON.stringify({ agent: { pane_id: "w1:p2", terminal_id: "term-2" } }),
+          stderr: "",
+        };
+      }
+      if (args[0] === "pane" && args[1] === "process-info") throw OVERLONG_INPUT_REJECTION;
+      if (args[0] === "pane" && args[1] === "get") return paneGetResult("term-2");
+      return { stdout: "", stderr: "" };
+    },
+  });
+  await assert.rejects(
+    backend.launch({ cwd: "/repo", agentArgs: ["--session", "task"] }),
+    /agent_start_input_failed/,
+  );
+  assert.equal(calls.some((args) => args[1] === "close"), false);
 });
 
 test("HerdR keeps the pane when a rejected start finds a different terminal in it", async () => {
@@ -1415,6 +1518,14 @@ test("HerdR reads the shell-ready wait from PI_TASK_HERDR_SHELL_READY_TIMEOUT_MS
 test("HerdR ignores an invalid PI_TASK_HERDR_SHELL_READY_TIMEOUT_MS", async () => {
   const { calls } = await launchWithSlowShell({
     env: { PI_TASK_HERDR_SHELL_READY_TIMEOUT_MS: "soon" },
+  });
+  const wait = calls.find((args) => args[1] === "wait-output")!;
+  assert.equal(wait[wait.indexOf("--timeout") + 1], "10000");
+});
+
+test("HerdR ignores a PI_TASK_HERDR_SHELL_READY_TIMEOUT_MS above the timer-safe maximum", async () => {
+  const { calls } = await launchWithSlowShell({
+    env: { PI_TASK_HERDR_SHELL_READY_TIMEOUT_MS: "2147483647" },
   });
   const wait = calls.find((args) => args[1] === "wait-output")!;
   assert.equal(wait[wait.indexOf("--timeout") + 1], "10000");

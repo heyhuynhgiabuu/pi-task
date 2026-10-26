@@ -14,7 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   loading its startup files, so a slow or busy shell used to fail the launch
   with `agent_start_input_failed`. The wait is best effort: a timeout or a
   failed marker never fails the launch. It defaults to 10 s and is set with
-  `PI_TASK_HERDR_SHELL_READY_TIMEOUT_MS` (`0` skips it). Thanks @bailob (#32).
+  `PI_TASK_HERDR_SHELL_READY_TIMEOUT_MS` (digits up to 600000; `0` skips it).
+  Thanks @bailob (#32).
 
 ### Fixed
 

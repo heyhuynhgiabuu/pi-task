@@ -390,8 +390,8 @@ async function closeCreatedResource(
 /**
  * HerdR codes that reject `agent start` before any input reaches the pane's
  * shell, for example an over-long command line or arguments the target shell
- * cannot encode. Nothing ran, so the pane pi-task just created is still the
- * bare shell it split.
+ * cannot encode. No agent was started, so the pane pi-task just created is
+ * still a bare shell, apart from the shell-ready marker `echo`.
  */
 const START_REJECTED_BEFORE_INPUT_CODES = new Set([
   "agent_start_input_failed",
@@ -425,13 +425,11 @@ async function closeBareShellResource(
   } catch {
     return;
   }
-  if (workspace) {
-    await run(["workspace", "close", workspace.workspace_id]).catch(
-      () => undefined,
-    );
-  } else {
-    await run(["pane", "close", created.pane_id]).catch(() => undefined);
-  }
+  // Best effort: the caller rethrows the rejection that led here.
+  await (workspace
+    ? closeHerdrWorkspace(run, workspace.workspace_id)
+    : closeHerdrPane(run, created.pane_id)
+  ).catch(() => undefined);
 }
 
 /**
@@ -471,7 +469,7 @@ async function waitForShellReady(
         "--timeout",
         String(timeoutMs),
       ],
-      // Outlive herdr's own timeout, which would otherwise race the default kill.
+      // Outlive herdr's own timeout; the default kill is shorter than a long wait.
       { timeoutMs: timeoutMs + 5_000 },
     );
   } catch {
@@ -671,9 +669,14 @@ export function resolveHerdrPiIntegrationExtension(
   return undefined;
 }
 
+// Keeps the wait plus its kill margin inside Node's 32-bit timer range.
+const MAX_SHELL_READY_TIMEOUT_MS = 600_000;
+
 function parseTimeoutMs(value: string | undefined): number | undefined {
   const text = value?.trim();
-  return text && /^\d+$/.test(text) ? Number(text) : undefined;
+  if (!text || !/^\d+$/.test(text)) return undefined;
+  const ms = Number(text);
+  return ms <= MAX_SHELL_READY_TIMEOUT_MS ? ms : undefined;
 }
 
 export interface HerdrTerminalBackendOptions {
@@ -706,9 +709,7 @@ export function createHerdrTerminalBackend(
   const run: HerdrRun = (args, runOptions) =>
     runner("herdr", args, {
       env: { ...env, HERDR_SOCKET_PATH: socketPath },
-      ...(runOptions?.timeoutMs !== undefined
-        ? { timeoutMs: runOptions.timeoutMs }
-        : {}),
+      ...runOptions,
     });
 
   const verifyOwnership = async (
@@ -806,6 +807,7 @@ export function createHerdrTerminalBackend(
         // one exception is a rejected `agent start`, which re-proves ownership
         // (same terminal, no agent) in closeBareShellResource.
         let requireAgentIdentity = true;
+        let startRejected = false;
         try {
           if (workspace) {
             const response = await run(["pane", "get", workspace.root_pane_id]);
@@ -849,7 +851,10 @@ export function createHerdrTerminalBackend(
               created = paneFrom(decode(response.stdout, "agent start"));
               break;
             } catch (error) {
-              if (!isAgentPaneBusy(error) || Date.now() >= deadline) throw error;
+              if (!isAgentPaneBusy(error) || Date.now() >= deadline) {
+                startRejected = isStartRejectedBeforeInput(error);
+                throw error;
+              }
               await sleep(50);
             }
           }
@@ -892,7 +897,7 @@ export function createHerdrTerminalBackend(
               : {}),
           };
         } catch (error) {
-          if (created && !expectedAgent && isStartRejectedBeforeInput(error)) {
+          if (created && startRejected) {
             await closeBareShellResource(run, workspace, created);
             throw error;
           }

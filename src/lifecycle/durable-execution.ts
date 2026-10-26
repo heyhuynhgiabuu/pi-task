@@ -401,7 +401,8 @@ export async function resumeDurableAfterRestart(deps: {
     onCancelled: (taskId, reason, usage) => {
       const timeoutLimitMs = timedOutRecovered.get(taskId);
       timedOutRecovered.delete(taskId);
-      const phase = timeoutLimitMs !== undefined ? "timeout" as const : "cancelled" as const;
+      const timedOut = timeoutLimitMs !== undefined;
+      const phase = timedOut ? "timeout" as const : "cancelled" as const;
       const history = owned(taskId);
       if (history === "other-session" || (history && history.status !== "running")) return;
       if (history) {
@@ -417,7 +418,7 @@ export async function resumeDurableAfterRestart(deps: {
       }
       notify(
         completionDeliveryId(taskId, history?.startedAt ?? Date.now()),
-        `${taskStateLine(taskId, phase)}\nBackground task ${taskId} (durable) ${phase === "timeout" ? "timed out" : "was cancelled"}.\n\n${timeoutLimitMs !== undefined ? timeoutMessage(timeoutLimitMs) : reason}`,
+        `${taskStateLine(taskId, phase)}\nBackground task ${taskId} (durable) ${timedOut ? "timed out" : "was cancelled"}.\n\n${timedOut ? timeoutMessage(timeoutLimitMs) : reason}`,
         {
           agent_type: history?.agentType ?? "task",
           description: history?.description ?? "",
@@ -792,23 +793,20 @@ export async function executeDurableTask({
   // flag tells that apart from a user cancel.
   const run = async () => {
     const limitMs = hardTimeoutLimitMs();
-    let timedOut = false;
+    let timeout: DurableTaskTimeoutError | undefined;
     const timer = limitMs === undefined
       ? undefined
       : setTimeout(() => {
           // A cancel already in flight keeps its own outcome.
           if (runnerAbortController.signal.aborted) return;
-          timedOut = true;
+          timeout = new DurableTaskTimeoutError(timeoutMessage(limitMs));
           runnerAbortController.abort();
         }, limitMs);
     timer?.unref();
     try {
       return await runUntimed();
     } catch (error) {
-      if (timedOut && limitMs !== undefined && error instanceof DurableTaskCancelledError) {
-        throw new DurableTaskTimeoutError(timeoutMessage(limitMs));
-      }
-      throw error;
+      throw timeout && error instanceof DurableTaskCancelledError ? timeout : error;
     } finally {
       clearTimeout(timer);
     }

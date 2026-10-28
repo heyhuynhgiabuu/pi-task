@@ -8,38 +8,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
-- `/reload` no longer leaves the durable backend refusing its own store. The earlier
-  copy of the extension kept its pi-durable harness, and with it the per-process store
-  lock, until the process exited, so after a reload every durable task failed with
-  "owned by another Pi process (pid <this pid>)". The earlier copy now closes its
-  harnesses when Pi shuts it down for a reload (`session_shutdown`, reason `reload`),
-  waits for each to finish closing (which is what releases the lock), and the new copy
-  opens the stores and resumes the work. Closing is not a crash: a running turn is
-  written back as pending and runs once under the new copy, but it restarts, and a tool
-  call that is not replay-safe is reported to the model as interrupted. A run cut short
-  this way stays `running` in task history and is not announced as a failure; a user
-  cancel or a timeout is still recorded as such. If a harness does not close within 10
-  seconds the reload gives up on it and its store stays locked, so the new copy is
-  refused; restart Pi then (the wait for a store that is still opening has no limit of
-  its own). A new, resumed or forked session and quitting are unchanged.
-  A run resumed by the earlier copy (after a Pi restart or an earlier reload) is handed
-  on the same way, through any number of reloads, and a foreground run cut short by a
-  reload reports that it was interrupted and continues, not that it failed. Known
-  limits: a reload pauses the durable tasks of other sessions this process still holds
-  (for example after `/new`) until you return to that session or restart Pi, because the
-  new copy only resumes the work of its own session; if the reload itself fails or no new
-  copy starts a session, nothing claims the paused tasks until the next session start or a
-  Pi restart (nothing is lost); each handover restarts the hard
-  timeout clock for the resumed task, and the notice still says "resumed after restart".
-  The first reload after upgrading from 0.14.0 or earlier still hits the old behavior
-  once, because the old copy cannot close what it never knew to close: restart Pi once.
-- A durable task refused because an earlier copy of the extension in the same process
-  still holds the store no longer says it is "owned by another Pi process (pid <this
-  pid>)". It names the earlier copy, says it could not release the store (an older
-  version, or a harness that did not close in time), and gives the way out: restart Pi, or switch backend with `"taskBackend": "sdk"` in
-  settings and `/reload`, or `PI_TASK_BACKEND=sdk` at startup (the environment variable
-  wins over the setting). The refusal itself is deliberate: a second harness on the same
-  store would treat the running turn as interrupted and run it again.
 - A durable subagent now receives its agent's Markdown body as its `instructions`
   system prompt section. The README says pi-task always appends the agent body
   to the child system prompt, but the durable backend never passed it, so a

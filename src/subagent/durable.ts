@@ -551,86 +551,6 @@ export function isDurableStorageFailure(error: unknown): boolean {
   return false;
 }
 
-/**
- * Set once this copy of the extension has been told to shut down for a reload. A
- * reload evaluates the extension again in the same process, and the new copy opens
- * the same stores: this copy must have closed its harnesses by then and must never
- * open one again, or two harnesses would own one store.
- */
-let retired = false;
-
-export class DurableHarnessRetiredError extends Error {
-  constructor() {
-    super(
-      "This copy of pi-task was replaced by a reload and no longer opens durable stores; " +
-        "the new copy owns them.",
-    );
-    this.name = "DurableHarnessRetiredError";
-  }
-}
-
-/**
- * True when `error` ended a run only because this copy retired its harness for a
- * reload. The run is unfinished, not failed: the harness wrote its work back as
- * pending, history stays `running`, and the new copy resumes and delivers it.
- * A cancel or a timeout is the user's or the ceiling's own decision, so those are
- * still reported.
- */
-export function isDurableRetirement(error: unknown): boolean {
-  if (!retired) return false;
-  const kind =
-    error !== null && typeof error === "object" ? (error as { kind?: unknown }).kind : undefined;
-  return kind !== "cancelled" && kind !== "timeout";
-}
-
-/** How long a reload waits for a harness to close before giving up on the handover. */
-const RETIRE_TIMEOUT_MS = 10_000;
-
-/**
- * Close every harness this copy opened and wait for each to finish closing, which
- * is when its store lock is released. Called from `session_shutdown` with reason
- * `reload`, which Pi awaits before it evaluates the new copy. A close is not a
- * crash: running work is written back as pending for the new copy's `resume()`.
- *
- * On timeout the lock stays held (it is only released once the harness has really
- * closed), so the new copy is refused with the "earlier copy" message instead of
- * opening a second harness.
- */
-export async function retireDurableHarnesses(timeoutMs = RETIRE_TIMEOUT_MS): Promise<void> {
-  retired = true;
-  const entries = [...harnessCache.values()];
-  harnessCache.clear();
-  await Promise.all(
-    entries.map(async (entry) => {
-      let handle: DurableHarnessHandle;
-      try {
-        handle = await entry.promise;
-      } catch {
-        return; // never opened, so nothing to close or release
-      }
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const timedOut = new Promise<"timeout">((resolve) => {
-        timer = setTimeout(() => resolve("timeout"), timeoutMs);
-        timer.unref?.();
-      });
-      try {
-        const closing = handle.harness.close(handle.context).then(
-          () => handle.harness.closed.then(() => "closed" as const, () => "closed" as const),
-          () => handle.harness.closed.then(() => "closed" as const, () => "closed" as const),
-        );
-        if ((await Promise.race([closing, timedOut])) === "timeout") {
-          console.error(
-            `[pi-task] a durable harness did not close within ${timeoutMs} ms during reload; ` +
-              "its store stays locked until Pi restarts.",
-          );
-        }
-      } finally {
-        if (timer) clearTimeout(timer);
-      }
-    }),
-  );
-}
-
 export class DurableTaskCancelledError extends Error {
   readonly kind = "cancelled" as const;
 
@@ -665,7 +585,6 @@ export async function openDurableHarness(
     fast?: boolean;
   } = {},
 ): Promise<DurableHarnessHandle> {
-  if (retired) throw new DurableHarnessRetiredError();
   const databasePath = options.databasePath ?? durableDatabasePath(piDir);
   const cached = harnessCache.get(databasePath);
   if (cached) {
@@ -2877,11 +2796,6 @@ export async function resumeDurableTasks(
       outcome = "done";
     })()
       .catch(async (error: unknown) => {
-        // A reload closed this copy's harness under a resumed run. It is unfinished, not
-        // failed: the work is back on disk as pending and history stays `running`, so the
-        // copy that replaced this one claims it. Reporting it would write `failed` and
-        // announce a failure for a run that is still going, and nothing would claim it.
-        if (isDurableRetirement(error)) return;
         await reportFailure(error instanceof Error ? error.message : String(error));
       })
       .finally(async () => {

@@ -133,7 +133,6 @@ import {
   executeDurableChildBuiltinCommand,
   readDurableTaskHistoryTranscript,
   createDurableMessagingAccess,
-  retireDurableHarnesses,
   retrySettingsSourceFrom,
   setDurableRetrySettingsSource,
   steerDurableTask,
@@ -859,17 +858,11 @@ export default function (pi: ExtensionAPI) {
 
   // ── Cleanup on shutdown ────────────────────────────────────────────────
 
-  pi.on("session_shutdown", async (event?: { reason?: string }) => {
+  pi.on("session_shutdown", () => {
     stopBackgroundPolling();
     clearInterval(countInterval);
     taskWidget.dispose();
     completionDeliveryQueue.dispose();
-    // A reload evaluates this extension again in the same process, and the new copy opens
-    // the same durable stores. Pi waits for this handler before it does, so the harnesses
-    // are closed (and their store locks released) by then; a second harness on one store
-    // would rerun the running turn. Other reasons keep this copy: a new, resumed or forked
-    // session reuses it, and quitting ends the process.
-    if (event?.reason === "reload") await retireDurableHarnesses();
   });
 
       // ── Custom notification renderer ───────────────────────────────────────

@@ -24,6 +24,7 @@ import {
   DurableTaskCancelledError,
   DurableTaskTimeoutError,
   inspectDurableTaskAdmission,
+  isDurableRetirement,
   isDurableStorageFailure,
   parseDurableThinkingLevel,
   releaseUnadmittedDurableRun,
@@ -898,8 +899,12 @@ export async function executeDurableTask({
           },
         );
       },
-      keepRunningOnFailure: isDurableStorageFailure,
+      // A storage failure and a reload both leave the run unfinished on disk: history stays
+      // `running` so the next open (restart, or the copy that replaced this one) resumes it.
+      keepRunningOnFailure: (error) => isDurableStorageFailure(error) || isDurableRetirement(error),
       onFailed: (error) => {
+        // The new copy resumes and delivers this run; announcing a failure here would be false.
+        if (isDurableRetirement(error)) return "suppressed";
         if (!deliveryGuard.allows(sessionViewOf(ctx), id)) return "suppressed";
         const phase = failurePhase(error);
         backgroundTask.status = phase;
@@ -1018,13 +1023,37 @@ export async function executeDurableTask({
     const phase = failurePhase(error);
     const message = failureMessage(error);
     // A storage failure leaves the run resumable on disk: keep history `running`
-    // so restart recovery claims it instead of orphaning a live run.
-    if (!isDurableStorageFailure(error)) {
+    // so restart recovery claims it instead of orphaning a live run. The same holds when
+    // a reload closed the harness: the copy that replaced this one resumes it.
+    if (!isDurableStorageFailure(error) && !isDurableRetirement(error)) {
       upsertTaskSessionHistory(piDir, {
         ...historyBase,
         status: phase,
         completedAt: Date.now(),
       });
+    }
+    // A reload closed the harness under this run. It continues in the copy that replaced
+    // this one, which delivers the real result, so it is neither a failure nor a result.
+    if (isDurableRetirement(error)) {
+      taskWidget.noteTaskFinished(id, foregroundTask, Date.now());
+      return {
+        content: [{
+          type: "text" as const,
+          text: `Durable task ${id} was interrupted by a reload and continues in the new copy of the extension; ` +
+            `its result is delivered when it finishes.\n\n${formatTaskIdPointer({ id, resumable: true })}`,
+        }],
+        details: {
+          task_id: id,
+          background: false,
+          phase: "running" as const,
+          execution_phase: "running" as const,
+          status: "unknown",
+          reported_status: "unknown",
+          result_valid: false,
+          backend: "durable" as const,
+          ...(terminalUsage ? { usage: terminalUsage } : {}),
+        },
+      };
     }
     foregroundTask.status = phase;
     foregroundTask.result = message;

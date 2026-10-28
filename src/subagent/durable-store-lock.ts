@@ -28,10 +28,21 @@ export class DurableStoreLockedError extends Error {
     readonly holderPid: number | undefined,
   ) {
     super(
-      `Durable task store ${databasePath} is owned by another Pi process` +
-        `${holderPid !== undefined ? ` (pid ${holderPid})` : ""}. ` +
-        "Only one Pi process can own a durable store at a time, and it keeps the store until it exits; " +
-        "exit that Pi process or use another backend (PI_TASK_BACKEND=sdk).",
+      holderPid === process.pid
+        ? // `/reload` evaluates the extension again in this process. The earlier copy closes its
+          // harnesses first (`retireDurableHarnesses`), so this is the case where it could not:
+          // an older version, or a harness that did not close in time. The refusal is
+          // deliberate: a second harness on the same store would treat the running turn as
+          // interrupted and run it again.
+          `Durable task store ${databasePath} is held by an earlier copy of pi-task in this process ` +
+            "that could not release it (an older version that cannot close its harness, or a harness " +
+            "that did not close in time after /reload). Restart Pi to use the durable backend " +
+            "again, or switch backend: set \"taskBackend\": \"sdk\" in settings and /reload, or start Pi " +
+            "with PI_TASK_BACKEND=sdk (the environment variable wins over the setting)."
+        : `Durable task store ${databasePath} is owned by another Pi process` +
+            `${holderPid !== undefined ? ` (pid ${holderPid})` : ""}. ` +
+            "Only one Pi process can own a durable store at a time, and it keeps the store until it exits; " +
+            "exit that Pi process or use another backend (PI_TASK_BACKEND=sdk).",
     );
     this.name = "DurableStoreLockedError";
   }

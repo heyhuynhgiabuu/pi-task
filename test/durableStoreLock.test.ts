@@ -25,6 +25,7 @@ import {
 } from "../src/subagent/durable.js";
 import {
   acquireDurableStoreLock,
+  DurableStoreLockedError,
   isDurableStoreLockedError,
 } from "../src/subagent/durable-store-lock.js";
 import {
@@ -177,6 +178,81 @@ test("the lock is re-entrant within one process and excludes others until its la
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("a store held by another copy of this extension is refused, and the error says to restart", async () => {
+  // A second copy of the module (the package loaded from another path, as when the package
+  // source is switched in settings) has its own lock state and holds the store through its own
+  // harness. Two harnesses on one store would rerun the running turn, so the new copy stays
+  // refused, but the error must not blame "another Pi process" when the holder is this very
+  // process. A query-string import is a second module instance, the same situation. (A reload
+  // of the SAME file is not this case: see the comment in durable-store-lock.ts.)
+  const { root, databasePath } = fixture("pi-task-store-lock-earlier-copy-");
+  try {
+    const earlier = (await import(
+      `../src/subagent/durable-store-lock.js?earlier=${Date.now()}`
+    )) as typeof import("../src/subagent/durable-store-lock.js");
+    const release = await earlier.acquireDurableStoreLock(databasePath);
+    try {
+      let refused: unknown;
+      try {
+        await acquireDurableStoreLock(databasePath);
+      } catch (error) {
+        refused = error;
+      }
+      assert.ok(refused, "the second copy must not take the store");
+      assert.ok(isDurableStoreLockedError(refused));
+      assert.equal((refused as { holderPid?: number }).holderPid, process.pid);
+      const message = (refused as Error).message;
+      assert.match(message, /another copy of pi-task loaded in this process/);
+      assert.match(message, /different location/);
+      assert.match(message, /listed twice in settings/);
+      assert.match(message, /already exists stays on durable/);
+      assert.match(message, /\/reload/);
+      assert.match(message, /restart Pi/i);
+      assert.match(message, /"taskBackend": "sdk"/);
+      assert.match(message, /PI_TASK_BACKEND=sdk/);
+      assert.match(message, /environment variable wins over the setting/);
+      assert.doesNotMatch(message, /another Pi process/);
+      assert.match(message, new RegExp(databasePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    } finally {
+      release();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a store another process owns still reads as another Pi process", async () => {
+  const { root, databasePath } = fixture("pi-task-store-lock-other-process-");
+  const { child, line } = lockChild(databasePath, "hold");
+  try {
+    assert.equal(await line, "held");
+    let refused: unknown;
+    try {
+      await acquireDurableStoreLock(databasePath);
+    } catch (error) {
+      refused = error;
+    }
+    assert.ok(isDurableStoreLockedError(refused));
+    assert.notEqual((refused as { holderPid?: number }).holderPid, process.pid);
+    assert.equal((refused as { holderPid?: number }).holderPid, child.pid);
+    assert.match((refused as Error).message, new RegExp(`another Pi process \\(pid ${child.pid}\\)`));
+    assert.doesNotMatch((refused as Error).message, /another copy of pi-task/);
+  } finally {
+    await kill(child);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the lock error reads by who holds the store, whatever the holder's pid is known to be", () => {
+  const path = "/store/durable.sqlite";
+
+  assert.match(new DurableStoreLockedError(path, process.pid).message, /another copy of pi-task loaded in this process/);
+  assert.match(new DurableStoreLockedError(path, 1).message, /another Pi process \(pid 1\)/);
+  const unknown = new DurableStoreLockedError(path, undefined).message;
+  assert.match(unknown, /another Pi process\. /);
+  assert.doesNotMatch(unknown, /another copy|\(pid/);
 });
 
 test("session start claims the store only for this session's own running durable work", async () => {

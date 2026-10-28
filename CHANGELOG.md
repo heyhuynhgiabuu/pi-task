@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A durable task refused because another copy of pi-task, loaded in the same process from
+  a different location, holds the store no longer says it is "owned by another Pi process
+  (pid <this pid>)". It says another copy most likely holds it (for example after the
+  package source was changed in settings and reloaded), that a reload cannot hand a store
+  between two copies, and gives the way out: remove a duplicate settings entry if there is
+  one, then restart Pi; or run new tasks without durable by setting `"taskBackend": "sdk"`
+  in settings and `/reload`, or `PI_TASK_BACKEND=sdk` at startup (the environment variable
+  wins over the setting; a durable task that already exists stays on durable). The refusal
+  itself is deliberate: a second harness on the same store would treat the running turn as
+  interrupted and run it again. A `/reload` of the same package at the same path, loaded
+  from its built `dist/index.js` (an ESM file in a `"type": "module"` package), is not
+  affected: probed with Pi 1.4.0's loader, not with a live `/reload`, Node's cached module
+  is returned, so the lock and the harnesses survive it. A TypeScript-source load is re-run
+  on every reload and can still reach this refusal.
 - A durable subagent now receives its agent's Markdown body as its `instructions`
   system prompt section. The README says pi-task always appends the agent body
   to the child system prompt, but the durable backend never passed it, so a

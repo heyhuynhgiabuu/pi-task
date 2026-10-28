@@ -28,10 +28,27 @@ export class DurableStoreLockedError extends Error {
     readonly holderPid: number | undefined,
   ) {
     super(
-      `Durable task store ${databasePath} is owned by another Pi process` +
-        `${holderPid !== undefined ? ` (pid ${holderPid})` : ""}. ` +
-        "Only one Pi process can own a durable store at a time, and it keeps the store until it exits; " +
-        "exit that Pi process or use another backend (PI_TASK_BACKEND=sdk).",
+      holderPid === process.pid
+        ? // The holder is this very process, so another instance of this module holds the store.
+          // Probed with Pi 1.4.0's jiti (not with a live /reload): an ESM `.js` file in a
+          // `"type": "module"` package, which is how pi-task is published (`dist/index.js`), is
+          // handed to Node's native `import()`, so a `/reload` of the same path returns the module
+          // Node already has and the lock registry and harness cache survive it; the lock is
+          // re-entrant and this branch is not reached. A TypeScript-source load (`-e src/index.ts`)
+          // is re-run on every reload and does reach it. So does a separate copy at another path:
+          // the package installed from two places (npm and a local path) or its source switched
+          // in settings. The refusal is deliberate: a second harness on the same store would treat
+          // the running turn as interrupted and run it again.
+          `Durable task store ${databasePath} is held by another copy of pi-task loaded in this process, ` +
+            "most likely from a different location (for example after the package source was changed in settings " +
+            "and reloaded). A reload cannot hand a store between two copies. If pi-task is listed twice in settings, " +
+            "remove one entry, then restart Pi to use the durable backend again. To run new tasks without durable now: " +
+            "set \"taskBackend\": \"sdk\" in settings and /reload, or start Pi with PI_TASK_BACKEND=sdk " +
+            "(the environment variable wins over the setting); a durable task that already exists stays on durable."
+        : `Durable task store ${databasePath} is owned by another Pi process` +
+            `${holderPid !== undefined ? ` (pid ${holderPid})` : ""}. ` +
+            "Only one Pi process can own a durable store at a time, and it keeps the store until it exits; " +
+            "exit that Pi process or use another backend (PI_TASK_BACKEND=sdk).",
     );
     this.name = "DurableStoreLockedError";
   }

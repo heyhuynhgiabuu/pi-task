@@ -744,6 +744,7 @@ async function findOrCreateChild(
     cwd?: string;
     thinkingLevel?: DurableThinkingLevel;
     tools?: readonly import("@earendil-works/pi-durable").ToolRegistration[];
+    instructions?: string;
   },
 ): Promise<ConversationId> {
   const root = await handle.harness.root(handle.context);
@@ -763,6 +764,9 @@ async function findOrCreateChild(
         ? { thinkingLevel: configure.thinkingLevel }
         : {}),
       ...(configure?.tools !== undefined ? { tools: configure.tools } : {}),
+      ...(configure?.instructions !== undefined
+        ? { instructions: configure.instructions }
+        : {}),
     });
     map.byOwner[ownerKey] = { conversationId: created.id };
     return created.id;
@@ -1315,6 +1319,7 @@ async function reserveDurableRun(
     model?: { provider: string; modelId: string };
     thinkingLevel?: DurableThinkingLevel;
     tools?: readonly import("@earendil-works/pi-durable").ToolRegistration[];
+    instructions?: string;
   },
 ): Promise<DurableRunReservation> {
   return conversation.commit(async (tx) => {
@@ -1348,7 +1353,8 @@ async function reserveDurableRun(
       current.status === "admitting" &&
       (configure?.model !== undefined ||
         configure?.thinkingLevel !== undefined ||
-        configure?.tools !== undefined)
+        configure?.tools !== undefined ||
+        configure?.instructions !== undefined)
     ) {
       await handle.module.configure(tx, conversation.id, {
         ...(configure?.model !== undefined ? { model: configure.model } : {}),
@@ -1356,6 +1362,9 @@ async function reserveDurableRun(
           ? { thinkingLevel: configure.thinkingLevel }
           : {}),
         ...(configure?.tools !== undefined ? { tools: configure.tools } : {}),
+        ...(configure?.instructions !== undefined
+          ? { instructions: configure.instructions }
+          : {}),
       });
     }
     return copyDurableRunRecord(current);
@@ -1695,9 +1704,15 @@ export async function runDurableTask(input: {
   tools?: string | string[];
   /** Agent frontmatter deny list. */
   disallowedTools?: string[];
+  /**
+   * The agent's Markdown body. It is rendered as the child's `instructions`
+   * system prompt section, the durable equivalent of the terminal and SDK
+   * backends appending the body to the child system prompt.
+   */
+  instructions?: string;
   /** Parent extension module entry paths by tool name, for bridgeable research tools. */
   parentExtensionToolSources?: Record<string, string>;
-  /** Add bash/write/edit/apply_patch to the deny list, even with explicit tools. */
+  /** Add write/edit/apply_patch to the deny list, even with explicit tools. Not bash. */
   readonly?: boolean;
   /**
    * Ordered frontmatter models. Each model is attempted at most once per run;
@@ -1746,6 +1761,7 @@ export async function runDurableTask(input: {
       cwd: input.cwd,
       thinkingLevel: primary?.thinkingLevel,
       tools: toolRegistrations,
+      ...(input.instructions !== undefined ? { instructions: input.instructions } : {}),
     },
   );
   const conversation = (await handle.harness.conversation(childId, handle.context))!;
@@ -1890,6 +1906,7 @@ export async function runDurableTask(input: {
             ? { thinkingLevel: attempt.thinkingLevel }
             : {}),
           tools: toolRegistrations,
+          ...(input.instructions !== undefined ? { instructions: input.instructions } : {}),
         },
       );
       if (abortRequested || input.signal?.aborted) {

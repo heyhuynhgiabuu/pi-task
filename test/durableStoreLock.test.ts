@@ -272,11 +272,12 @@ function sessionCtx(sessionId: string) {
   } as never;
 }
 
-async function executeWithCapturedStore(piDir: string, root: string, id: string, sessionId: string) {
+async function executeWithCapturedStore(piDir: string, root: string, id: string, sessionId: string, body = "") {
   let databasePath: string | undefined;
+  let instructions: string | undefined;
   const result = await executeDurableTask({
     id,
-    agent: { name: "general", description: "General task", body: "", source: "project", path: "test-agent.md" },
+    agent: { name: "general", description: "General task", body, source: "project", path: "test-agent.md" },
     description: "store", sessionName: `task-${id}`, prompt: "Return.", cwd: root,
     toolCallId: `call-${id}`, ctx: sessionCtx(sessionId), pi: {} as never,
     piDir, artifactsDir: join(piDir, "artifacts"), isBackground: false,
@@ -285,6 +286,7 @@ async function executeWithCapturedStore(piDir: string, root: string, id: string,
     clearTaskWidgetIfIdle: () => {}, ensureTaskWidget: () => {}, enqueueDelivery: (delivery) => delivery(),
     runTask: async (input) => {
       databasePath = input.databasePath;
+      instructions = input.instructions;
       return {
         conversationId: `child-${id}`,
         answer: "Status: success\nDone.",
@@ -292,8 +294,21 @@ async function executeWithCapturedStore(piDir: string, root: string, id: string,
       } as never;
     },
   });
-  return { result, databasePath };
+  return { result, databasePath, instructions };
 }
+
+test("a durable task hands the agent body to the child as instructions, and omits a blank body", async () => {
+  const { root, piDir } = fixture("pi-task-agent-body-");
+  try {
+    const withBody = await executeWithCapturedStore(piDir, root, "t-body", "sess-a", "You are read-only.\n");
+    assert.equal(withBody.instructions, "You are read-only.\n");
+
+    const blank = await executeWithCapturedStore(piDir, root, "t-blank", "sess-a", "  \n");
+    assert.equal(blank.instructions, undefined);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("a new durable task runs in its session's own store and records it", async () => {
   const { root, piDir } = fixture("pi-task-session-store-new-");

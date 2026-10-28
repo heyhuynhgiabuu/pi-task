@@ -607,6 +607,126 @@ test("runDurableTask streams the child conversation snapshot and committed messa
   }
 });
 
+/**
+ * pi-durable sends the system prompt as `system` messages carrying named sections. With
+ * pi-ai's default rendering the provider receives them merged, a later section replacing
+ * an earlier one of the same name, so the prompt in force is the merge of those messages
+ * in order. A model flagged `supportsMidConvoSystemMessages` instead keeps the earlier
+ * text and receives an "Updated system prompt section" notice, which this helper does not
+ * model.
+ */
+function effectiveSystemPrompt(messages: readonly unknown[]): string {
+  const merged: Record<string, string> = {};
+  for (const message of messages as { role: string; sections?: Record<string, string> }[]) {
+    if (message.role === "system") Object.assign(merged, message.sections ?? {});
+  }
+  return Object.values(merged).join("\n");
+}
+
+/** A faux Pi model registry that records the system prompt in force on every provider call. */
+const makePromptSpyRegistry = (steps: string[]) => {
+  const models = createModels();
+  const faux = fauxProvider({ models: [{ id: "faux-1" }] });
+  models.setProvider(faux.provider);
+  faux.setResponses(steps.map((text) => fauxAssistantMessage(text)));
+  const systemPrompts: string[] = [];
+  const registry: DurableRuntimeModelRegistry = {
+    getAll: () => models.getAllModels() as never,
+    find: (provider, modelId) => models.getModel(provider, modelId),
+    streamSimple: (model, context, options) => {
+      systemPrompts.push(effectiveSystemPrompt(context.messages));
+      return models.streamSimple(model, context, options);
+    },
+  };
+  return { registry, systemPrompts };
+};
+
+test("a durable child receives the agent body as instructions in its system prompt", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-durable-instructions-"));
+  const piDir = join(root, ".pi");
+  const databasePath = join(root, "durable.sqlite");
+  const { registry, systemPrompts } = makePromptSpyRegistry(["done"]);
+  let handle: Awaited<ReturnType<typeof openDurableHarness>> | undefined;
+  try {
+    handle = await openDurableHarness(piDir, { databasePath, modelRegistry: registry });
+    await runDurableTask({
+      piDir,
+      databasePath,
+      taskId: "t-agent-body",
+      task: "Say hello.",
+      modelRegistry: registry,
+      instructions: "ROLE-SENTINEL: you are a read-only reviewer.",
+    });
+
+    assert.equal(systemPrompts.length, 1, "one provider call");
+    assert.match(systemPrompts[0]!, /ROLE-SENTINEL: you are a read-only reviewer\./);
+  } finally {
+    if (handle) await handle.harness.close(handle.context);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a durable child without agent instructions adds none to its system prompt", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-durable-no-instructions-"));
+  const piDir = join(root, ".pi");
+  const databasePath = join(root, "durable.sqlite");
+  const { registry, systemPrompts } = makePromptSpyRegistry(["done"]);
+  let handle: Awaited<ReturnType<typeof openDurableHarness>> | undefined;
+  try {
+    handle = await openDurableHarness(piDir, { databasePath, modelRegistry: registry });
+    await runDurableTask({
+      piDir,
+      databasePath,
+      taskId: "t-no-agent-body",
+      task: "Say hello.",
+      modelRegistry: registry,
+    });
+
+    assert.equal(systemPrompts.length, 1);
+    assert.doesNotMatch(systemPrompts[0]!, /ROLE-SENTINEL/);
+  } finally {
+    if (handle) await handle.harness.close(handle.context);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("resuming a durable child re-points it at the agent body of the new request", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-durable-instructions-resume-"));
+  const piDir = join(root, ".pi");
+  const databasePath = join(root, "durable.sqlite");
+  const { registry, systemPrompts } = makePromptSpyRegistry(["first", "second"]);
+  let handle: Awaited<ReturnType<typeof openDurableHarness>> | undefined;
+  try {
+    handle = await openDurableHarness(piDir, { databasePath, modelRegistry: registry });
+    await runDurableTask({
+      piDir,
+      databasePath,
+      taskId: "t-agent-body-resume",
+      task: "First.",
+      requestId: "req-1",
+      modelRegistry: registry,
+      instructions: "ROLE-ONE",
+    });
+    await runDurableTask({
+      piDir,
+      databasePath,
+      taskId: "t-agent-body-resume",
+      task: "Second.",
+      requestId: "req-2",
+      modelRegistry: registry,
+      instructions: "ROLE-TWO",
+    });
+
+    assert.equal(systemPrompts.length, 2);
+    assert.match(systemPrompts[0]!, /ROLE-ONE/);
+    assert.match(systemPrompts[1]!, /ROLE-TWO/);
+    assert.doesNotMatch(systemPrompts[1]!, /ROLE-ONE/, "the old body is replaced, not appended");
+  } finally {
+    if (handle) await handle.harness.close(handle.context);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 /** A provider whose first attempt fails with a transient WebSocket close, then answers. */
 function makeTransientFailureModels() {
   const faux = fauxProvider();

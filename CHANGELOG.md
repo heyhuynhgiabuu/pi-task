@@ -6,6 +6,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- A durable subagent now receives its agent's Markdown body as its `instructions`
+  system prompt section. The README says pi-task always appends the agent body
+  to the child system prompt, but the durable backend never passed it, so a
+  durable child ran with only the task text and no role, such as "read-only
+  reviewer". A task resumed with `task_id` is re-pointed at the body of the new
+  request. A blank body adds no section, and a resume with a blank body keeps
+  the previous one. Terminal and SDK children were not affected.
+- Not changed here: durable children still load none of Pi's context files
+  (`AGENTS.md`, `APPEND_SYSTEM.md`, `SYSTEM.md`) and never load the content of
+  `skills:` entries, though an unknown skill name still fails the task. They run
+  no extension hooks, so a guard such as a safety extension does not apply to
+  them; only the parent extension tools an agent names in `tools:` are bridged
+  in. Containment is the `tools:` allowlist and `readonly: true`, which denies
+  write/edit/apply_patch but not `bash`.
+
 ## [0.14.0] - 2026-10-26
 
 ### Changed

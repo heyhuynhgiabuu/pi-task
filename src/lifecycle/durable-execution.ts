@@ -749,6 +749,8 @@ export async function executeDurableTask({
       tools: agent.tools,
       parentExtensionToolSources,
       disallowedTools: agent.disallowedTools,
+      // An empty body adds no section, matching the terminal backends.
+      instructions: agent.body.trim() ? agent.body : undefined,
       readonly: agent.readonly,
       onTerminalUsage: (usage) => { terminalUsage = usage; },
       onRequestId: noteAttemptRequestId,

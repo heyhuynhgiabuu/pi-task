@@ -182,7 +182,7 @@ disallowed_tools: edit, write
 # Agent instructions
 ```
 
-Pi has one session parent agent; all `*.md` agents under `agents/` are **task subagents** only. pi-task always appends the agent Markdown body to the child system prompt; `prompt_mode` is not a supported frontmatter field. Use `hidden` for internal/orchestration-only agents.
+Pi has one session parent agent; all `*.md` agents under `agents/` are **task subagents** only. pi-task always appends the agent Markdown body to the child system prompt (on the durable backend it becomes the conversation's `instructions` section); `prompt_mode` is not a supported frontmatter field. Use `hidden` for internal/orchestration-only agents.
 
 `skills:` is a comma-separated list of native Pi skill names. pi-task resolves each name against Pi's skill registry and passes the resulting file path through repeatable `--skill` flags to Pi terminal children; SDK children receive the same explicit skill paths. Claude Code terminal children do not support Pi skill paths, so declaring `skills:` for a Claude runtime fails the launch instead of silently dropping the skill. An unknown declared skill fails the task instead of silently dropping the skill. Skill loading remains progressive: the child may need to read or invoke the declared skill to load its full instructions.
 

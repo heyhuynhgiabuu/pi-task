@@ -102,7 +102,7 @@ test("list shows main and this session's subagents only, marking the caller", as
     const listed = await messaging.handle(child("t-a"), { action: "list" });
     assert.equal(listed.isError, undefined);
     assert.match(listed.text, /- main — main agent\n/);
-    assert.match(listed.text, /- t-a — general, running: work of t-a \(you\)/);
+    assert.match(listed.text, /- t-a — general, running \(result arrives on its own; do not poll\): work of t-a \(you\)/);
     assert.match(listed.text, /- t-b — general, idle \(last run done\)/);
     assert.match(listed.text, /- t-tmux .*tmux backend, messaging unsupported/);
     assert.doesNotMatch(listed.text, /t-foreign/);
@@ -277,6 +277,25 @@ test("concurrent subagent sends cannot overshoot the budget, and failed ones ref
   }
 });
 
+test("read on a running target says the text is the previous run, not this one's result", async () => {
+  const { root, piDir } = fixture();
+  try {
+    row(piDir, "t-live", "sess-1", { status: "running" });
+    row(piDir, "t-done", "sess-1", { status: "done" });
+    const { messaging } = service(piDir);
+
+    const live = await messaging.handle(main, { action: "read", agent: "t-live" });
+    assert.match(live.text, /^last answer of t-live/);
+    assert.match(live.text, /t-live is still running: this is its previous message, not this run's result/);
+    assert.match(live.text, /arrives on its own when the task completes; do not poll\.\]$/);
+
+    const settled = await messaging.handle(main, { action: "read", agent: "t-done" });
+    assert.equal(settled.text, "last answer of t-done", "a finished task reads clean");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("read returns the target's last message, truncated when long", async () => {
   const { root, piDir } = fixture();
   try {
@@ -288,7 +307,7 @@ test("read returns the target's last message, truncated when long", async () => 
     assert.equal((await messaging.handle(child("t-a"), { action: "read", agent: "main" })).text, "main's last answer");
     assert.match((await messaging.handle(main, { action: "read", agent: "t-a" })).text, /no assistant message yet/);
     const long = await messaging.handle(main, { action: "read", agent: "t-b" });
-    assert.match(long.text, /\[truncated: 4000 more characters\]$/);
+    assert.match(long.text, /\[truncated: 4000 more characters\]/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

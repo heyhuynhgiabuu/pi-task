@@ -221,7 +221,9 @@ export function createAgentMessagingService(deps: AgentMessagingDeps): AgentMess
     if (params.action === "list") {
       const lines = ["Agents in this session:", `- main — main agent${selfName === "main" ? " (you)" : ""}`];
       for (const row of rows) {
-        const state = row.status === "running" ? "running" : `idle (last run ${row.status})`;
+        const state = row.status === "running"
+          ? "running (result arrives on its own; do not poll)"
+          : `idle (last run ${row.status})`;
         const support = row.backend === "durable" ? "" : ` — ${row.backend ?? "legacy"} backend, messaging unsupported`;
         lines.push(
           `- ${row.id} — ${row.agentType}, ${state}: ${row.description}${support}${row.id === selfName ? " (you)" : ""}`,
@@ -252,7 +254,13 @@ export function createAgentMessagingService(deps: AgentMessagingDeps): AgentMess
         ? deps.readMainLast()
         : await deps.readDurableLast(target);
       if (!text) return { text: `${target} has no assistant message yet.` };
-      return { text: truncateRead(text) };
+      // A running target keeps its last message from an earlier run, so a read mid-run looks like a
+      // finished answer. Say which it is; treating this text as the result is the mistake.
+      const midRun = targetRow?.status === "running"
+        ? `\n[${target} is still running: this is its previous message, not this run's result. ` +
+          "The result arrives on its own when the task completes; do not poll.]"
+        : "";
+      return { text: truncateRead(text) + midRun };
     }
 
     const message = checkMessage(params.message);

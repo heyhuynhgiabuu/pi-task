@@ -5,18 +5,22 @@ import { formatMs } from "./helpers.js";
 import type { TaskActivity } from "./task-activity.js";
 
 /**
- * Truncate one widget row. A row is exactly one terminal row: pi's renderer counts rows, so a
- * newline left inside it (a heredoc in a bash command, a multi-line description) makes the
- * terminal draw two and every repaint drifts one row lower. `truncateToWidth` only cuts by
- * visible width and keeps a newline that falls before the cut, so collapse them here, the one
- * place every row passes through, whatever backend produced the text.
+ * Truncate one widget or panel row. A row is exactly one terminal row: pi's renderer counts
+ * rows, so a newline left inside it (a heredoc in a bash command, a multi-line description)
+ * makes the terminal draw two and every repaint drifts one row lower. `truncateToWidth` only
+ * cuts by visible width and keeps a newline that falls before the cut, so every run of
+ * whitespace that holds a line break, and the whitespace around the break, becomes one space
+ * here, the one place every row of this file passes through, whatever backend produced the text.
+ *
+ * Runs of whitespace without a line break are kept as they are. The match is one `\s+` pass
+ * with a test per run, so it is linear in the length of the text: a pattern such as
+ * `\s*[\r\n]+\s*` retries from every position of a long run of spaces and is quadratic, and this
+ * runs on the raw command (not capped) every 80 ms.
  */
 function fit(line: string, width: number, ellipsis?: string): string {
-  const oneRow = line.replace(/\s*[\r\n]+\s*/g, " ");
+  const oneRow = line.replace(/\s+/g, (run) => (/[\r\n]/.test(run) ? " " : run));
 
-  return ellipsis === undefined
-    ? truncateToWidth(oneRow, width)
-    : truncateToWidth(oneRow, width, ellipsis);
+  return truncateToWidth(oneRow, width, ellipsis);
 }
 
 export interface WidgetTask {

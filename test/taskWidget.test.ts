@@ -193,7 +193,6 @@ test("task widget leaves settled tasks without a phase segment", () => {
 });
 
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { renderTaskPanel } from "../src/task-widget.js";
 
 test("renderTaskPanel shows the main row and task rows with identity-tracked selection", () => {
   const lines = renderTaskPanel({
@@ -559,4 +558,43 @@ test("the panel hint stays one row when its text or the viewed task id holds a l
 
     assertOneRowEach(lines, 120);
   }
+});
+
+test("collapsing line breaks is linear: a very long run of spaces does not stall a repaint", () => {
+  for (const filler of [" ", "\t", "\u00a0"]) {
+    const detail = `${filler.repeat(100_000)}x`;
+    const started = performance.now();
+
+    renderTaskWidget({
+      foregroundTasks: [["f1", taskWith(detail)]],
+      backgroundTasks: [["b1", taskWith(detail)]],
+      foregroundCount: 1,
+      backgroundCount: 1,
+      width: 120,
+      now: 1000,
+    });
+
+    assert.ok(performance.now() - started < 500, `${JSON.stringify(filler)} run took ${Math.round(performance.now() - started)} ms`);
+  }
+});
+
+test("the ellipsis a row asks for survives the line-break collapse", () => {
+  const lines = renderTaskPanel({
+    rows: [
+      {
+        id: "abcd-1234",
+        agentType: "test-writer",
+        description: "a very long description that cannot fit in forty columns at all",
+        status: "running",
+        startedAt: 0,
+      },
+    ],
+    selection: null,
+    viewTaskId: null,
+    now: 1000,
+    width: 40,
+  });
+
+  assert.ok(lines.some((line) => line.includes("…")), "a truncated panel row carries the panel ellipsis");
+  assert.ok(!lines.some((line) => line.includes("...")), "and not pi-tui's default three dots");
 });

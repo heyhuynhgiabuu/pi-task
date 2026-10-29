@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { renderTaskWidget, type WidgetTask } from "../src/task-widget.js";
+import { renderTaskPanel, renderTaskWidget, type WidgetTask } from "../src/task-widget.js";
 
 test("task widget prefixes in-progress spinner with a leading space", () => {
   const lines = renderTaskWidget({
@@ -392,4 +392,171 @@ test("finished section renders failure/abort icons instead of a green check", ()
     ],
   });
   assert.match(abortedLines[0] ?? "", /■/, "aborted tasks show a stop icon");
+});
+
+// ── a newline inside a row must never reach the terminal (issue #34) ─────────
+
+const HEREDOC = "cd /tmp/repo; cat > example.test.sh <<'EOF'\n#!/bin/sh\necho hi\nEOF";
+
+function taskWith(detail: string, extra: Partial<WidgetTask> = {}): WidgetTask {
+  return {
+    agentType: "test-writer",
+    startedAt: 0,
+    toolUses: 1,
+    recentCalls: [{ id: "c1", name: "bash", detail, status: "in_progress" }],
+    ...extra,
+  };
+}
+
+/** One terminal row per returned line: no line break and nothing wider than the terminal. */
+function assertOneRowEach(lines: string[], width: number): void {
+  for (const line of lines) {
+    assert.doesNotMatch(line, /[\r\n]/, `a row holds a line break: ${JSON.stringify(line)}`);
+    assert.ok(visibleWidth(line) <= width, `row too wide: ${visibleWidth(line)} > ${width}`);
+  }
+}
+
+// What each backend puts in `detail` for the same heredoc: the pi session file (terminal, tmux,
+// herdr) keeps the raw command, durable keeps `$ ` plus the first 50 characters, the SDK
+// JSON-escapes it, and a Windows-style command carries CRLF.
+const DETAILS: Array<[string, string]> = [
+  ["terminal: raw command", HEREDOC],
+  ["durable: first 50 characters", HEREDOC.slice(0, 50)],
+  ["sdk: JSON-escaped", JSON.stringify({ command: HEREDOC })],
+  ["crlf", "echo a\r\necho b"],
+  ["blank lines and indentation", "echo a\n\n   \n  echo b"],
+  ["leading and trailing newline", "\necho a\n"],
+  ["bare carriage return", "echo a\recho b"],
+];
+
+for (const width of [120, 80, 40]) {
+  for (const [name, detail] of DETAILS) {
+    test(`widget rows stay one row each at width ${width} for a ${name} detail`, () => {
+      const foreground = renderTaskWidget({
+        foregroundTasks: [["f1", taskWith(detail)]],
+        backgroundTasks: [],
+        foregroundCount: 1,
+        backgroundCount: 0,
+        width,
+        now: 106_000,
+      });
+      const background = renderTaskWidget({
+        foregroundTasks: [],
+        backgroundTasks: [["abcd-1234", taskWith(detail)]],
+        foregroundCount: 0,
+        backgroundCount: 1,
+        width,
+        now: 106_000,
+      });
+
+      assertOneRowEach(foreground, width);
+      assertOneRowEach(background, width);
+    });
+  }
+}
+
+test("a heredoc detail reads as one line, with the line breaks collapsed to single spaces", () => {
+  const lines = renderTaskWidget({
+    foregroundTasks: [],
+    backgroundTasks: [["abcd-1234", taskWith(HEREDOC)]],
+    foregroundCount: 0,
+    backgroundCount: 1,
+    width: 120,
+    now: 106_000,
+  });
+
+  assert.match(lines[1] ?? "", /bash {2}cd \/tmp\/repo; cat > example\.test\.sh <<'EOF' #!\/bin\/sh echo hi/);
+});
+
+test("a multi-line description cannot break the header or the finished row", () => {
+  const multiline = "first line\nsecond line";
+  const lines = renderTaskWidget({
+    foregroundTasks: [["f1", taskWith("ls", { description: multiline })]],
+    backgroundTasks: [],
+    foregroundCount: 1,
+    backgroundCount: 0,
+    width: 200,
+    now: 1000,
+    finishedTasks: [["f2", taskWith("ls", { description: multiline, status: "done" })]],
+  });
+
+  assertOneRowEach(lines, 200);
+  assert.ok(lines.some((line) => line.includes("first line second line")));
+});
+
+test("renderTaskPanel keeps a row with a line break in its activity or description to one row", () => {
+  for (const width of [120, 40]) {
+    const lines = renderTaskPanel({
+      rows: [
+        {
+          id: "abcd-1234",
+          agentType: "test-writer",
+          description: "writes\ntests",
+          status: "running",
+          startedAt: 0,
+          activity: `bash ${HEREDOC}`,
+        },
+      ],
+      selection: null,
+      viewTaskId: null,
+      now: 1000,
+      width,
+    });
+
+    assertOneRowEach(lines, width);
+  }
+});
+
+test("a row without a line break is rendered exactly as before", () => {
+  const plain = renderTaskWidget({
+    foregroundTasks: [],
+    backgroundTasks: [["abcd-1234", taskWith("ls -la /tmp")]],
+    foregroundCount: 0,
+    backgroundCount: 1,
+    width: 120,
+    now: 106_000,
+  });
+
+  assert.match(plain[1] ?? "", /bash {2}ls -la \/tmp$/);
+});
+
+test("line breaks collapse to exactly one space, with the whitespace around them", () => {
+  const lines = renderTaskWidget({
+    foregroundTasks: [],
+    backgroundTasks: [["abcd-1234", taskWith("echo a\n\n   \n  echo b\r\n\tdone")]],
+    foregroundCount: 0,
+    backgroundCount: 1,
+    width: 120,
+    now: 106_000,
+  });
+
+  assert.match(lines[1] ?? "", /bash {2}echo a echo b done$/);
+});
+
+test("the agent type and the task id cannot break the background header either", () => {
+  const lines = renderTaskWidget({
+    foregroundTasks: [],
+    backgroundTasks: [["abcd\n1234", taskWith("ls", { agentType: "test\nwriter" })]],
+    foregroundCount: 0,
+    backgroundCount: 1,
+    width: 120,
+    now: 106_000,
+  });
+
+  assertOneRowEach(lines, 120);
+});
+
+test("the panel hint stays one row when its text or the viewed task id holds a line break", () => {
+  for (const params of [{ hint: "keys:\nenter to view" }, { viewTaskId: "abcd\n1234" }]) {
+    const lines = renderTaskPanel({
+      rows: [],
+      selection: null,
+      viewTaskId: null,
+      now: 1000,
+      width: 120,
+      ...params,
+    });
+
+    assertOneRowEach(lines, 120);
+  }
 });

@@ -4,6 +4,21 @@ import type { ToolCallRecord } from "./helpers.js";
 import { formatMs } from "./helpers.js";
 import type { TaskActivity } from "./task-activity.js";
 
+/**
+ * Truncate one widget row. A row is exactly one terminal row: pi's renderer counts rows, so a
+ * newline left inside it (a heredoc in a bash command, a multi-line description) makes the
+ * terminal draw two and every repaint drifts one row lower. `truncateToWidth` only cuts by
+ * visible width and keeps a newline that falls before the cut, so collapse them here, the one
+ * place every row passes through, whatever backend produced the text.
+ */
+function fit(line: string, width: number, ellipsis?: string): string {
+  const oneRow = line.replace(/\s*[\r\n]+\s*/g, " ");
+
+  return ellipsis === undefined
+    ? truncateToWidth(oneRow, width)
+    : truncateToWidth(oneRow, width, ellipsis);
+}
+
 export interface WidgetTask {
   agentType: string;
   description?: string;
@@ -109,7 +124,7 @@ function renderForegroundTask(
       ? color(theme, "dim", " \u2022 ") +
         color(theme, "success", formatToolCount(task.toolUses))
       : "");
-  lines.push(truncateToWidth(header, maxWidth));
+  lines.push(fit(header, maxWidth));
 
   const latest = task.recentCalls?.at(-1);
   if (latest) {
@@ -126,7 +141,7 @@ function renderForegroundTask(
       (latest.status === "in_progress" ? " " : "  ") +
       color(theme, "text", latest.name) +
       color(theme, "dim", detail + suffix);
-    lines.push(truncateToWidth(line, maxWidth));
+    lines.push(fit(line, maxWidth));
   }
 
   return lines;
@@ -142,7 +157,7 @@ function renderBackgroundTask(
 ): string[] {
   const elapsed = formatMs(now - task.startedAt);
   const lines = [
-    truncateToWidth(
+    fit(
       color(theme, "dim", "- ") +
         color(theme, "toolTitle", task.agentType) +
         color(theme, "dim", " · ") +
@@ -169,7 +184,7 @@ function renderBackgroundTask(
       (latest.status === "in_progress" ? " " : "  ") +
       color(theme, "text", latest.name) +
       color(theme, "dim", detail + suffix);
-    lines.push(truncateToWidth(line, maxWidth));
+    lines.push(fit(line, maxWidth));
   } else {
     const line =
       "  " +
@@ -178,7 +193,7 @@ function renderBackgroundTask(
       toolStatusMark(theme, "in_progress", spinner) +
       " " +
       color(theme, "dim", "waiting");
-    lines.push(truncateToWidth(line, maxWidth));
+    lines.push(fit(line, maxWidth));
   }
 
   return lines;
@@ -231,7 +246,7 @@ export function renderTaskWidget(params: {
   const hidden = backgroundCount - renderedBackground.length;
   if (hidden > 0) {
     lines.push(
-      truncateToWidth(
+      fit(
         color(theme, "dim", `+ ${hidden} more background tasks`),
         maxWidth,
       ),
@@ -254,7 +269,7 @@ export function renderTaskWidget(params: {
             ? "warning"
             : "error";
       lines.push(
-        truncateToWidth(
+        fit(
           color(theme, colorToken, icon) +
             color(theme, "dim", ` ${task.agentType} — ${task.description ?? ""}`),
           maxWidth,
@@ -363,17 +378,17 @@ export function renderTaskPanel(params: {
     moreBelow = rows.length - start - count;
   }
 
-  const lines = [truncateToWidth(color(theme, "dim", hint), maxWidth, "…")];
+  const lines = [fit(color(theme, "dim", hint), maxWidth, "…")];
   const mainLabel = `  main${params.shownTaskId === null ? " (shown)" : ""}`;
   lines.push(
-    truncateToWidth(
+    fit(
       color(theme, "dim", `${selection === "main" ? "❯" : " "}${mainLabel}`),
       maxWidth,
       "…",
     ),
   );
   if (moreAbove > 0) {
-    lines.push(truncateToWidth(color(theme, "dim", `  ↑ ${moreAbove} more`), maxWidth, "…"));
+    lines.push(fit(color(theme, "dim", `  ↑ ${moreAbove} more`), maxWidth, "…"));
   }
   visible.forEach((row, i) => {
     const marker = selIdx === start + i ? "❯" : " ";
@@ -384,10 +399,10 @@ export function renderTaskPanel(params: {
     const shown = params.shownTaskId === row.id ? " (shown)" : "";
     const text =
       `${marker} ${icon} ${color(theme, "toolTitle", `${row.agentType}${identity}${shown}`)} — ${row.description}${activity} · ${elapsed}`;
-    lines.push(truncateToWidth(text, maxWidth, "…"));
+    lines.push(fit(text, maxWidth, "…"));
   });
   if (moreBelow > 0) {
-    lines.push(truncateToWidth(color(theme, "dim", `  ↓ ${moreBelow} more`), maxWidth, "…"));
+    lines.push(fit(color(theme, "dim", `  ↓ ${moreBelow} more`), maxWidth, "…"));
   }
   return lines;
 }

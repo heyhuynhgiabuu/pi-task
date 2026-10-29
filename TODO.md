@@ -1,5 +1,7 @@
 # TODO
 
+- [x] Prepare v0.14.2: a `read` of a running agent now says its text is the previous run's message and that the result self-delivers, `list` says the same in one clause, and the README records why `read` stays (cross-session and subagent→main are the only channels `task` cannot reach). Typecheck and 862/862 tests pass locally. Releasing to the registry stays a manual step.
+
 - [x] Prepare v0.14.1: the task widget and `/task` panel no longer redraw endlessly when a tool call's text holds a line break (#34), a durable child now gets its agent body as `instructions`, and the lock-held error names another copy of pi-task in the same process instead of a bogus "another Pi process (pid <own pid>)". Typecheck, build, tests and the tarball content checked locally; the durable-child fix was also seen working live (a canary child quoted its role text). The `/reload` cause of the original incident is inferred, not reproduced. Releasing to the registry stays a manual step.
 
 - [x] Prepare v0.14.0: HerdR rejected-start cleanup and shell-ready wait (#31, #32), durable hard timeout, lost-notice replay, `conversation_id` rejected on durable, `unknown_task_id`, task state line. Typecheck, build, tests (823+) and two independent review passes done locally; `max_turns` on durable, a subagent depth counter and removing `compare` are not done. npm publish remains manual.

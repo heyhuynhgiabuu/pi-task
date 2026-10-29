@@ -6,6 +6,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.14.2] - 2026-10-30
+
+### Changed
+
+- A `read` of an agent that is still running now says the text it returns is that agent's
+  *previous* message, not this run's result, and that the result arrives on its own. A
+  running target keeps its last message from an earlier run, so a mid-run read returned
+  text that looked like a finished answer. The `list` state says the same thing in one
+  clause: `running (result arrives on its own; do not poll)`.
+- `read` stays, and the README now says what it is for. It is the only channel for a target
+  `task` cannot reach: another Pi session (`session:<id>`), and `main` as seen from a
+  subagent, which has no `task` tool. A task's own result never needs it. Measured over
+  local session files, `agents read` was called 64 times and none came after a task had
+  finished, so the cost being addressed is the poll, not the capability.
+
 ## [0.14.1] - 2026-10-29
 
 ### Fixed

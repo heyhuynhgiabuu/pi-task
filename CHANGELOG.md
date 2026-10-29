@@ -6,8 +6,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-10-29
+
 ### Fixed
 
+- The task widget and the `/task` panel no longer redraw endlessly when a tool call's
+  text holds a line break. A `bash` command with a heredoc (or a multi-line `grep`
+  pattern, or a multi-line task description) put a raw newline into a one-row widget line;
+  pi counts the row as one while the terminal draws two, so every spinner tick printed the
+  widget again one row lower until the call ended. It depended on the pane width: once the
+  pane was narrow enough for the truncation to cut before the newline it stopped. Terminal,
+  tmux and herdr children (raw command from the session file) and durable children (first 50
+  characters of the command) were affected; SDK children were not, because their detail is
+  JSON-escaped. Every widget and panel row now passes through one function that collapses
+  line breaks, and the whitespace around them, into a single space before truncating to the
+  width. Thanks @mcom1 (#34).
 - A durable task refused because another copy of pi-task, loaded in the same process from
   a different location, holds the store no longer says it is "owned by another Pi process
   (pid <this pid>)". It says another copy most likely holds it (for example after the

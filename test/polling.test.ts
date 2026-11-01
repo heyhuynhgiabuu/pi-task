@@ -315,6 +315,167 @@ function makeDeps(
 }
 
 {
+  const t = "a failed session row during an outage does not settle a live child";
+  // A provider error can be an intermediate row while Pi retries. During an outage the control
+  // cannot tell whether the child is alive, so settling `failed` here would close a live pane.
+  const root = mkdtempSync(join(tmpdir(), "pi-task-herdr-failed-row-"));
+  try {
+    const taskId = "t-herdr-failed-row";
+    const sessionDir = join(root, "sessions", taskId);
+    mkdirSync(sessionDir, { recursive: true });
+    const startedAt = Date.now() - 5_000;
+    writeFileSync(
+      join(sessionDir, `${taskId}.jsonl`),
+      JSON.stringify({ type: "session_info", name: taskId }) + "\n" +
+      JSON.stringify({
+        type: "message",
+        timestamp: new Date().toISOString(),
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "429 rate limited, retrying" }],
+          stopReason: "error",
+          errorMessage: "429 rate limited",
+        },
+      }) + "\n",
+    );
+    const backgroundTasks = new Map<any, any>([[taskId, {
+      dir: root,
+      sessionName: taskId,
+      paneId: "%81",
+      originalPane: null,
+      startedAt,
+    }]]);
+    let settled = false;
+    const stop = startBackgroundPolling(
+      makeDeps({
+        backgroundTasks,
+        hardTimeoutMs: Number.POSITIVE_INFINITY,
+        MAX_POLL_ERRORS: 1000,
+        checkTaskCompletion: async () => {
+          const error = new Error("herdr control socket is gone");
+          error.name = "HerdrUnavailableError";
+          throw error;
+        },
+        completeTask: () => {
+          settled = true;
+        },
+      }),
+      5,
+    );
+    try {
+      await sleep(60);
+      assert.equal(settled, false, `${t}: a retrying child is not declared failed`);
+      assert.equal(backgroundTasks.has(taskId), true, `${t}: task stays tracked for the next poll`);
+    } finally {
+      stop();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const t = "an outage is not reported before the threshold";
+  // Reporting on the first failing tick would cry outage on a single dropped read.
+  const backgroundTasks = new Map<any, any>([["t-herdr-quiet", {
+    dir: "/tmp/pi-task-herdr-quiet",
+    sessionName: "s-herdr-quiet",
+    paneId: "%82",
+    originalPane: null,
+    startedAt: Date.now(),
+  }]]);
+  const diagnostics: string[] = [];
+  const previousError = console.error;
+  console.error = (...args: unknown[]) => diagnostics.push(args.map(String).join(" "));
+  const stop = startBackgroundPolling(
+    makeDeps({
+      backgroundTasks,
+      hardTimeoutMs: Number.POSITIVE_INFINITY,
+      MAX_POLL_ERRORS: 1000,
+      checkTaskCompletion: async () => {
+        const error = new Error("herdr control socket is gone");
+        error.name = "HerdrUnavailableError";
+        throw error;
+      },
+      completeTask: () => {
+        throw new Error(`${t}: nothing settles during an outage`);
+      },
+    }),
+    5,
+  );
+  try {
+    await sleep(40);
+    assert.equal(diagnostics.length, 0, `${t}: below the threshold stays quiet`);
+    assert.equal(backgroundTasks.has("t-herdr-quiet"), true, `${t}: task stays tracked`);
+  } finally {
+    stop();
+    console.error = previousError;
+  }
+}
+
+{
+  const t = "a replaced task is not settled from an outage recovery";
+  // The tick may resume after the task was replaced (resume, cancel-and-restart). Settling then
+  // would deliver a result for a task object that no longer owns the id.
+  const root = mkdtempSync(join(tmpdir(), "pi-task-herdr-replaced-"));
+  try {
+    const taskId = "t-herdr-replaced";
+    const sessionDir = join(root, "sessions", taskId);
+    mkdirSync(sessionDir, { recursive: true });
+    const startedAt = Date.now() - 5_000;
+    writeFileSync(
+      join(sessionDir, `${taskId}.jsonl`),
+      JSON.stringify({ type: "session_info", name: taskId }) + "\n" +
+      JSON.stringify({
+        type: "message",
+        timestamp: new Date().toISOString(),
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "the old run's result" }],
+          stopReason: "endTurn",
+        },
+      }) + "\n",
+    );
+    const original = {
+      dir: root,
+      sessionName: taskId,
+      paneId: "%83",
+      originalPane: null,
+      startedAt,
+    };
+    const backgroundTasks = new Map<any, any>([[taskId, original]]);
+    let settledIds: string[] = [];
+    const stop = startBackgroundPolling(
+      makeDeps({
+        backgroundTasks,
+        hardTimeoutMs: Number.POSITIVE_INFINITY,
+        MAX_POLL_ERRORS: 1,
+        checkTaskCompletion: async () => {
+          // A resume replaced the entry while this tick was in flight.
+          backgroundTasks.set(taskId, { ...original, paneId: "%84" });
+          const error = new Error("herdr control socket is gone");
+          error.name = "HerdrUnavailableError";
+          throw error;
+        },
+        completeTask: ({ id }: any) => {
+          settledIds.push(id);
+        },
+      }),
+      5,
+    );
+    try {
+      await sleep(40);
+      assert.deepEqual(settledIds, [], `${t}: the replaced task is left to its own poll`);
+      assert.equal(backgroundTasks.has(taskId), true, `${t}: the new task keeps its slot`);
+    } finally {
+      stop();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
   const t = "stop() prevents future ticks from calling completeTask with stale pi";
   let completeCallCount = 0;
   let lastPi: any = undefined;

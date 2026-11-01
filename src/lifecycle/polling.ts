@@ -240,29 +240,35 @@ export function startBackgroundPolling(
         //
         // First, a child that already finished before the control went away is recoverable from
         // the session file, exactly as the hard-timeout path recovers it.
+        // Only a completed result is authoritative here. A `failed` row can be an intermediate
+        // one while Pi retries a provider error, and during an outage the control cannot tell
+        // whether the child is still alive, so settling on it would close a live pane and record
+        // a failure for a task that recovers on the next successful poll. `waitCompletion` makes
+        // the same distinction for the same reason.
         const terminalResult = getLastAssistantResultFromSessionDir(
           join(task.dir, "sessions", id),
           task.sessionName,
           task.startedAt,
         );
-        if (terminalResult !== undefined && terminalResult !== null) {
+        if (terminalResult?.status === "completed") {
           if (deps.backgroundTasks.get(id) !== task) return;
-          settle(
-            id,
-            task,
-            terminalResult.content,
-            terminalResult.status === "completed" ? "done" : "failed",
-          );
+          try {
+            settle(id, task, terminalResult.content, "done");
+          } catch (settlementError) {
+            reportDurableStateBlocked(id, settlementError);
+          }
           return;
         }
-        // Second, the outage must not be silent: an attempt counter that was never reported left
-        // the task unread forever with no diagnostic. Say it once per outage.
-        const count = (herdrOutages.get(id) ?? 0) + 1;
-        herdrOutages.set(id, count);
-        if (count === deps.MAX_POLL_ERRORS) {
-          console.error(
-            `[pi-task] background task ${id} could not be read: ${error.message}. The Herdr control is unavailable; the task is kept and polling continues.`,
-          );
+        // The outage must not be silent: an attempt counter that was never reported left the task
+        // unread forever with no diagnostic. Say it once per outage.
+        if (deps.backgroundTasks.get(id) === task) {
+          const count = (herdrOutages.get(id) ?? 0) + 1;
+          herdrOutages.set(id, count);
+          if (count === deps.MAX_POLL_ERRORS) {
+            console.error(
+              `[pi-task] background task ${id} could not be read: ${error.message}. The Herdr control is unavailable; the task is kept and polling continues.`,
+            );
+          }
         }
         return;
       }

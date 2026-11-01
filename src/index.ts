@@ -821,6 +821,11 @@ export default function (pi: ExtensionAPI) {
       MAX_POLL_ERRORS,
       piDir,
       pi,
+      notifyUser: (text) =>
+        ignoreStaleExtensionCtx(() => {
+          if (backgroundWarnCtx) warnUser(backgroundWarnCtx, text);
+          else console.error(text);
+        }),
       steerTask: (task, prompt) =>
         steerRunningBackgroundTaskAsync(task.paneId, prompt, task.handle)
           .then((result) => result.ok),
@@ -849,10 +854,17 @@ export default function (pi: ExtensionAPI) {
   // this session actually ran in. Updated at session start and on each call.
   let lastCwd = process.cwd();
 
+  // Background work runs outside any handler, so it cannot receive a ctx as an argument. This
+  // holds the session's own ctx for warnings raised from a poll loop, and is cleared on shutdown.
+  // Reads go through `ignoreStaleExtensionCtx`: the host throws from a getter such as `hasUI`
+  // once the context is stale, so wrapping only the `notify` call would not be enough.
+  let backgroundWarnCtx: ExtensionContext | undefined;
+
   // ── Panel ready at session start ───────────────────────────────────────
 
   pi.on("session_start", (_event, ctx) => {
     lastCwd = ctx.cwd;
+    backgroundWarnCtx = ctx;
     ignoreStaleExtensionCtx(() => taskWidget.ensurePanelEditor(ctx));
   });
 
@@ -860,6 +872,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_shutdown", () => {
     stopBackgroundPolling();
+    backgroundWarnCtx = undefined;
     clearInterval(countInterval);
     taskWidget.dispose();
     completionDeliveryQueue.dispose();

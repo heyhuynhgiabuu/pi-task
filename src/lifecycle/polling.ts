@@ -50,6 +50,11 @@ export interface BackgroundPollingDeps {
   piDir: string;
   pi: ExtensionAPI;
   /**
+   * Show a warning the user can actually see. Required, not optional: an optional hook lets the
+   * next call site fall back to `console.error`, which the TUI draws over.
+   */
+  notifyUser: (text: string) => void;
+  /**
    * Inject a user message into a running subagent (issue #19 wrap-up).
    * Returns false when the injection fails (dead pane, herdr unavailable);
    * the polling loop then settles the task immediately.
@@ -65,9 +70,11 @@ export function startBackgroundPolling(
   let inFlight = false;
   const pollErrors = new Map<string, number>();
   const durableStateReported = new Set<string>();
+  // Herdr outages are counted separately from poll failures: an outage keeps the task alive, so
+  // sharing `pollErrors` would let an outage end a healthy task.
+  const herdrOutages = new Map<string, number>();
 
-  // Terminal settlement shared by the timeout, completed, failed, and
-  // poll-error paths: deliver durably, then retire the task from the maps.
+  // Terminal settlement for every path that ends a task: deliver durably, then retire it.
   const settle = (
     id: string,
     task: BackgroundTask,
@@ -101,6 +108,16 @@ export function startBackgroundPolling(
     }
     pollErrors.delete(id);
     durableStateReported.delete(id);
+    herdrOutages.delete(id);
+  };
+  const warn = (text: string): void => {
+    // A warning must never change the outcome of the poll that raised it: inside the turn-limit
+    // catch a throw from here would skip the steer and send a working task down the error path.
+    try {
+      deps.notifyUser(`[pi-task] ${text}`);
+    } catch {
+      // A warning that could not be shown is not a task failure.
+    }
   };
   const reportDurableStateBlocked = (id: string, error: unknown): boolean => {
     if (!(error instanceof DurableStateError)) return false;
@@ -108,7 +125,7 @@ export function startBackgroundPolling(
     // unreadable durable file is repaired.
     if (!durableStateReported.has(id)) {
       durableStateReported.add(id);
-      console.error(`[pi-task] background task ${id} settlement blocked: ${error.message}`);
+      warn(`background task ${id} settlement blocked: ${error.message}`);
     }
     return true;
   };
@@ -177,13 +194,15 @@ export function startBackgroundPolling(
           try {
             persistTurnBudget(deps.piDir, id, { wrapUp: task.wrapUp });
           } catch (error) {
-            console.error(
-              `[pi-task] background task ${id} wrap-up state was not persisted: ${error instanceof Error ? error.message : String(error)}`,
+            warn(
+              `background task ${id} wrap-up state was not persisted: ${error instanceof Error ? error.message : String(error)}`,
             );
           }
           const steered = await (deps.steerTask?.(task, turnLimitWrapUpPrompt(task.maxTurns)) ?? false);
           if (!steered) {
-            if (deps.backgroundTasks.get(id) !== task) return;
+            // The steer goes through Herdr/tmux and can return after `stop()`; settling then would
+            // deliver through a dead session.
+            if (stopped || deps.backgroundTasks.get(id) !== task) return;
             settleAtLimit("; wrap-up steering failed.");
             return;
           }
@@ -216,6 +235,7 @@ export function startBackgroundPolling(
       // A non-throwing probe means this poll did not fail. Only consecutive
       // probe failures should count toward MAX_POLL_ERRORS.
       pollErrors.delete(id);
+      herdrOutages.delete(id);
 
       if (snapshot.status === "completed") {
         settle(id, task, snapshot.content, "done");
@@ -228,7 +248,43 @@ export function startBackgroundPolling(
         );
       }
     } catch (error) {
+      // Nothing in here may act after shutdown. `stop()` leaves `backgroundTasks` intact, so an
+      // in-flight probe or steer that resolves afterwards would still write task history, close
+      // the pane, and deliver through a session that no longer exists.
+      if (stopped) return;
       if (error instanceof Error && error.name === "HerdrUnavailableError") {
+        // An unreachable control is an outage, not a dead child: the pane and the session file are
+        // untouched, so settling would close a healthy pane. Two things are still owed.
+        //
+        // A child that finished before the control went away is recoverable from its session
+        // file, but only on a `completed` result: a `failed` row can be intermediate while Pi
+        // retries, and the outage cannot tell whether the child is alive. `waitCompletion` draws
+        // the same line for the same reason.
+        const terminalResult = getLastAssistantResultFromSessionDir(
+          join(task.dir, "sessions", id),
+          task.sessionName,
+          task.startedAt,
+        );
+        if (terminalResult?.status === "completed") {
+          if (deps.backgroundTasks.get(id) !== task) return;
+          try {
+            settle(id, task, terminalResult.content, "done");
+          } catch (settlementError) {
+            reportDurableStateBlocked(id, settlementError);
+          }
+          return;
+        }
+        // Warn once after MAX_POLL_ERRORS outage polls in a row: enough to be a real outage, not a
+        // single dropped read. The count resets on any successful probe.
+        if (deps.backgroundTasks.get(id) === task) {
+          const count = (herdrOutages.get(id) ?? 0) + 1;
+          herdrOutages.set(id, count);
+          if (count === deps.MAX_POLL_ERRORS) {
+            warn(
+              `background task ${id} could not be read: ${error.message}. The Herdr control is unavailable; the task is kept and polling continues.`,
+            );
+          }
+        }
         return;
       }
       if (reportDurableStateBlocked(id, error)) return;

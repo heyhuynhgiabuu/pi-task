@@ -41,6 +41,7 @@ function makeDeps(
     piDir: string;
     pi: any;
     steerTask: any;
+    notifyUser: any;
   }> = {},
 ) {
   return {
@@ -52,6 +53,8 @@ function makeDeps(
     MAX_POLL_ERRORS: 3,
     piDir: POLL_PI_DIR,
     pi: { __pi: "captured" },
+    // Default to stderr so existing assertions on console.error keep working.
+    notifyUser: (text: string) => console.error(text),
     ...overrides,
   };
 }
@@ -160,6 +163,646 @@ function makeDeps(
   assert.ok(calls >= 3, `${t}: exercised failure, success, failure sequence`);
   assert.equal(settled, false, `${t}: task remains alive after reset`);
   assert.equal(backgroundTasks.has("t-reset"), true, `${t}: task remains registered`);
+}
+
+{
+  const t = "an unreachable Herdr control keeps the task and reports the outage";
+  // An outage is not a dead child: the pane and the session file are untouched. Settling here
+  // would close a healthy pane and record a failure for a task that may still be running.
+  const backgroundTasks = new Map<any, any>([["t-herdr-gone", {
+    dir: "/tmp/pi-task-herdr-outage",
+    sessionName: "s-herdr-gone",
+    paneId: "%77",
+    originalPane: null,
+    startedAt: Date.now(),
+  }]]);
+  let settled = false;
+  const diagnostics: string[] = [];
+  const previousError = console.error;
+  console.error = (...args: unknown[]) => diagnostics.push(args.map(String).join(" "));
+  const stop = startBackgroundPolling(
+    makeDeps({
+      backgroundTasks,
+      hardTimeoutMs: Number.POSITIVE_INFINITY,
+      MAX_POLL_ERRORS: 2,
+      checkTaskCompletion: async () => {
+        const error = new Error("herdr control socket is gone");
+        error.name = "HerdrUnavailableError";
+        throw error;
+      },
+      completeTask: () => {
+        settled = true;
+      },
+    }),
+    5,
+  );
+  try {
+    await sleep(60);
+    assert.equal(settled, false, `${t}: a healthy task is never settled`);
+    assert.equal(backgroundTasks.has("t-herdr-gone"), true, `${t}: task stays tracked`);
+    assert.equal(diagnostics.length, 1, `${t}: the outage is reported, bounded to once`);
+    assert.match(diagnostics[0] ?? "", /Herdr control is unavailable/, `${t}: names the cause`);
+    assert.match(diagnostics[0] ?? "", /kept and polling continues/, `${t}: says it was kept`);
+  } finally {
+    stop();
+    console.error = previousError;
+  }
+}
+
+{
+  const t = "a child that finished before the Herdr control vanished is still delivered";
+  // The regression this pins: the first fix settled such a task as `failed` without ever reading
+  // the session, so a completed child was reported as a failure and its pane closed.
+  const root = mkdtempSync(join(tmpdir(), "pi-task-herdr-finished-"));
+  try {
+    const taskId = "t-herdr-finished";
+    const sessionDir = join(root, "sessions", taskId);
+    mkdirSync(sessionDir, { recursive: true });
+    const startedAt = Date.now() - 5_000;
+    writeFileSync(
+      join(sessionDir, `${taskId}.jsonl`),
+      JSON.stringify({ type: "session_info", name: taskId }) + "\n" +
+      JSON.stringify({
+        type: "message",
+        timestamp: new Date().toISOString(),
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "finished before the control went away" }],
+          stopReason: "endTurn",
+        },
+      }) + "\n",
+    );
+    const backgroundTasks = new Map<any, any>([[taskId, {
+      dir: root,
+      sessionName: taskId,
+      paneId: "%79",
+      originalPane: null,
+      startedAt,
+    }]]);
+    let settled: { content: string; phase: string } | undefined;
+    const stop = startBackgroundPolling(
+      makeDeps({
+        backgroundTasks,
+        hardTimeoutMs: Number.POSITIVE_INFINITY,
+        MAX_POLL_ERRORS: 1,
+        checkTaskCompletion: async () => {
+          const error = new Error("herdr control socket is gone");
+          error.name = "HerdrUnavailableError";
+          throw error;
+        },
+        completeTask: ({ content, phase }: any) => {
+          settled = { content, phase };
+        },
+      }),
+      5,
+    );
+    try {
+      await sleep(40);
+      assert.equal(settled?.phase, "done", `${t}: the child's own result is delivered`);
+      assert.match(settled?.content ?? "", /finished before the control went away/, `${t}: real result`);
+      assert.equal(backgroundTasks.has(taskId), false, `${t}: retired after delivery`);
+    } finally {
+      stop();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const t = "an outage that ends and returns is reported again";
+  // Pins the counter reset: without it the second outage is swallowed, so a control that flaps
+  // would report once and then stay silent forever.
+  const backgroundTasks = new Map<any, any>([["t-herdr-flap", {
+    dir: "/tmp/pi-task-herdr-flap",
+    sessionName: "s-herdr-flap",
+    paneId: "%80",
+    originalPane: null,
+    startedAt: Date.now(),
+  }]]);
+  let calls = 0;
+  const diagnostics: string[] = [];
+  const previousError = console.error;
+  console.error = (...args: unknown[]) => diagnostics.push(args.map(String).join(" "));
+  const stop = startBackgroundPolling(
+    makeDeps({
+      backgroundTasks,
+      hardTimeoutMs: Number.POSITIVE_INFINITY,
+      MAX_POLL_ERRORS: 2,
+      checkTaskCompletion: async () => {
+        calls += 1;
+        // Two failures, one good probe, then failures again.
+        if (calls === 3) return { status: "running", content: "" };
+        const error = new Error(`herdr control socket is gone (${calls})`);
+        error.name = "HerdrUnavailableError";
+        throw error;
+      },
+      completeTask: () => {
+        throw new Error(`${t}: a healthy task must never settle`);
+      },
+    }),
+    5,
+  );
+  try {
+    await sleep(120);
+    assert.ok(calls >= 5, `${t}: exercised outage, recovery, outage`);
+    assert.equal(
+      diagnostics.length,
+      2,
+      `${t}: one report per outage (got ${diagnostics.length})`,
+    );
+  } finally {
+    stop();
+    console.error = previousError;
+  }
+}
+
+{
+  const t = "a failed session row during an outage does not settle a live child";
+  // A provider error can be an intermediate row while Pi retries. During an outage the control
+  // cannot tell whether the child is alive, so settling `failed` here would close a live pane.
+  const root = mkdtempSync(join(tmpdir(), "pi-task-herdr-failed-row-"));
+  try {
+    const taskId = "t-herdr-failed-row";
+    const sessionDir = join(root, "sessions", taskId);
+    mkdirSync(sessionDir, { recursive: true });
+    const startedAt = Date.now() - 5_000;
+    writeFileSync(
+      join(sessionDir, `${taskId}.jsonl`),
+      JSON.stringify({ type: "session_info", name: taskId }) + "\n" +
+      JSON.stringify({
+        type: "message",
+        timestamp: new Date().toISOString(),
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "429 rate limited, retrying" }],
+          stopReason: "error",
+          errorMessage: "429 rate limited",
+        },
+      }) + "\n",
+    );
+    const backgroundTasks = new Map<any, any>([[taskId, {
+      dir: root,
+      sessionName: taskId,
+      paneId: "%81",
+      originalPane: null,
+      startedAt,
+    }]]);
+    let settled = false;
+    const stop = startBackgroundPolling(
+      makeDeps({
+        backgroundTasks,
+        hardTimeoutMs: Number.POSITIVE_INFINITY,
+        MAX_POLL_ERRORS: 1000,
+        checkTaskCompletion: async () => {
+          const error = new Error("herdr control socket is gone");
+          error.name = "HerdrUnavailableError";
+          throw error;
+        },
+        completeTask: () => {
+          settled = true;
+        },
+      }),
+      5,
+    );
+    try {
+      await sleep(60);
+      assert.equal(settled, false, `${t}: a retrying child is not declared failed`);
+      assert.equal(backgroundTasks.has(taskId), true, `${t}: task stays tracked for the next poll`);
+    } finally {
+      stop();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const t = "an outage is not reported before the threshold";
+  // Reporting on the first failing tick would cry outage on a single dropped read.
+  const backgroundTasks = new Map<any, any>([["t-herdr-quiet", {
+    dir: "/tmp/pi-task-herdr-quiet",
+    sessionName: "s-herdr-quiet",
+    paneId: "%82",
+    originalPane: null,
+    startedAt: Date.now(),
+  }]]);
+  const diagnostics: string[] = [];
+  const previousError = console.error;
+  console.error = (...args: unknown[]) => diagnostics.push(args.map(String).join(" "));
+  const stop = startBackgroundPolling(
+    makeDeps({
+      backgroundTasks,
+      hardTimeoutMs: Number.POSITIVE_INFINITY,
+      MAX_POLL_ERRORS: 1000,
+      checkTaskCompletion: async () => {
+        const error = new Error("herdr control socket is gone");
+        error.name = "HerdrUnavailableError";
+        throw error;
+      },
+      completeTask: () => {
+        throw new Error(`${t}: nothing settles during an outage`);
+      },
+    }),
+    5,
+  );
+  try {
+    await sleep(40);
+    assert.equal(diagnostics.length, 0, `${t}: below the threshold stays quiet`);
+    assert.equal(backgroundTasks.has("t-herdr-quiet"), true, `${t}: task stays tracked`);
+  } finally {
+    stop();
+    console.error = previousError;
+  }
+}
+
+{
+  const t = "a replaced task is not settled from an outage recovery";
+  // The tick may resume after the task was replaced (resume, cancel-and-restart). Settling then
+  // would deliver a result for a task object that no longer owns the id.
+  const root = mkdtempSync(join(tmpdir(), "pi-task-herdr-replaced-"));
+  try {
+    const taskId = "t-herdr-replaced";
+    const sessionDir = join(root, "sessions", taskId);
+    mkdirSync(sessionDir, { recursive: true });
+    const startedAt = Date.now() - 5_000;
+    writeFileSync(
+      join(sessionDir, `${taskId}.jsonl`),
+      JSON.stringify({ type: "session_info", name: taskId }) + "\n" +
+      JSON.stringify({
+        type: "message",
+        timestamp: new Date().toISOString(),
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "the old run's result" }],
+          stopReason: "endTurn",
+        },
+      }) + "\n",
+    );
+    const original = {
+      dir: root,
+      sessionName: taskId,
+      paneId: "%83",
+      originalPane: null,
+      startedAt,
+    };
+    const backgroundTasks = new Map<any, any>([[taskId, original]]);
+    let settledIds: string[] = [];
+    const diagnostics: string[] = [];
+    const previousError = console.error;
+    console.error = (...args: unknown[]) => diagnostics.push(args.map(String).join(" "));
+    const stop = startBackgroundPolling(
+      makeDeps({
+        backgroundTasks,
+        hardTimeoutMs: Number.POSITIVE_INFINITY,
+        MAX_POLL_ERRORS: 1,
+        checkTaskCompletion: async () => {
+          // A resume replaced the entry while this tick was in flight.
+          backgroundTasks.set(taskId, { ...original, paneId: "%84" });
+          const error = new Error("herdr control socket is gone");
+          error.name = "HerdrUnavailableError";
+          throw error;
+        },
+        completeTask: ({ id }: any) => {
+          settledIds.push(id);
+        },
+      }),
+      5,
+    );
+    try {
+      await sleep(40);
+      assert.deepEqual(settledIds, [], `${t}: the replaced task is left to its own poll`);
+      assert.equal(backgroundTasks.has(taskId), true, `${t}: the new task keeps its slot`);
+      // The count is guarded as well: a replaced task must not be diagnosed under the old one.
+      assert.deepEqual(diagnostics, [], `${t}: the new task does not inherit the old count`);
+    } finally {
+      stop();
+      console.error = previousError;
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const t = "a replaced task does not inherit the outage count";
+  // Reaches the count guard rather than the settle guard: the session has no completed result,
+  // so the only thing that could report the outage is the counter.
+  const backgroundTasks = new Map<any, any>([["t-herdr-replaced-count", {
+    dir: "/tmp/pi-task-herdr-replaced-count",
+    sessionName: "s-herdr-replaced-count",
+    paneId: "%85",
+    originalPane: null,
+    startedAt: Date.now(),
+  }]]);
+  const original = backgroundTasks.get("t-herdr-replaced-count");
+  const diagnostics: string[] = [];
+  const previousError = console.error;
+  console.error = (...args: unknown[]) => diagnostics.push(args.map(String).join(" "));
+  const stop = startBackgroundPolling(
+    makeDeps({
+      backgroundTasks,
+      hardTimeoutMs: Number.POSITIVE_INFINITY,
+      MAX_POLL_ERRORS: 1,
+      checkTaskCompletion: async () => {
+        backgroundTasks.set("t-herdr-replaced-count", { ...original, paneId: "%86" });
+        const error = new Error("herdr control socket is gone");
+        error.name = "HerdrUnavailableError";
+        throw error;
+      },
+      completeTask: () => {
+        throw new Error(`${t}: nothing settles during an outage`);
+      },
+    }),
+    5,
+  );
+  try {
+    await sleep(40);
+    assert.deepEqual(diagnostics, [], `${t}: the replacement is not diagnosed as the old task`);
+    assert.equal(backgroundTasks.has("t-herdr-replaced-count"), true, `${t}: slot retained`);
+  } finally {
+    stop();
+    console.error = previousError;
+  }
+}
+
+{
+  const t = "an outage warning goes to the user, not to a hidden stderr";
+  // Pi's TUI draws over raw stderr, so `console.error` alone is invisible while the TUI runs.
+  // The warning must reach the injected channel, and must not be duplicated on stderr when it
+  // does.
+  const backgroundTasks = new Map<any, any>([["t-herdr-warn", {
+    dir: "/tmp/pi-task-herdr-warn",
+    sessionName: "s-herdr-warn",
+    paneId: "%87",
+    originalPane: null,
+    startedAt: Date.now(),
+  }]]);
+  const notified: string[] = [];
+  const diagnostics: string[] = [];
+  const previousError = console.error;
+  console.error = (...args: unknown[]) => diagnostics.push(args.map(String).join(" "));
+  const stop = startBackgroundPolling(
+    makeDeps({
+      backgroundTasks,
+      hardTimeoutMs: Number.POSITIVE_INFINITY,
+      MAX_POLL_ERRORS: 2,
+      notifyUser: (text: string) => notified.push(text),
+      checkTaskCompletion: async () => {
+        const error = new Error("herdr control socket is gone");
+        error.name = "HerdrUnavailableError";
+        throw error;
+      },
+      completeTask: () => {
+        throw new Error(`${t}: nothing settles during an outage`);
+      },
+    }),
+    5,
+  );
+  try {
+    await sleep(60);
+    assert.equal(notified.length, 1, `${t}: the user is told once (got ${notified.length})`);
+    assert.match(notified[0] ?? "", /Herdr control is unavailable/, `${t}: names the cause`);
+    assert.deepEqual(diagnostics, [], `${t}: not written to hidden stderr as well`);
+  } finally {
+    stop();
+    console.error = previousError;
+  }
+}
+
+{
+  const t = "a blocked durable settlement reaches the user, not hidden stderr";
+  // The same silent-stall rule as the outage path: this warning used to go only to stderr,
+  // which the TUI draws over.
+  const backgroundTasks = new Map<any, any>([["t-durable-warn", {
+    dir: "/tmp/pi-task-durable-warn",
+    sessionName: "s-durable-warn",
+    paneId: "%88",
+    originalPane: null,
+    startedAt: Date.now(),
+  }]]);
+  const notified: string[] = [];
+  const diagnostics: string[] = [];
+  const previousError = console.error;
+  console.error = (...args: unknown[]) => diagnostics.push(args.map(String).join(" "));
+  const stop = startBackgroundPolling(
+    makeDeps({
+      backgroundTasks,
+      hardTimeoutMs: Number.POSITIVE_INFINITY,
+      notifyUser: (text: string) => notified.push(text),
+      checkTaskCompletion: async () => ({ status: "completed", content: "done" }),
+      completeTask: () => {
+        throw new DurableStateError("/tmp/pi-task-durable-warn/task-registry.json", "parse");
+      },
+    }),
+    5,
+  );
+  try {
+    await sleep(40);
+    assert.equal(notified.length, 1, `${t}: told once (got ${notified.length})`);
+    assert.match(notified[0] ?? "", /settlement blocked/, `${t}: names the condition`);
+    assert.deepEqual(diagnostics, [], `${t}: not written to hidden stderr`);
+    assert.equal(backgroundTasks.has("t-durable-warn"), true, `${t}: task still retained`);
+  } finally {
+    stop();
+    console.error = previousError;
+  }
+}
+
+{
+  const t = "a warning that throws does not skip the wrap-up steer";
+  // The Herdr branch cannot observe this: a throw there is swallowed by the interval's
+  // `tick().catch(() => {})` and changes nothing. The turn-limit branch is where it matters: a
+  // throw from `warn` skips `steerTask` and sends a working task down the poll-error path.
+  const root = mkdtempSync(join(tmpdir(), "pi-task-warn-throws-"));
+  try {
+    writeFileSync(join(root, "task-registry.json"), "{not-json");
+    writeTurns(join(root, "artifacts", "sessions", "t1"), "task-lim", 5);
+    const task = makeTurnTask({ dir: join(root, "artifacts"), maxTurns: 3, turns: 5 });
+    const backgroundTasks = new Map<string, any>([["t1", task]]);
+    let steers = 0;
+    let completions = 0;
+    const stop = startBackgroundPolling(
+      makeDeps({
+        backgroundTasks,
+        piDir: root,
+        MAX_POLL_ERRORS: 1,
+        notifyUser: () => {
+          throw new Error("notify is broken");
+        },
+        steerTask: () => {
+          steers += 1;
+          return true;
+        },
+        checkTaskCompletion: async () => ({ status: "running", content: "" }),
+        completeTask: () => {
+          completions += 1;
+        },
+      }),
+      10,
+    );
+    try {
+      await sleep(80);
+    } finally {
+      stop();
+    }
+    assert.equal(steers, 1, `${t}: the steer still happened (got ${steers})`);
+    assert.equal(completions, 0, `${t}: a broken notify is not a task failure`);
+    assert.equal(backgroundTasks.has("t1"), true, `${t}: task stays tracked`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const t = "a Herdr probe that rejects after stop() does not settle or warn";
+  // Shutdown leaves `backgroundTasks` intact, so without the `stopped` check an in-flight probe
+  // could still write history, close the pane, and deliver through the old session.
+  const root = mkdtempSync(join(tmpdir(), "pi-task-herdr-stopped-"));
+  try {
+    const taskId = "t-herdr-stopped";
+    const sessionDir = join(root, "sessions", taskId);
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(
+      join(sessionDir, `${taskId}.jsonl`),
+      JSON.stringify({ type: "session_info", name: taskId }) + "\n" +
+      JSON.stringify({
+        type: "message",
+        timestamp: new Date().toISOString(),
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "finished, but the session is gone" }],
+          stopReason: "endTurn",
+        },
+      }) + "\n",
+    );
+    const backgroundTasks = new Map<any, any>([[taskId, {
+      dir: root,
+      sessionName: taskId,
+      paneId: "%90",
+      originalPane: null,
+      startedAt: Date.now() - 5_000,
+    }]]);
+    let settled = false;
+    const notified: string[] = [];
+    let rejectProbe: (() => void) | undefined;
+    let probeInFlight: (() => void) | undefined;
+    const inFlight = new Promise<void>((resolve) => {
+      probeInFlight = resolve;
+    });
+    const stop = startBackgroundPolling(
+      makeDeps({
+        backgroundTasks,
+        hardTimeoutMs: Number.POSITIVE_INFINITY,
+        MAX_POLL_ERRORS: 1,
+        notifyUser: (text: string) => notified.push(text),
+        // Hold the probe open until stop() has run, so its rejection arrives afterwards.
+        checkTaskCompletion: () =>
+          new Promise((_resolve, reject) => {
+            rejectProbe = () => {
+              const error = new Error("herdr control socket is gone");
+              error.name = "HerdrUnavailableError";
+              reject(error);
+            };
+            probeInFlight?.();
+          }),
+        completeTask: () => {
+          settled = true;
+        },
+      }),
+      5,
+    );
+    await inFlight;
+    stop();
+    rejectProbe?.();
+    await sleep(60);
+    assert.equal(settled, false, `${t}: no delivery after shutdown`);
+    assert.deepEqual(notified, [], `${t}: no warning after shutdown`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const t = "a general poll failure that lands after stop() does not settle";
+  // Same shutdown race as the Herdr branch: `backgroundTasks` survives stop(), so the error count
+  // would still reach the threshold and deliver through a dead session.
+  const backgroundTasks = new Map<any, any>([["t-generic-stopped", {
+    dir: "/tmp/pi-task-generic-stopped",
+    sessionName: "s-generic-stopped",
+    paneId: "%91",
+    originalPane: null,
+    startedAt: Date.now(),
+  }]]);
+  let settled = false;
+  let rejectProbe: (() => void) | undefined;
+  let probeInFlight: (() => void) | undefined;
+  const inFlight = new Promise<void>((resolve) => {
+    probeInFlight = resolve;
+  });
+  const stop = startBackgroundPolling(
+    makeDeps({
+      backgroundTasks,
+      hardTimeoutMs: Number.POSITIVE_INFINITY,
+      MAX_POLL_ERRORS: 1,
+      checkTaskCompletion: () =>
+        new Promise((_resolve, reject) => {
+          rejectProbe = () => reject(new Error("probe failed late"));
+          probeInFlight?.();
+        }),
+      completeTask: () => {
+        settled = true;
+      },
+    }),
+    5,
+  );
+  await inFlight;
+  stop();
+  rejectProbe?.();
+  await sleep(60);
+  assert.equal(settled, false, `${t}: no settlement after shutdown`);
+}
+
+{
+  const t = "a steer that fails after stop() does not settle";
+  // The steer goes through Herdr/tmux, so it can return long after shutdown began.
+  const root = mkdtempSync(join(tmpdir(), "pi-task-steer-stopped-"));
+  try {
+    writeTurns(join(root, "artifacts", "sessions", "t1"), "task-lim", 5);
+    const task = makeTurnTask({ dir: join(root, "artifacts"), maxTurns: 3, turns: 5 });
+    const backgroundTasks = new Map<string, any>([["t1", task]]);
+    let settled = false;
+    let releaseSteer: (() => void) | undefined;
+    let steerInFlight: (() => void) | undefined;
+    const inFlight = new Promise<void>((resolve) => {
+      steerInFlight = resolve;
+    });
+    const stop = startBackgroundPolling(
+      makeDeps({
+        backgroundTasks,
+        piDir: root,
+        hardTimeoutMs: Number.POSITIVE_INFINITY,
+        notifyUser: () => {},
+        steerTask: () =>
+          new Promise<boolean>((resolve) => {
+            releaseSteer = () => resolve(false);
+            steerInFlight?.();
+          }),
+        checkTaskCompletion: async () => ({ status: "running", content: "" }),
+        completeTask: () => {
+          settled = true;
+        },
+      }),
+      10,
+    );
+    await inFlight;
+    stop();
+    releaseSteer?.();
+    await sleep(60);
+    assert.equal(settled, false, `${t}: no settlement after shutdown`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 {
@@ -1305,10 +1948,13 @@ await scenario(async () => {
     const backgroundTasks = new Map<string, any>([["t1", task]]);
     let steers = 0;
     let completions = 0;
+    const notified: string[] = [];
     const stop = startBackgroundPolling(
       makeDeps({
         backgroundTasks,
         piDir: root,
+        // The failed write must reach the user, not a stderr the TUI draws over.
+        notifyUser: (text: string) => notified.push(text),
         steerTask: () => {
           steers += 1;
           return true;
@@ -1331,6 +1977,8 @@ await scenario(async () => {
     assert.equal(steers, 1, `${t}: steered exactly once despite the write failure`);
     assert.equal(completions, 0, `${t}: no poll-error settlement`);
     assert.deepEqual(task.wrapUp, { turnsAtStart: 5 }, `${t}: in-memory wrap-up recorded`);
+    assert.equal(notified.length, 1, `${t}: the write failure is reported once`);
+    assert.match(notified[0] ?? "", /wrap-up state was not persisted/, `${t}: names what failed`);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -224,6 +224,7 @@ for (const kind of ["task_id", "conversation_id"] as const) {
           backgroundTasks: harness.backgroundTasks,
           checkTaskCompletion: (async () => ({ status: "running", content: "" })) as any,
           clearTaskWidgetIfIdle: () => {},
+          notifyUser: (text: string) => console.error(text),
           completeTask: (() => {}) as any,
           hardTimeoutMs: Number.POSITIVE_INFINITY,
           MAX_POLL_ERRORS: 3,

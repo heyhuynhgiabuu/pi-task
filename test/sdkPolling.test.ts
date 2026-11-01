@@ -25,6 +25,7 @@ test("tmux polling ignores SDK-managed background tasks", async () => {
         return { status: "completed", content: "wrong backend" };
       },
       clearTaskWidgetIfIdle: () => {},
+      notifyUser: (text: string) => console.error(text),
       completeTask: () => {},
       hardTimeoutMs: 10_000,
       MAX_POLL_ERRORS: 3,
@@ -57,6 +58,7 @@ test("filesystem polling ignores durable tasks managed by pi-durable", async () 
         return { status: "completed", content: "filesystem must not settle this task" };
       },
       clearTaskWidgetIfIdle: () => {},
+      notifyUser: (text: string) => console.error(text),
       completeTask: () => {},
       hardTimeoutMs: 10_000,
       MAX_POLL_ERRORS: 3,

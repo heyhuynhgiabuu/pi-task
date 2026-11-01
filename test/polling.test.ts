@@ -163,6 +163,79 @@ function makeDeps(
 }
 
 {
+  const t = "an unreachable Herdr control surfaces instead of stalling silently";
+  // Before: this branch returned on every tick and the task was never delivered,
+  // so with the hard timeout disabled it stayed registered forever with no result.
+  const backgroundTasks = new Map<any, any>([["t-herdr-gone", {
+    dir: "/tmp",
+    sessionName: "s-herdr-gone",
+    paneId: "%77",
+    originalPane: null,
+    startedAt: Date.now(),
+  }]]);
+  let settled: { content: string; phase: string } | undefined;
+  const stop = startBackgroundPolling(
+    makeDeps({
+      backgroundTasks,
+      hardTimeoutMs: Number.POSITIVE_INFINITY,
+      MAX_POLL_ERRORS: 2,
+      checkTaskCompletion: async () => {
+        const error = new Error("herdr control socket is gone");
+        error.name = "HerdrUnavailableError";
+        throw error;
+      },
+      completeTask: ({ content, phase }: any) => {
+        settled = { content, phase };
+      },
+    }),
+    5,
+  );
+  try {
+    await sleep(60);
+    assert.equal(settled?.phase, "failed", `${t}: surfaced as a failure`);
+    assert.match(settled?.content ?? "", /Herdr control is unavailable/, `${t}: names the cause`);
+    assert.equal(backgroundTasks.has("t-herdr-gone"), false, `${t}: retired after settling`);
+  } finally {
+    stop();
+  }
+}
+
+{
+  const t = "an unreachable Herdr control below the threshold is not settled yet";
+  const backgroundTasks = new Map<any, any>([["t-herdr-retry", {
+    dir: "/tmp",
+    sessionName: "s-herdr-retry",
+    paneId: "%78",
+    originalPane: null,
+    startedAt: Date.now(),
+  }]]);
+  let settled = false;
+  const stop = startBackgroundPolling(
+    makeDeps({
+      backgroundTasks,
+      hardTimeoutMs: Number.POSITIVE_INFINITY,
+      MAX_POLL_ERRORS: 1000,
+      checkTaskCompletion: async () => {
+        const error = new Error("herdr control socket is gone");
+        error.name = "HerdrUnavailableError";
+        throw error;
+      },
+      completeTask: () => {
+        settled = true;
+      },
+    }),
+    5,
+  );
+  try {
+    await sleep(40);
+    assert.equal(settled, false, `${t}: one bad pane is not fatal on its own`);
+    assert.equal(backgroundTasks.has("t-herdr-retry"), true, `${t}: task is still tracked`);
+  } finally {
+    stop();
+  }
+}
+
+{
   const t = "stop() prevents future ticks from calling completeTask with stale pi";
   let completeCallCount = 0;
   let lastPi: any = undefined;

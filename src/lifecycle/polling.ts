@@ -229,6 +229,23 @@ export function startBackgroundPolling(
       }
     } catch (error) {
       if (error instanceof Error && error.name === "HerdrUnavailableError") {
+        // A pane the Herdr control cannot reach is a probe failure like any other: without a
+        // count this returned silently on every tick and the task never surfaced.
+        const count = (pollErrors.get(id) ?? 0) + 1;
+        pollErrors.set(id, count);
+        if (count >= deps.MAX_POLL_ERRORS) {
+          if (deps.backgroundTasks.get(id) !== task) return;
+          try {
+            settle(
+              id,
+              task,
+              `Background task could not be read after ${count} attempts: ${error.message}. The Herdr control is unavailable; check the pane and start the task again.`,
+              "failed",
+            );
+          } catch {
+            // Settling is best effort; the next tick retries while the task is still tracked.
+          }
+        }
         return;
       }
       if (reportDurableStateBlocked(id, error)) return;

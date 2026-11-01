@@ -50,6 +50,14 @@ export interface BackgroundPollingDeps {
   piDir: string;
   pi: ExtensionAPI;
   /**
+   * Show a warning the user can actually see. Required, not optional: `console.error` is not
+   * enough, because Pi's TUI draws over raw stderr and a message written there while the TUI runs
+   * is invisible. An optional hook would let a new call site fall back to that silently, which is
+   * the bug this exists to prevent. The caller decides how: `ctx.ui.notify` when a UI exists,
+   * stderr otherwise.
+   */
+  notifyUser: (text: string) => void;
+  /**
    * Inject a user message into a running subagent (issue #19 wrap-up).
    * Returns false when the injection fails (dead pane, herdr unavailable);
    * the polling loop then settles the task immediately.
@@ -106,13 +114,23 @@ export function startBackgroundPolling(
     durableStateReported.delete(id);
     herdrOutages.delete(id);
   };
+  const warn = (text: string): void => {
+    // A warning must never change the outcome of the poll that raised it. `notifyUser` can throw
+    // a non-stale error, and inside the turn-limit `catch` that would skip the steer and send a
+    // working task down the poll-error path.
+    try {
+      deps.notifyUser(`[pi-task] ${text}`);
+    } catch {
+      // A warning that could not be shown is not a task failure.
+    }
+  };
   const reportDurableStateBlocked = (id: string, error: unknown): boolean => {
     if (!(error instanceof DurableStateError)) return false;
     // Keep the diagnostic bounded while retaining the task for retry after the
     // unreadable durable file is repaired.
     if (!durableStateReported.has(id)) {
       durableStateReported.add(id);
-      console.error(`[pi-task] background task ${id} settlement blocked: ${error.message}`);
+      warn(`background task ${id} settlement blocked: ${error.message}`);
     }
     return true;
   };
@@ -181,8 +199,8 @@ export function startBackgroundPolling(
           try {
             persistTurnBudget(deps.piDir, id, { wrapUp: task.wrapUp });
           } catch (error) {
-            console.error(
-              `[pi-task] background task ${id} wrap-up state was not persisted: ${error instanceof Error ? error.message : String(error)}`,
+            warn(
+              `background task ${id} wrap-up state was not persisted: ${error instanceof Error ? error.message : String(error)}`,
             );
           }
           const steered = await (deps.steerTask?.(task, turnLimitWrapUpPrompt(task.maxTurns)) ?? false);
@@ -266,8 +284,8 @@ export function startBackgroundPolling(
           const count = (herdrOutages.get(id) ?? 0) + 1;
           herdrOutages.set(id, count);
           if (count === deps.MAX_POLL_ERRORS) {
-            console.error(
-              `[pi-task] background task ${id} could not be read: ${error.message}. The Herdr control is unavailable; the task is kept and polling continues.`,
+            warn(
+              `background task ${id} could not be read: ${error.message}. The Herdr control is unavailable; the task is kept and polling continues.`,
             );
           }
         }

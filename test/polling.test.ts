@@ -41,6 +41,7 @@ function makeDeps(
     piDir: string;
     pi: any;
     steerTask: any;
+    notifyUser: any;
   }> = {},
 ) {
   return {
@@ -52,6 +53,8 @@ function makeDeps(
     MAX_POLL_ERRORS: 3,
     piDir: POLL_PI_DIR,
     pi: { __pi: "captured" },
+    // Default to stderr so existing assertions on console.error keep working.
+    notifyUser: (text: string) => console.error(text),
     ...overrides,
   };
 }
@@ -520,6 +523,134 @@ function makeDeps(
   } finally {
     stop();
     console.error = previousError;
+  }
+}
+
+{
+  const t = "an outage warning goes to the user, not to a hidden stderr";
+  // Pi's TUI draws over raw stderr, so `console.error` alone is invisible while the TUI runs.
+  // The warning must reach the injected channel, and must not be duplicated on stderr when it
+  // does.
+  const backgroundTasks = new Map<any, any>([["t-herdr-warn", {
+    dir: "/tmp/pi-task-herdr-warn",
+    sessionName: "s-herdr-warn",
+    paneId: "%87",
+    originalPane: null,
+    startedAt: Date.now(),
+  }]]);
+  const notified: string[] = [];
+  const diagnostics: string[] = [];
+  const previousError = console.error;
+  console.error = (...args: unknown[]) => diagnostics.push(args.map(String).join(" "));
+  const stop = startBackgroundPolling(
+    makeDeps({
+      backgroundTasks,
+      hardTimeoutMs: Number.POSITIVE_INFINITY,
+      MAX_POLL_ERRORS: 2,
+      notifyUser: (text: string) => notified.push(text),
+      checkTaskCompletion: async () => {
+        const error = new Error("herdr control socket is gone");
+        error.name = "HerdrUnavailableError";
+        throw error;
+      },
+      completeTask: () => {
+        throw new Error(`${t}: nothing settles during an outage`);
+      },
+    }),
+    5,
+  );
+  try {
+    await sleep(60);
+    assert.equal(notified.length, 1, `${t}: the user is told once (got ${notified.length})`);
+    assert.match(notified[0] ?? "", /Herdr control is unavailable/, `${t}: names the cause`);
+    assert.deepEqual(diagnostics, [], `${t}: not written to hidden stderr as well`);
+  } finally {
+    stop();
+    console.error = previousError;
+  }
+}
+
+{
+  const t = "a blocked durable settlement reaches the user, not hidden stderr";
+  // The same silent-stall rule as the outage path: this warning used to go only to stderr,
+  // which the TUI draws over.
+  const backgroundTasks = new Map<any, any>([["t-durable-warn", {
+    dir: "/tmp/pi-task-durable-warn",
+    sessionName: "s-durable-warn",
+    paneId: "%88",
+    originalPane: null,
+    startedAt: Date.now(),
+  }]]);
+  const notified: string[] = [];
+  const diagnostics: string[] = [];
+  const previousError = console.error;
+  console.error = (...args: unknown[]) => diagnostics.push(args.map(String).join(" "));
+  const stop = startBackgroundPolling(
+    makeDeps({
+      backgroundTasks,
+      hardTimeoutMs: Number.POSITIVE_INFINITY,
+      notifyUser: (text: string) => notified.push(text),
+      checkTaskCompletion: async () => ({ status: "completed", content: "done" }),
+      completeTask: () => {
+        throw new DurableStateError("/tmp/pi-task-durable-warn/task-registry.json", "parse");
+      },
+    }),
+    5,
+  );
+  try {
+    await sleep(40);
+    assert.equal(notified.length, 1, `${t}: told once (got ${notified.length})`);
+    assert.match(notified[0] ?? "", /settlement blocked/, `${t}: names the condition`);
+    assert.deepEqual(diagnostics, [], `${t}: not written to hidden stderr`);
+    assert.equal(backgroundTasks.has("t-durable-warn"), true, `${t}: task still retained`);
+  } finally {
+    stop();
+    console.error = previousError;
+  }
+}
+
+{
+  const t = "a warning that throws does not skip the wrap-up steer";
+  // The Herdr branch cannot observe this: a throw there is swallowed by the interval's
+  // `tick().catch(() => {})` and changes nothing. The turn-limit branch is where it matters: a
+  // throw from `warn` skips `steerTask` and sends a working task down the poll-error path.
+  const root = mkdtempSync(join(tmpdir(), "pi-task-warn-throws-"));
+  try {
+    writeFileSync(join(root, "task-registry.json"), "{not-json");
+    writeTurns(join(root, "artifacts", "sessions", "t1"), "task-lim", 5);
+    const task = makeTurnTask({ dir: join(root, "artifacts"), maxTurns: 3, turns: 5 });
+    const backgroundTasks = new Map<string, any>([["t1", task]]);
+    let steers = 0;
+    let completions = 0;
+    const stop = startBackgroundPolling(
+      makeDeps({
+        backgroundTasks,
+        piDir: root,
+        MAX_POLL_ERRORS: 1,
+        notifyUser: () => {
+          throw new Error("notify is broken");
+        },
+        steerTask: () => {
+          steers += 1;
+          return true;
+        },
+        checkTaskCompletion: async () => ({ status: "running", content: "" }),
+        completeTask: () => {
+          completions += 1;
+        },
+      }),
+      10,
+    );
+    try {
+      await sleep(80);
+    } finally {
+      stop();
+    }
+    assert.equal(steers, 1, `${t}: the steer still happened (got ${steers})`);
+    assert.equal(completions, 0, `${t}: a broken notify is not a task failure`);
+    assert.equal(backgroundTasks.has("t1"), true, `${t}: task stays tracked`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 }
 
@@ -1666,10 +1797,13 @@ await scenario(async () => {
     const backgroundTasks = new Map<string, any>([["t1", task]]);
     let steers = 0;
     let completions = 0;
+    const notified: string[] = [];
     const stop = startBackgroundPolling(
       makeDeps({
         backgroundTasks,
         piDir: root,
+        // The failed write must reach the user, not a stderr the TUI draws over.
+        notifyUser: (text: string) => notified.push(text),
         steerTask: () => {
           steers += 1;
           return true;
@@ -1692,6 +1826,8 @@ await scenario(async () => {
     assert.equal(steers, 1, `${t}: steered exactly once despite the write failure`);
     assert.equal(completions, 0, `${t}: no poll-error settlement`);
     assert.deepEqual(task.wrapUp, { turnsAtStart: 5 }, `${t}: in-memory wrap-up recorded`);
+    assert.equal(notified.length, 1, `${t}: the write failure is reported once`);
+    assert.match(notified[0] ?? "", /wrap-up state was not persisted/, `${t}: names what failed`);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

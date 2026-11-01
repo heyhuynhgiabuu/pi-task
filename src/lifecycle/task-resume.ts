@@ -87,6 +87,29 @@ export function resolveTaskResume({
     findJsonlSessionByName(piDir, requestedTaskId, agentName);
 
   if (isDurableTaskHistoryEntry(entry)) {
+    // A resume runs the stored child, whose instructions came from the agent that created it.
+    // Resuming under a different agent would present one agent's body under another's name, so
+    // the mismatch is refused instead of silently re-labelled.
+    if (entry.agentType !== agentName) {
+      return {
+        kind: "handled",
+        result: {
+          content: [{
+            type: "text",
+            text: `Task "${requestedTaskId}" was created by agent "${entry.agentType}" and cannot be resumed as "${agentName}". Resume it with agent_type "${entry.agentType}", or start a new task.`,
+          }],
+          details: {
+            phase: "failed",
+            error: "durable_agent_mismatch",
+            task_id: entry.id,
+            backend: "durable",
+            agent_type: entry.agentType,
+            requested_agent_type: agentName,
+          },
+          isError: true,
+        },
+      };
+    }
     if (entry.cleanupPending) {
       return {
         kind: "handled",

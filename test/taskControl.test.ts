@@ -561,6 +561,86 @@ test("durable task IDs resume the existing durable child without requiring a JSO
   }
 });
 
+test("resuming a durable task under a different agent is refused, not silently re-labelled", () => {
+  // The stored child keeps the instructions of the agent that created it, so resuming it as
+  // another agent would present one agent's body under another's name.
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-resume-agent-mismatch-"));
+  const taskId = "task-agent-mismatch";
+  upsertTaskSessionHistory(piDir, {
+    id: taskId,
+    agentType: "reviewer",
+    description: "A review that was already run",
+    sessionName: `task-${taskId}`,
+    piDir,
+    dir: join(piDir, "missing-artifacts"),
+    backend: "durable",
+    startedAt: 100,
+    completedAt: 200,
+    status: "done",
+    background: false,
+  });
+
+  const resolution = resolveTaskResume({
+    requestedTaskId: taskId,
+    taskParams: {
+      agent_type: "general",
+      description: "Continue it as something else",
+      prompt: "Carry on.",
+      task_id: taskId,
+    },
+    agentName: "general",
+    piDir,
+    artifactsDir: join(piDir, "artifacts"),
+    extensionPiDir: piDir,
+    ctx: {} as never,
+    backgroundTasks: new Map(),
+    deliveryGuard: new DeliveryGuard(),
+    registryEntryStatus: () => "missing",
+  });
+
+  assert.equal(resolution.kind, "handled");
+  assert(resolution.kind === "handled");
+  assert.equal(resolution.result.isError, true);
+  assert.equal(resolution.result.details.error, "durable_agent_mismatch");
+  // Both agents are named, so the caller can resume correctly instead of guessing.
+  assert.match(resolution.result.content[0].text, /"reviewer"/);
+  assert.match(resolution.result.content[0].text, /"general"/);
+  assert.equal(resolution.result.details.agent_type, "reviewer");
+});
+
+test("the same durable task still resumes under the agent that created it", () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-resume-agent-match-"));
+  const taskId = "task-agent-match";
+  upsertTaskSessionHistory(piDir, {
+    id: taskId,
+    agentType: "reviewer",
+    description: "A review",
+    sessionName: `task-${taskId}`,
+    piDir,
+    dir: join(piDir, "missing-artifacts"),
+    backend: "durable",
+    startedAt: 100,
+    completedAt: 200,
+    status: "done",
+    background: false,
+  });
+
+  const resolution = resolveTaskResume({
+    requestedTaskId: taskId,
+    taskParams: { agent_type: "reviewer", description: "Continue", prompt: "Carry on.", task_id: taskId },
+    agentName: "reviewer",
+    piDir,
+    artifactsDir: join(piDir, "artifacts"),
+    extensionPiDir: piDir,
+    ctx: {} as never,
+    backgroundTasks: new Map(),
+    deliveryGuard: new DeliveryGuard(),
+    registryEntryStatus: () => "missing",
+  });
+
+  assert.equal(resolution.kind, "continue");
+});
+
 test("running durable task IDs are not launched as overlapping resumes", () => {
   const piDir = mkdtempSync(join(tmpdir(), "pi-task-resume-durable-running-"));
   const taskId = "task-durable-running";

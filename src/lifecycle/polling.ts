@@ -50,11 +50,8 @@ export interface BackgroundPollingDeps {
   piDir: string;
   pi: ExtensionAPI;
   /**
-   * Show a warning the user can actually see. Required, not optional: `console.error` is not
-   * enough, because Pi's TUI draws over raw stderr and a message written there while the TUI runs
-   * is invisible. An optional hook would let a new call site fall back to that silently, which is
-   * the bug this exists to prevent. The caller decides how: `ctx.ui.notify` when a UI exists,
-   * stderr otherwise.
+   * Show a warning the user can actually see. Required, not optional: an optional hook lets the
+   * next call site fall back to `console.error`, which the TUI draws over.
    */
   notifyUser: (text: string) => void;
   /**
@@ -77,8 +74,7 @@ export function startBackgroundPolling(
   // sharing `pollErrors` would let an outage end a healthy task.
   const herdrOutages = new Map<string, number>();
 
-  // Terminal settlement shared by the timeout, completed, failed, poll-error,
-  // and outage-recovery paths: deliver durably, then retire the task from the maps.
+  // Terminal settlement for every path that ends a task: deliver durably, then retire it.
   const settle = (
     id: string,
     task: BackgroundTask,
@@ -115,9 +111,8 @@ export function startBackgroundPolling(
     herdrOutages.delete(id);
   };
   const warn = (text: string): void => {
-    // A warning must never change the outcome of the poll that raised it. `notifyUser` can throw
-    // a non-stale error, and inside the turn-limit `catch` that would skip the steer and send a
-    // working task down the poll-error path.
+    // A warning must never change the outcome of the poll that raised it: inside the turn-limit
+    // catch a throw from here would skip the steer and send a working task down the error path.
     try {
       deps.notifyUser(`[pi-task] ${text}`);
     } catch {
@@ -252,18 +247,13 @@ export function startBackgroundPolling(
       }
     } catch (error) {
       if (error instanceof Error && error.name === "HerdrUnavailableError") {
-        // An unreachable control is an outage, not a dead child: the pane and the session on
-        // disk are untouched, and settling here would close a healthy pane and record a failure
-        // for a task that may still be running. Two things are owed instead.
+        // An unreachable control is an outage, not a dead child: the pane and the session file are
+        // untouched, so settling would close a healthy pane. Two things are still owed.
         //
-        // First, a child that already finished before the control went away is recoverable from
-        // the session file, as the hard-timeout path does — but only on a completed result,
-        // because that path runs after the timeout has already decided the task is over.
-        // Only a completed result is authoritative here. A `failed` row can be an intermediate
-        // one while Pi retries a provider error, and during an outage the control cannot tell
-        // whether the child is still alive, so settling on it would close a live pane and record
-        // a failure for a task that recovers on the next successful poll. `waitCompletion` makes
-        // the same distinction for the same reason.
+        // A child that finished before the control went away is recoverable from its session
+        // file, but only on a `completed` result: a `failed` row can be intermediate while Pi
+        // retries, and the outage cannot tell whether the child is alive. `waitCompletion` draws
+        // the same line for the same reason.
         const terminalResult = getLastAssistantResultFromSessionDir(
           join(task.dir, "sessions", id),
           task.sessionName,
@@ -278,8 +268,8 @@ export function startBackgroundPolling(
           }
           return;
         }
-        // The outage must not be silent: an attempt counter that was never reported left the task
-        // unread forever with no diagnostic. Say it once per outage.
+        // Warn once after MAX_POLL_ERRORS outage polls in a row: enough to be a real outage, not a
+        // single dropped read. The count resets on any successful probe.
         if (deps.backgroundTasks.get(id) === task) {
           const count = (herdrOutages.get(id) ?? 0) + 1;
           herdrOutages.set(id, count);

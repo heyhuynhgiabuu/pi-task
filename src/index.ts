@@ -821,13 +821,9 @@ export default function (pi: ExtensionAPI) {
       MAX_POLL_ERRORS,
       piDir,
       pi,
-      // Same rule as warnUser: the TUI draws over stderr, so a warning written there is lost.
-      // The whole read sits inside the stale guard, because the host can throw from `hasUI`
-      // itself once the context is stale, not only from the `notify` call.
       notifyUser: (text) =>
         ignoreStaleExtensionCtx(() => {
-          const ctx = backgroundWarnCtx;
-          if (ctx?.hasUI) ctx.ui.notify(text, "warning");
+          if (backgroundWarnCtx) warnUser(backgroundWarnCtx, text);
           else console.error(text);
         }),
       steerTask: (task, prompt) =>
@@ -859,9 +855,9 @@ export default function (pi: ExtensionAPI) {
   let lastCwd = process.cwd();
 
   // Background work runs outside any handler, so it cannot receive a ctx as an argument. This
-  // holds the session's own ctx for warnings raised from a poll loop. It is cleared on shutdown,
-  // and every read goes through `ignoreStaleExtensionCtx`, because the host can throw from a
-  // getter such as `hasUI` once the context is stale.
+  // holds the session's own ctx for warnings raised from a poll loop, and is cleared on shutdown.
+  // Reads go through `ignoreStaleExtensionCtx`: the host throws from a getter such as `hasUI`
+  // once the context is stale, so wrapping only the `notify` call would not be enough.
   let backgroundWarnCtx: ExtensionContext | undefined;
 
   // ── Panel ready at session start ───────────────────────────────────────

@@ -69,8 +69,8 @@ export function startBackgroundPolling(
   // sharing `pollErrors` would let an outage end a healthy task.
   const herdrOutages = new Map<string, number>();
 
-  // Terminal settlement shared by the timeout, completed, failed, and
-  // poll-error paths: deliver durably, then retire the task from the maps.
+  // Terminal settlement shared by the timeout, completed, failed, poll-error,
+  // and outage-recovery paths: deliver durably, then retire the task from the maps.
   const settle = (
     id: string,
     task: BackgroundTask,
@@ -239,7 +239,8 @@ export function startBackgroundPolling(
         // for a task that may still be running. Two things are owed instead.
         //
         // First, a child that already finished before the control went away is recoverable from
-        // the session file, exactly as the hard-timeout path recovers it.
+        // the session file, as the hard-timeout path does — but only on a completed result,
+        // because that path runs after the timeout has already decided the task is over.
         // Only a completed result is authoritative here. A `failed` row can be an intermediate
         // one while Pi retries a provider error, and during an outage the control cannot tell
         // whether the child is still alive, so settling on it would close a live pane and record

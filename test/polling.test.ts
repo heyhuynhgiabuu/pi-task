@@ -445,6 +445,9 @@ function makeDeps(
     };
     const backgroundTasks = new Map<any, any>([[taskId, original]]);
     let settledIds: string[] = [];
+    const diagnostics: string[] = [];
+    const previousError = console.error;
+    console.error = (...args: unknown[]) => diagnostics.push(args.map(String).join(" "));
     const stop = startBackgroundPolling(
       makeDeps({
         backgroundTasks,
@@ -467,11 +470,56 @@ function makeDeps(
       await sleep(40);
       assert.deepEqual(settledIds, [], `${t}: the replaced task is left to its own poll`);
       assert.equal(backgroundTasks.has(taskId), true, `${t}: the new task keeps its slot`);
+      // The count is guarded as well: a replaced task must not be diagnosed under the old one.
+      assert.deepEqual(diagnostics, [], `${t}: the new task does not inherit the old count`);
     } finally {
       stop();
+      console.error = previousError;
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const t = "a replaced task does not inherit the outage count";
+  // Reaches the count guard rather than the settle guard: the session has no completed result,
+  // so the only thing that could report the outage is the counter.
+  const backgroundTasks = new Map<any, any>([["t-herdr-replaced-count", {
+    dir: "/tmp/pi-task-herdr-replaced-count",
+    sessionName: "s-herdr-replaced-count",
+    paneId: "%85",
+    originalPane: null,
+    startedAt: Date.now(),
+  }]]);
+  const original = backgroundTasks.get("t-herdr-replaced-count");
+  const diagnostics: string[] = [];
+  const previousError = console.error;
+  console.error = (...args: unknown[]) => diagnostics.push(args.map(String).join(" "));
+  const stop = startBackgroundPolling(
+    makeDeps({
+      backgroundTasks,
+      hardTimeoutMs: Number.POSITIVE_INFINITY,
+      MAX_POLL_ERRORS: 1,
+      checkTaskCompletion: async () => {
+        backgroundTasks.set("t-herdr-replaced-count", { ...original, paneId: "%86" });
+        const error = new Error("herdr control socket is gone");
+        error.name = "HerdrUnavailableError";
+        throw error;
+      },
+      completeTask: () => {
+        throw new Error(`${t}: nothing settles during an outage`);
+      },
+    }),
+    5,
+  );
+  try {
+    await sleep(40);
+    assert.deepEqual(diagnostics, [], `${t}: the replacement is not diagnosed as the old task`);
+    assert.equal(backgroundTasks.has("t-herdr-replaced-count"), true, `${t}: slot retained`);
+  } finally {
+    stop();
+    console.error = previousError;
   }
 }
 

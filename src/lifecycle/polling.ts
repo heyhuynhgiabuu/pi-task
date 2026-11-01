@@ -259,6 +259,10 @@ export function startBackgroundPolling(
           task.sessionName,
           task.startedAt,
         );
+        // `stopped` is checked here as on the successful-probe path above: shutdown leaves
+        // `backgroundTasks` intact, so an in-flight probe that resolves after `stop()` could
+        // otherwise write history, close the pane, and deliver through the old session.
+        if (stopped) return;
         if (terminalResult?.status === "completed") {
           if (deps.backgroundTasks.get(id) !== task) return;
           try {

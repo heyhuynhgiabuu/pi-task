@@ -655,6 +655,75 @@ function makeDeps(
 }
 
 {
+  const t = "a Herdr probe that rejects after stop() does not settle or warn";
+  // Shutdown leaves `backgroundTasks` intact, so without the `stopped` check an in-flight probe
+  // could still write history, close the pane, and deliver through the old session.
+  const root = mkdtempSync(join(tmpdir(), "pi-task-herdr-stopped-"));
+  try {
+    const taskId = "t-herdr-stopped";
+    const sessionDir = join(root, "sessions", taskId);
+    mkdirSync(sessionDir, { recursive: true });
+    writeFileSync(
+      join(sessionDir, `${taskId}.jsonl`),
+      JSON.stringify({ type: "session_info", name: taskId }) + "\n" +
+      JSON.stringify({
+        type: "message",
+        timestamp: new Date().toISOString(),
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "finished, but the session is gone" }],
+          stopReason: "endTurn",
+        },
+      }) + "\n",
+    );
+    const backgroundTasks = new Map<any, any>([[taskId, {
+      dir: root,
+      sessionName: taskId,
+      paneId: "%90",
+      originalPane: null,
+      startedAt: Date.now() - 5_000,
+    }]]);
+    let settled = false;
+    const notified: string[] = [];
+    let rejectProbe: (() => void) | undefined;
+    let probeInFlight: (() => void) | undefined;
+    const inFlight = new Promise<void>((resolve) => {
+      probeInFlight = resolve;
+    });
+    const stop = startBackgroundPolling(
+      makeDeps({
+        backgroundTasks,
+        hardTimeoutMs: Number.POSITIVE_INFINITY,
+        MAX_POLL_ERRORS: 1,
+        notifyUser: (text: string) => notified.push(text),
+        // Hold the probe open until stop() has run, so its rejection arrives afterwards.
+        checkTaskCompletion: () =>
+          new Promise((_resolve, reject) => {
+            rejectProbe = () => {
+              const error = new Error("herdr control socket is gone");
+              error.name = "HerdrUnavailableError";
+              reject(error);
+            };
+            probeInFlight?.();
+          }),
+        completeTask: () => {
+          settled = true;
+        },
+      }),
+      5,
+    );
+    await inFlight;
+    stop();
+    rejectProbe?.();
+    await sleep(60);
+    assert.equal(settled, false, `${t}: no delivery after shutdown`);
+    assert.deepEqual(notified, [], `${t}: no warning after shutdown`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
   const t = "stop() prevents future ticks from calling completeTask with stale pi";
   let completeCallCount = 0;
   let lastPi: any = undefined;

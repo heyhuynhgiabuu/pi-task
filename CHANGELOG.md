@@ -6,6 +6,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.14.3] - 2026-11-01
+
+### Fixed
+
+- A durable task can no longer be resumed under a different `agent_type` than the one that
+  created it. The stored child keeps the instructions of its creating agent, so resuming it as
+  another agent ran one agent's body under another's name. The resume now refuses with
+  `durable_agent_mismatch` and names both agents, so the caller can resume correctly instead of
+  guessing.
+- An unreachable Herdr control no longer stalls a background task silently. The poll loop used
+  to return on `HerdrUnavailableError` without counting, logging, or settling, so with the hard
+  timeout disabled (`Infinity`, `PI_TASK_HARD_TIMEOUT_MINUTES=0`) the task stayed registered
+  forever with no result and no diagnostic. It now keeps the task — an outage is not a dead
+  child, and settling would close a healthy pane and record a failure for a task that may still
+  be running — recovers a result from the session file when the child had already finished
+  before the control went away, and warns once per outage after `MAX_POLL_ERRORS` consecutive
+  outage polls. Only a `completed` result is treated as final there: a `failed` row can be an
+  intermediate one while a provider error is retried, and during an outage the loop cannot tell
+  whether the child is alive.
+- No task settles after `stop()`. Shutdown leaves the background-task map intact, so a probe or
+  a wrap-up steer still in flight could resolve into a stopped loop and write task history,
+  close the pane, and deliver through a session that no longer exists. Every settle path now
+  checks `stopped` after its `await`.
+
+### Changed
+
+- Warnings raised by the poll loop go through a user-visible channel instead of `console.error`,
+  which the TUI draws over. `BackgroundPollingDeps` gains a required `notifyUser` hook, wired to
+  `ctx.ui.notify` when a session has a UI and to stderr otherwise. This also covers two older
+  warnings that had the same defect: a blocked durable settlement and a wrap-up state that could
+  not be persisted.
+
 ## [0.14.2] - 2026-10-30
 
 ### Changed

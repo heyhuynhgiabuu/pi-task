@@ -1,5 +1,7 @@
 # TODO
 
+- [x] Prepare v0.14.3: a durable task refuses a resume under a different `agent_type` (#35), a Herdr outage keeps the task, recovers only a `completed` result from the session file and warns once instead of stalling silently, no settle runs after `stop()`, and poll warnings reach the user instead of `console.error` under the TUI. Typecheck, build, smoke and 864/864 tests pass locally; Greptile and GitGuardian pass on the PR. Releasing to the registry stays a manual step.
+
 - [x] Prepare v0.14.2: a `read` of a running agent now says its text is the previous run's message and that the result self-delivers, `list` says the same in one clause, and the README records why `read` stays (cross-session and subagent→main are the only channels `task` cannot reach). Typecheck and 862/862 tests pass locally. Releasing to the registry stays a manual step.
 
 - [x] Prepare v0.14.1: the task widget and `/task` panel no longer redraw endlessly when a tool call's text holds a line break (#34), a durable child now gets its agent body as `instructions`, and the lock-held error names another copy of pi-task in the same process instead of a bogus "another Pi process (pid <own pid>)". Typecheck, build, tests and the tarball content checked locally; the durable-child fix was also seen working live (a canary child quoted its role text). The `/reload` cause of the original incident is inferred, not reproduced. Releasing to the registry stays a manual step.

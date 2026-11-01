@@ -200,7 +200,9 @@ export function startBackgroundPolling(
           }
           const steered = await (deps.steerTask?.(task, turnLimitWrapUpPrompt(task.maxTurns)) ?? false);
           if (!steered) {
-            if (deps.backgroundTasks.get(id) !== task) return;
+            // The steer goes through Herdr/tmux and can return after `stop()`; settling then would
+            // deliver through a dead session.
+            if (stopped || deps.backgroundTasks.get(id) !== task) return;
             settleAtLimit("; wrap-up steering failed.");
             return;
           }
@@ -246,6 +248,10 @@ export function startBackgroundPolling(
         );
       }
     } catch (error) {
+      // Nothing in here may act after shutdown. `stop()` leaves `backgroundTasks` intact, so an
+      // in-flight probe or steer that resolves afterwards would still write task history, close
+      // the pane, and deliver through a session that no longer exists.
+      if (stopped) return;
       if (error instanceof Error && error.name === "HerdrUnavailableError") {
         // An unreachable control is an outage, not a dead child: the pane and the session file are
         // untouched, so settling would close a healthy pane. Two things are still owed.
@@ -259,10 +265,6 @@ export function startBackgroundPolling(
           task.sessionName,
           task.startedAt,
         );
-        // `stopped` is checked here as on the successful-probe path above: shutdown leaves
-        // `backgroundTasks` intact, so an in-flight probe that resolves after `stop()` could
-        // otherwise write history, close the pane, and deliver through the old session.
-        if (stopped) return;
         if (terminalResult?.status === "completed") {
           if (deps.backgroundTasks.get(id) !== task) return;
           try {

@@ -724,6 +724,88 @@ function makeDeps(
 }
 
 {
+  const t = "a general poll failure that lands after stop() does not settle";
+  // Same shutdown race as the Herdr branch: `backgroundTasks` survives stop(), so the error count
+  // would still reach the threshold and deliver through a dead session.
+  const backgroundTasks = new Map<any, any>([["t-generic-stopped", {
+    dir: "/tmp/pi-task-generic-stopped",
+    sessionName: "s-generic-stopped",
+    paneId: "%91",
+    originalPane: null,
+    startedAt: Date.now(),
+  }]]);
+  let settled = false;
+  let rejectProbe: (() => void) | undefined;
+  let probeInFlight: (() => void) | undefined;
+  const inFlight = new Promise<void>((resolve) => {
+    probeInFlight = resolve;
+  });
+  const stop = startBackgroundPolling(
+    makeDeps({
+      backgroundTasks,
+      hardTimeoutMs: Number.POSITIVE_INFINITY,
+      MAX_POLL_ERRORS: 1,
+      checkTaskCompletion: () =>
+        new Promise((_resolve, reject) => {
+          rejectProbe = () => reject(new Error("probe failed late"));
+          probeInFlight?.();
+        }),
+      completeTask: () => {
+        settled = true;
+      },
+    }),
+    5,
+  );
+  await inFlight;
+  stop();
+  rejectProbe?.();
+  await sleep(60);
+  assert.equal(settled, false, `${t}: no settlement after shutdown`);
+}
+
+{
+  const t = "a steer that fails after stop() does not settle";
+  // The steer goes through Herdr/tmux, so it can return long after shutdown began.
+  const root = mkdtempSync(join(tmpdir(), "pi-task-steer-stopped-"));
+  try {
+    writeTurns(join(root, "artifacts", "sessions", "t1"), "task-lim", 5);
+    const task = makeTurnTask({ dir: join(root, "artifacts"), maxTurns: 3, turns: 5 });
+    const backgroundTasks = new Map<string, any>([["t1", task]]);
+    let settled = false;
+    let releaseSteer: (() => void) | undefined;
+    let steerInFlight: (() => void) | undefined;
+    const inFlight = new Promise<void>((resolve) => {
+      steerInFlight = resolve;
+    });
+    const stop = startBackgroundPolling(
+      makeDeps({
+        backgroundTasks,
+        piDir: root,
+        hardTimeoutMs: Number.POSITIVE_INFINITY,
+        notifyUser: () => {},
+        steerTask: () =>
+          new Promise<boolean>((resolve) => {
+            releaseSteer = () => resolve(false);
+            steerInFlight?.();
+          }),
+        checkTaskCompletion: async () => ({ status: "running", content: "" }),
+        completeTask: () => {
+          settled = true;
+        },
+      }),
+      10,
+    );
+    await inFlight;
+    stop();
+    releaseSteer?.();
+    await sleep(60);
+    assert.equal(settled, false, `${t}: no settlement after shutdown`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
   const t = "stop() prevents future ticks from calling completeTask with stale pi";
   let completeCallCount = 0;
   let lastPi: any = undefined;

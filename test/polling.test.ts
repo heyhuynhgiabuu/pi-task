@@ -163,58 +163,25 @@ function makeDeps(
 }
 
 {
-  const t = "an unreachable Herdr control surfaces instead of stalling silently";
-  // Before: this branch returned on every tick and the task was never delivered,
-  // so with the hard timeout disabled it stayed registered forever with no result.
+  const t = "an unreachable Herdr control keeps the task and reports the outage";
+  // An outage is not a dead child: the pane and the session file are untouched. Settling here
+  // would close a healthy pane and record a failure for a task that may still be running.
   const backgroundTasks = new Map<any, any>([["t-herdr-gone", {
-    dir: "/tmp",
+    dir: "/tmp/pi-task-herdr-outage",
     sessionName: "s-herdr-gone",
     paneId: "%77",
     originalPane: null,
     startedAt: Date.now(),
   }]]);
-  let settled: { content: string; phase: string } | undefined;
+  let settled = false;
+  const diagnostics: string[] = [];
+  const previousError = console.error;
+  console.error = (...args: unknown[]) => diagnostics.push(args.map(String).join(" "));
   const stop = startBackgroundPolling(
     makeDeps({
       backgroundTasks,
       hardTimeoutMs: Number.POSITIVE_INFINITY,
       MAX_POLL_ERRORS: 2,
-      checkTaskCompletion: async () => {
-        const error = new Error("herdr control socket is gone");
-        error.name = "HerdrUnavailableError";
-        throw error;
-      },
-      completeTask: ({ content, phase }: any) => {
-        settled = { content, phase };
-      },
-    }),
-    5,
-  );
-  try {
-    await sleep(60);
-    assert.equal(settled?.phase, "failed", `${t}: surfaced as a failure`);
-    assert.match(settled?.content ?? "", /Herdr control is unavailable/, `${t}: names the cause`);
-    assert.equal(backgroundTasks.has("t-herdr-gone"), false, `${t}: retired after settling`);
-  } finally {
-    stop();
-  }
-}
-
-{
-  const t = "an unreachable Herdr control below the threshold is not settled yet";
-  const backgroundTasks = new Map<any, any>([["t-herdr-retry", {
-    dir: "/tmp",
-    sessionName: "s-herdr-retry",
-    paneId: "%78",
-    originalPane: null,
-    startedAt: Date.now(),
-  }]]);
-  let settled = false;
-  const stop = startBackgroundPolling(
-    makeDeps({
-      backgroundTasks,
-      hardTimeoutMs: Number.POSITIVE_INFINITY,
-      MAX_POLL_ERRORS: 1000,
       checkTaskCompletion: async () => {
         const error = new Error("herdr control socket is gone");
         error.name = "HerdrUnavailableError";
@@ -227,11 +194,123 @@ function makeDeps(
     5,
   );
   try {
-    await sleep(40);
-    assert.equal(settled, false, `${t}: one bad pane is not fatal on its own`);
-    assert.equal(backgroundTasks.has("t-herdr-retry"), true, `${t}: task is still tracked`);
+    await sleep(60);
+    assert.equal(settled, false, `${t}: a healthy task is never settled`);
+    assert.equal(backgroundTasks.has("t-herdr-gone"), true, `${t}: task stays tracked`);
+    assert.equal(diagnostics.length, 1, `${t}: the outage is reported, bounded to once`);
+    assert.match(diagnostics[0] ?? "", /Herdr control is unavailable/, `${t}: names the cause`);
+    assert.match(diagnostics[0] ?? "", /kept and polling continues/, `${t}: says it was kept`);
   } finally {
     stop();
+    console.error = previousError;
+  }
+}
+
+{
+  const t = "a child that finished before the Herdr control vanished is still delivered";
+  // The regression this pins: the first fix settled such a task as `failed` without ever reading
+  // the session, so a completed child was reported as a failure and its pane closed.
+  const root = mkdtempSync(join(tmpdir(), "pi-task-herdr-finished-"));
+  try {
+    const taskId = "t-herdr-finished";
+    const sessionDir = join(root, "sessions", taskId);
+    mkdirSync(sessionDir, { recursive: true });
+    const startedAt = Date.now() - 5_000;
+    writeFileSync(
+      join(sessionDir, `${taskId}.jsonl`),
+      JSON.stringify({ type: "session_info", name: taskId }) + "\n" +
+      JSON.stringify({
+        type: "message",
+        timestamp: new Date().toISOString(),
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "finished before the control went away" }],
+          stopReason: "endTurn",
+        },
+      }) + "\n",
+    );
+    const backgroundTasks = new Map<any, any>([[taskId, {
+      dir: root,
+      sessionName: taskId,
+      paneId: "%79",
+      originalPane: null,
+      startedAt,
+    }]]);
+    let settled: { content: string; phase: string } | undefined;
+    const stop = startBackgroundPolling(
+      makeDeps({
+        backgroundTasks,
+        hardTimeoutMs: Number.POSITIVE_INFINITY,
+        MAX_POLL_ERRORS: 1,
+        checkTaskCompletion: async () => {
+          const error = new Error("herdr control socket is gone");
+          error.name = "HerdrUnavailableError";
+          throw error;
+        },
+        completeTask: ({ content, phase }: any) => {
+          settled = { content, phase };
+        },
+      }),
+      5,
+    );
+    try {
+      await sleep(40);
+      assert.equal(settled?.phase, "done", `${t}: the child's own result is delivered`);
+      assert.match(settled?.content ?? "", /finished before the control went away/, `${t}: real result`);
+      assert.equal(backgroundTasks.has(taskId), false, `${t}: retired after delivery`);
+    } finally {
+      stop();
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+{
+  const t = "an outage that ends and returns is reported again";
+  // Pins the counter reset: without it the second outage is swallowed, so a control that flaps
+  // would report once and then stay silent forever.
+  const backgroundTasks = new Map<any, any>([["t-herdr-flap", {
+    dir: "/tmp/pi-task-herdr-flap",
+    sessionName: "s-herdr-flap",
+    paneId: "%80",
+    originalPane: null,
+    startedAt: Date.now(),
+  }]]);
+  let calls = 0;
+  const diagnostics: string[] = [];
+  const previousError = console.error;
+  console.error = (...args: unknown[]) => diagnostics.push(args.map(String).join(" "));
+  const stop = startBackgroundPolling(
+    makeDeps({
+      backgroundTasks,
+      hardTimeoutMs: Number.POSITIVE_INFINITY,
+      MAX_POLL_ERRORS: 2,
+      checkTaskCompletion: async () => {
+        calls += 1;
+        // Two failures, one good probe, then failures again.
+        if (calls === 3) return { status: "running", content: "" };
+        const error = new Error(`herdr control socket is gone (${calls})`);
+        error.name = "HerdrUnavailableError";
+        throw error;
+      },
+      completeTask: () => {
+        throw new Error(`${t}: a healthy task must never settle`);
+      },
+    }),
+    5,
+  );
+  try {
+    await sleep(120);
+    assert.ok(calls >= 5, `${t}: exercised outage, recovery, outage`);
+    assert.equal(
+      diagnostics.length,
+      2,
+      `${t}: one report per outage (got ${diagnostics.length})`,
+    );
+  } finally {
+    stop();
+    console.error = previousError;
   }
 }
 

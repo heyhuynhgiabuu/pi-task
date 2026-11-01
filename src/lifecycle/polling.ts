@@ -65,6 +65,9 @@ export function startBackgroundPolling(
   let inFlight = false;
   const pollErrors = new Map<string, number>();
   const durableStateReported = new Set<string>();
+  // Herdr outages are counted separately from poll failures: an outage keeps the task alive, so
+  // sharing `pollErrors` would let an outage end a healthy task.
+  const herdrOutages = new Map<string, number>();
 
   // Terminal settlement shared by the timeout, completed, failed, and
   // poll-error paths: deliver durably, then retire the task from the maps.
@@ -101,6 +104,7 @@ export function startBackgroundPolling(
     }
     pollErrors.delete(id);
     durableStateReported.delete(id);
+    herdrOutages.delete(id);
   };
   const reportDurableStateBlocked = (id: string, error: unknown): boolean => {
     if (!(error instanceof DurableStateError)) return false;
@@ -216,6 +220,7 @@ export function startBackgroundPolling(
       // A non-throwing probe means this poll did not fail. Only consecutive
       // probe failures should count toward MAX_POLL_ERRORS.
       pollErrors.delete(id);
+      herdrOutages.delete(id);
 
       if (snapshot.status === "completed") {
         settle(id, task, snapshot.content, "done");
@@ -229,22 +234,35 @@ export function startBackgroundPolling(
       }
     } catch (error) {
       if (error instanceof Error && error.name === "HerdrUnavailableError") {
-        // A pane the Herdr control cannot reach is a probe failure like any other: without a
-        // count this returned silently on every tick and the task never surfaced.
-        const count = (pollErrors.get(id) ?? 0) + 1;
-        pollErrors.set(id, count);
-        if (count >= deps.MAX_POLL_ERRORS) {
+        // An unreachable control is an outage, not a dead child: the pane and the session on
+        // disk are untouched, and settling here would close a healthy pane and record a failure
+        // for a task that may still be running. Two things are owed instead.
+        //
+        // First, a child that already finished before the control went away is recoverable from
+        // the session file, exactly as the hard-timeout path recovers it.
+        const terminalResult = getLastAssistantResultFromSessionDir(
+          join(task.dir, "sessions", id),
+          task.sessionName,
+          task.startedAt,
+        );
+        if (terminalResult !== undefined && terminalResult !== null) {
           if (deps.backgroundTasks.get(id) !== task) return;
-          try {
-            settle(
-              id,
-              task,
-              `Background task could not be read after ${count} attempts: ${error.message}. The Herdr control is unavailable; check the pane and start the task again.`,
-              "failed",
-            );
-          } catch {
-            // Settling is best effort; the next tick retries while the task is still tracked.
-          }
+          settle(
+            id,
+            task,
+            terminalResult.content,
+            terminalResult.status === "completed" ? "done" : "failed",
+          );
+          return;
+        }
+        // Second, the outage must not be silent: an attempt counter that was never reported left
+        // the task unread forever with no diagnostic. Say it once per outage.
+        const count = (herdrOutages.get(id) ?? 0) + 1;
+        herdrOutages.set(id, count);
+        if (count === deps.MAX_POLL_ERRORS) {
+          console.error(
+            `[pi-task] background task ${id} could not be read: ${error.message}. The Herdr control is unavailable; the task is kept and polling continues.`,
+          );
         }
         return;
       }

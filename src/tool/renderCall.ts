@@ -5,9 +5,10 @@ import { renderTaskAgentTitle, renderTaskTitleText } from "./taskTitle.js";
 
 /** Sticky header only: agent • tools • duration. Tool lines stream via onUpdate content. */
 export function renderCall(
-  args: Record<string, unknown>,
+  rawArgs: unknown,
   theme: Theme,
 ): InstanceType<typeof Container> {
+  const args = rawArgs as Record<string, unknown>;
   const container = new Container();
   const progress = args._taskRunningProgress as
     | {

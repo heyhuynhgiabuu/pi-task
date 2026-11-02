@@ -14,7 +14,7 @@
 import { strict as assert } from "node:assert";
 import test from "node:test";
 
-import { Compile } from "typebox/compile";
+import { compile } from "@earendil-works/pi-schema";
 
 import taskExtension from "../src/index.js";
 import {
@@ -167,10 +167,10 @@ test("the wrapper forwards every execute argument", async () => {
 });
 
 test("the declared schema accepts the shapes execute builds", () => {
-  const validator = Compile(taskResultOutputSchema());
+  const validator = compile(taskResultOutputSchema());
   for (const shape of [receipt, report, failure, comparison, durableDone]) {
     assert.equal(
-      validator.Check(shape.details),
+      validator.check(shape.details),
       true,
       JSON.stringify(shape.details),
     );
@@ -186,10 +186,10 @@ test("the schema declares the durable usage ledger, not just tolerates it", () =
   };
   assert.ok("usage" in properties, "usage must be a declared property");
 
-  const validator = Compile(taskResultOutputSchema());
+  const validator = compile(taskResultOutputSchema());
   const ledger = durableDone.details!.usage as { totals: Record<string, unknown> };
   assert.equal(
-    validator.Check({
+    validator.check({
       ...durableDone.details,
       usage: { ...ledger, totals: { ...ledger.totals, inputTokens: "no" } },
     }),

@@ -39,6 +39,23 @@ import {
 
 const UP = "\x1b[A";
 const DOWN = "\x1b[B";
+
+/**
+ * The completion candidate the native menu currently highlights, read from the
+ * editor's own render (pi draws it with a leading arrow). Reading the real
+ * selection keeps this test about key routing rather than list ranking.
+ */
+function selectedCompletion(
+  editor: { render(width: number): string[] },
+  candidates: readonly string[],
+): string {
+  const arrowLine = editor.render(200).find((line) => line.includes("\u2192"));
+  const hit = arrowLine === undefined
+    ? undefined
+    : candidates.find((candidate) => arrowLine.includes(candidate));
+  assert.ok(hit, `the completion menu highlights one of ${candidates.join(", ")}`);
+  return hit;
+}
 const PGUP = "\x1b[5~";
 const PGDN = "\x1b[6~";
 const ESC = "\x1b";
@@ -658,8 +675,17 @@ test("native completion navigation and cancel keys stay with the real editor", a
 
     activeOverlay.handleInput("\x0e"); // ctrl+n is also configured as tui.select.down
     assert.deepEqual(pane.scrolled, [], "the remapped selection key also belongs to the menu");
+    // Pi 1.5 routes tui.select.pageUp/pageDown into an open completion menu, so
+    // the page keys above move the selection too. Assert that Enter submits the
+    // candidate the menu actually highlights, instead of a fixed index: the
+    // subject here is key routing (the transcript must not scroll), not ranking.
+    const selected = selectedCompletion(editor, suggestions!.items.map((item) => item.value));
     activeOverlay.handleInput(ENTER);
-    assert.deepEqual(calls.steers, [`/${suggestions!.items[2]!.value}`], "Enter accepts and submits the selected native candidate");
+    assert.deepEqual(
+      calls.steers,
+      [`/${selected}`],
+      "Enter accepts and submits the selected native candidate",
+    );
     assert.equal(editor.getText(), "", "native slash acceptance submits and clears the editor");
 
     activeOverlay.handleInput("/");

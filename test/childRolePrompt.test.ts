@@ -510,7 +510,15 @@ test("child hook preserves AGENTS context, base prompt, and does not register th
     runChild(childArgv("ROLE"), { cwd: f.cwd, agentDir: f.agentDir, trusted: true }),
   );
   const sections = run.sections[0] ?? {};
-  assert.match(sections.preamble ?? "", /expert coding assistant/);
+  // Assert pi's base prompt is PRESENT and is not where the role went, rather
+  // than pinning its prose: pi 1.5 reworded the preamble ("expert coding
+  // assistant operating inside pi" -> "coding assistant running inside pi"),
+  // and the invariant this test owns is that the child hook keeps the base
+  // prompt and adds the role as a separate section.
+  assert.match(sections.preamble ?? "", /coding assistant/, "pi's base prompt survives");
+  assert.match(sections.preamble ?? "", /coding agent harness/);
+  assert.doesNotMatch(sections.preamble ?? "", /ROLE/, "the role is not merged into pi's preamble");
+  assert.match(sections.addendum ?? "", /ROLE/, "the role lands in the appended section");
   assert.match(JSON.stringify(sections), /PROJECT AGENTS RULES/);
   assert.equal(run.toolNames.includes("task"), false);
 });

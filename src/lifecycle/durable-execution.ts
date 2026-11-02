@@ -312,23 +312,14 @@ export async function resumeDurableAfterRestart(deps: {
       }
       return true;
     },
-    onSnapshot: (taskId, snapshot) => {
-      const transcript = new DurableTranscript(snapshot);
+    onView: (taskId, view) => {
+      const existing = resumedTranscripts.get(taskId);
+      const transcript = existing ?? new DurableTranscript(view);
+      if (existing) transcript.apply(view);
       resumedTranscripts.set(taskId, transcript);
       deps.onTaskProgress?.(
         taskId,
         transcript.items(),
-        transcript.toolCallCount(),
-        transcript.agentState(),
-        transcript.usageMetadata(),
-      );
-    },
-    onEvents: (taskId, events) => {
-      const transcript = resumedTranscripts.get(taskId);
-      if (!transcript) return;
-      deps.onTaskProgress?.(
-        taskId,
-        transcript.apply(events),
         transcript.toolCallCount(),
         transcript.agentState(),
         transcript.usageMetadata(),
@@ -756,16 +747,10 @@ export async function executeDurableTask({
       onRequestId: noteAttemptRequestId,
       modelRegistry: ctx.modelRegistry,
       signal: runnerAbortController.signal,
-      onSnapshot: (snapshot) => {
-        progressTranscript = new DurableTranscript(snapshot);
+      onView: (view) => {
+        if (progressTranscript) progressTranscript.apply(view);
+        else progressTranscript = new DurableTranscript(view);
         updateTranscript(progressTranscript.items(), progressTranscript.toolCallCount());
-      },
-      onEvents: (events) => {
-        if (!progressTranscript) return;
-        updateTranscript(
-          progressTranscript.apply(events),
-          progressTranscript.toolCallCount(),
-        );
       },
       onWatchError: showProgressFailure,
       onSubmitted: (childConversationId) => {

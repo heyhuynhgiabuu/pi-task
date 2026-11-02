@@ -1,16 +1,18 @@
 import type {
-  AgentEvent,
+  AgentState,
+  ConversationView,
   EntryRecord,
-  SnapshotEvent,
+  LiveState,
+  ToolSlot,
   UsageState,
 } from "@earendil-works/pi-durable";
-import type { Message } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
 import type { ChildHistoryOption } from "../types.js";
 import { childRunTokensPerSecond, createChildTpsRun, sumAssistantOutputTokens, type ChildUsageMetadata } from "./child-metadata.js";
 import { MAX_TRANSCRIPT_ITEMS, authoritativeDurationMs, type TranscriptItem } from "./transcript.js";
 
-// Persisted pi-durable entry kinds (entries.ts, 1.0.4). Keep runtime imports
-// out of this always-loaded transcript adapter; the durable peer is optional.
+// Persisted pi-durable entry kinds (entries.ts). Keep runtime imports out of
+// this always-loaded transcript adapter; the durable peer is optional.
 const COMPACTION_ENTRY_KIND = "pi.compaction";
 const RESET_ENTRY_KIND = "pi.reset";
 
@@ -87,16 +89,12 @@ function parseContentBlock(value: unknown): ContentBlock | undefined {
   return undefined;
 }
 
-function indexedContentBlocks(content: unknown): [number, ContentBlock][] {
-  if (!Array.isArray(content)) return [];
-  return content.flatMap((block, index) => {
-    const parsed = parseContentBlock(block);
-    return parsed ? [[index, parsed] as [number, ContentBlock]] : [];
-  });
-}
-
 function contentBlocks(content: unknown): ContentBlock[] {
-  return indexedContentBlocks(content).map(([, block]) => block);
+  if (!Array.isArray(content)) return [];
+  return content.flatMap((block) => {
+    const parsed = parseContentBlock(block);
+    return parsed ? [parsed] : [];
+  });
 }
 
 function textContent(content: unknown): string {
@@ -115,11 +113,6 @@ function thinkingContent(content: unknown): string | undefined {
     .join("\n")
     .trim();
   return text || undefined;
-}
-
-/** pi-ai >= the duration release types `durationMs`; 1.0.4 typings lack it, so read it as data. */
-function messageDuration(message: Message): number | undefined {
-  return authoritativeDurationMs((message as { durationMs?: unknown }).durationMs);
 }
 
 function timestampOf(message: Message): string {
@@ -157,14 +150,6 @@ function toolCall(block: ContentBlock, timestamp: string): ToolTranscriptItem | 
   };
 }
 
-function toolOutput(current: string, output: NonNullable<Extract<AgentEvent, { type: "tool_execution_update" }>["output"]>): string {
-  if ("set" in output) return output.set;
-  const retained = output.trimStart
-    ? current.slice(Math.min(output.trimStart, current.length))
-    : current;
-  return retained + (output.append ?? "");
-}
-
 /**
  * The child conversation's own agent state (`pi.agent`): the model, thinking
  * level, and cwd the harness actually runs the child with. Absent fields mean
@@ -186,16 +171,18 @@ export interface DurableChildHistoryTranscript {
 }
 
 /**
- * Projects pi-durable snapshots and committed event batches into the task
- * panel's transcript format. Partial assistant text and running tool output
- * are replaced immutably so the pane can refresh its cached components.
+ * Projects pi-durable conversation *views* into the task panel's transcript
+ * format. pi-durable 1.5 removed the per-commit event stream: a renderer now
+ * renders state, so `apply` folds one view revision at a time — new entries by
+ * entry ID, then the partial answer and tool slots of `pi.live`.
+ *
+ * Item objects are reused when their content did not change: the pane caches a
+ * component per item in a WeakMap (task-pane.ts), so rebuilding an unchanged
+ * item would re-render the pane on every commit.
  */
 export class DurableTranscript {
   private transcript: TranscriptItem[] = [];
   private toolIndexes = new Map<string, number>();
-  private snapshotToolCalls = new Set<string>();
-  // Keep snapshot history separate: a completed call can still have a later live start event.
-  private snapshotHistoryToolCalls = new Set<string>();
   private countedToolCalls = new Set<string>();
   private toolCallTotal = 0;
   private agent: DurableChildAgent = {};
@@ -203,17 +190,26 @@ export class DurableTranscript {
   private latestCacheHitRate: number | undefined;
   private latestTokensPerSecond: number | undefined;
   private tpsRun = createChildTpsRun();
-  private tpsRunInput: Extract<AgentEvent, { type: "run_start" }>["inputs"][number] | undefined;
+  private tpsRunning = false;
+  /** A run already under way at the first view has no observed start, so its rate is never published. */
+  private tpsUntimed = false;
+  /** Assistant output the current run produced, accumulated as its entries are projected. */
   private tpsRunOutput = 0;
-  private tpsRunEntries = new Set<EntryRecord["id"]>();
   private contextTokens: number | null = null;
   private compactionInProgress = false;
   private partialAssistantIndex: number | undefined;
-  private partialTextBlocks = new Map<number, string>();
-  private partialThinkingBlocks = new Map<number, string>();
+  /** Entries already projected; the window appends, so a view only adds its tail. */
+  private projectedEntries = new Set<EntryRecord["id"]>();
+  /** Whether any view has been folded yet; an empty first view must not be mistaken for no view. */
+  private viewed = false;
+  /** Failures already rendered as a system item; `pi.live` keeps them after the run ends. */
+  private renderedFailures = new Set<string>();
 
-  constructor(snapshot: SnapshotEvent, private readonly now: () => number = Date.now) {
-    this.replaceSnapshot(snapshot);
+  constructor(
+    view: ConversationView,
+    private readonly now: () => number = Date.now,
+  ) {
+    this.apply(view);
   }
 
   items(): TranscriptItem[] {
@@ -245,123 +241,136 @@ export class DurableTranscript {
     };
   }
 
-  apply(events: readonly AgentEvent[]): TranscriptItem[] {
-    for (const event of events) {
-      switch (event.type) {
-        case "run_start":
-          this.tpsRun.start(this.now());
-          this.tpsRunInput = event.inputs[0];
-          this.tpsRunOutput = 0;
-          this.tpsRunEntries.clear();
-          break;
-        case "run_end":
-          if (this.tpsRunInput !== undefined && this.tpsRunInput === event.inputs[0]) {
-            const measurement = this.tpsRun.end(this.now());
-            const rate = measurement && childRunTokensPerSecond({ ...measurement, output: this.tpsRunOutput });
-            if (typeof rate === "number") this.latestTokensPerSecond = rate;
-            this.tpsRunInput = undefined;
-          }
-          break;
-        case "snapshot":
-          this.replaceSnapshot(event);
-          break;
-        case "usage_changed":
-          this.usageState = event.usage;
-          break;
-        case "compaction_start":
-          this.compactionInProgress = true;
-          this.contextTokens = null;
-          break;
-        case "compaction_end":
-          this.compactionInProgress = false;
-          this.contextTokens = null;
-          break;
-        case "entry_appended":
-          this.observeEntryMetadata(event.entry);
-          break;
-        case "agent_changed":
-          this.setAgentState(event.agent);
-          break;
-        case "message_start":
-          if (event.message.role === "assistant") this.writePartialAssistant(event.message, true);
-          break;
-        case "message_update":
-          if (!this.compactionInProgress) this.observeAssistantUsage(event.usage);
-          this.applyMessageChanges(event.changes);
-          break;
-        case "message_end":
-          if (this.tpsRunInput !== undefined && !this.tpsRunEntries.has(event.entry.id)) {
-            this.tpsRunEntries.add(event.entry.id);
-            this.tpsRunOutput += sumAssistantOutputTokens(event.entry.model ?? []);
-          }
-          for (const message of event.entry.model ?? []) {
-            this.observeMessageMetadata(message);
-            this.appendMessage(message, true);
-          }
-          break;
-        case "tool_execution_start":
-          this.observeToolCall(event.toolCallId);
-          this.upsertTool({
-            type: "tool",
-            name: event.toolName,
-            toolCallId: event.toolCallId,
-            args: event.args,
-            timestamp: "",
-            inProgress: true,
-          });
-          break;
-        case "tool_execution_update":
-          this.observeToolCall(event.toolCallId);
-          this.updateTool(event.toolCallId, (item) => ({
-            ...item,
-            ...(event.output === undefined
-              ? {}
-              : { result: toolOutput(item.result ?? "", event.output) }),
-            ...(event.details === undefined
-              ? {}
-              : { details: toolDetails(event.details) }),
-            inProgress: true,
-          }), event.toolName);
-          break;
-        case "tool_execution_end":
-          this.observeToolCall(event.toolCallId);
-          {
-            // Live end carries the committed toolResult (absent on fault/orphan).
-            const durationMs = this.endEventDuration(event);
-            this.updateTool(event.toolCallId, (item) => ({
-              ...item,
-              ...(durationMs === undefined ? {} : { durationMs }),
-              inProgress: false,
-            }), event.toolName);
-          }
-          break;
-        case "task_failed":
-          this.append({
-            type: "system",
-            text: `Task failed: ${event.message}`,
-            timestamp: "",
-          });
-          break;
-        default:
-          break;
-      }
+  /** Fold one conversation-view revision into the transcript. */
+  apply(view: ConversationView): TranscriptItem[] {
+    const live = (view.docs["pi.live"] ?? {}) as LiveState;
+    const firstView = !this.viewed;
+    this.viewed = true;
+    this.setAgentState(view.docs["pi.agent"] as AgentState | undefined);
+    this.usageState = (view.docs["pi.usage"] as UsageState | undefined) ?? { models: {}, tools: {} };
+    this.observeCompaction(live);
+    // A run's entries and its end can arrive in one folded callback, so the
+    // clock opens before the entries are projected and closes after them.
+    this.observeRunStart(live, firstView, view.entries);
+    for (const entry of view.entries) this.observeEntry(entry);
+    // Drop what has left the window, so the set tracks the window and not the
+    // whole conversation.
+    if (this.projectedEntries.size > 2 * MAX_TRANSCRIPT_ITEMS) {
+      this.projectedEntries = new Set(view.entries.map((entry) => entry.id));
     }
+    this.observeGeneration(live);
+    for (const slot of live.tools ?? []) this.observeToolSlot(slot);
+    this.observeFailure(live.runFailure, firstView);
+    this.observeRunEnd(live);
     this.trim();
     return this.items();
   }
 
-  private endEventDuration(
-    event: Extract<AgentEvent, { type: "tool_execution_end" }>,
-  ): number | undefined {
-    for (const message of event.entry?.model ?? []) {
-      if (message.role === "toolResult" && message.toolCallId === event.toolCallId) {
-        return messageDuration(message);
+  /**
+   * A run starts when `pi.live.run` appears; 1.5 keeps `runFailure` after a
+   * failed run, so idleness is `run === undefined` and never an empty object.
+   */
+  private observeRunStart(live: LiveState, firstView: boolean, entries: readonly EntryRecord[]): void {
+    if (live.run === undefined || this.tpsRunning) return;
+    this.tpsRunning = true;
+    this.tpsRunOutput = 0;
+    // `pi.live.run.first` names the run's first entry, so a run that committed
+    // entries before this view observed it still counts their output. Entries
+    // not projected yet are added as `observeEntry` reaches them.
+    const runFirst = live.run.first;
+    if (runFirst !== undefined) {
+      for (const entry of entries) {
+        if (entry.id >= runFirst && this.projectedEntries.has(entry.id)) {
+          this.tpsRunOutput += sumAssistantOutputTokens(entry.model ?? []);
+        }
       }
     }
-    return undefined;
+    // A run already in flight at the first view has no observed start.
+    this.tpsUntimed = firstView;
+    this.tpsRun = createChildTpsRun();
+    if (!firstView) this.tpsRun.start(this.now());
   }
 
-  private setAgentState(state: SnapshotEvent["agent"] | undefined): void {
+  private observeRunEnd(live: LiveState): void {
+    if (live.run !== undefined || !this.tpsRunning) return;
+    this.tpsRunning = false;
+    const measurement = this.tpsUntimed ? undefined : this.tpsRun.end(this.now());
+    this.tpsUntimed = false;
+    // A run with no observed start, or one that produced nothing, has no rate.
+    const rate = measurement && childRunTokensPerSecond({ ...measurement, output: this.tpsRunOutput });
+    if (typeof rate === "number") this.latestTokensPerSecond = rate;
+  }
+
+  private observeCompaction(live: LiveState): void {
+    const compacting = (live.compactions?.length ?? 0) > 0;
+    if (compacting !== this.compactionInProgress) {
+      this.compactionInProgress = compacting;
+      this.contextTokens = null;
+    }
+  }
+
+  /** Project an entry not seen before; the window appends and only drops its oldest. */
+  private observeEntry(entry: EntryRecord): void {
+    if (this.projectedEntries.has(entry.id)) return;
+    this.projectedEntries.add(entry.id);
+    if (entry.kind === COMPACTION_ENTRY_KIND || entry.kind === RESET_ENTRY_KIND) {
+      // A persisted compaction/reset boundary invalidates the measured context.
+      this.contextTokens = null;
+      return;
+    }
+    for (const message of entry.model ?? []) {
+      this.observeMessageMetadata(message);
+      this.appendMessage(message);
+    }
+    // Only entries projected from here on are new to this run's total.
+    if (this.tpsRunning) this.tpsRunOutput += sumAssistantOutputTokens(entry.model ?? []);
+  }
+
+  /** The in-flight answer: the generation's committed partial, or nothing once it settles into an entry. */
+  private observeGeneration(live: LiveState): void {
+    const message = live.generation?.message as unknown as AssistantMessage | undefined;
+    if (message === undefined) {
+      if (this.partialAssistantIndex !== undefined) {
+        this.transcript.splice(this.partialAssistantIndex, 1);
+        this.partialAssistantIndex = undefined;
+        this.rebuildIndexes();
+      }
+      return;
+    }
+    if (!this.compactionInProgress) this.observeAssistantUsage(message.usage);
+    this.writePartialAssistant(message);
+  }
+
+  private observeToolSlot(slot: ToolSlot): void {
+    const details = toolDetails(slot.details);
+    this.setTool({
+      type: "tool",
+      name: slot.name,
+      toolCallId: slot.callId,
+      args: {},
+      ...(slot.output === undefined ? {} : { result: slot.output }),
+      ...(details === undefined ? {} : { details }),
+      timestamp: "",
+      inProgress: slot.status !== "done",
+    });
+  }
+
+  /**
+   * `pi.live` keeps a run that ended without an answer, so render each failure
+   * once rather than on every later view. A first view is history: the failure
+   * predates it, so it is recorded without being rendered.
+   */
+  private observeFailure(failure: LiveState["runFailure"], firstView: boolean): void {
+    if (failure === undefined) return;
+    const key = `${failure.taskId}\u0000${failure.reason}`;
+    if (this.renderedFailures.has(key)) return;
+    this.renderedFailures.add(key);
+    if (firstView) return;
+    const detail = failure.detail === undefined ? "" : ` (${failure.detail})`;
+    this.transcript.push({ type: "system", text: `Task failed: ${failure.reason}${detail}`, timestamp: "" });
+  }
+
+  private setAgentState(state: AgentState | undefined): void {
     const modelId = typeof state?.model?.modelId === "string" ? state.model.modelId : undefined;
     const provider = typeof state?.model?.provider === "string" ? state.model.provider : undefined;
     this.agent = {
@@ -371,69 +380,6 @@ export class DurableTranscript {
         : {}),
       ...(typeof state?.cwd === "string" ? { cwd: state.cwd } : {}),
     };
-  }
-
-  private replaceSnapshot(snapshot: SnapshotEvent): void {
-    this.setAgentState(snapshot.agent);
-    this.usageState = snapshot.usage ?? { models: {}, tools: {} };
-    this.latestCacheHitRate = undefined;
-    this.latestTokensPerSecond = undefined;
-    // Attachment/overflow snapshots have no trustworthy run start or prompt spans.
-    this.tpsRun = createChildTpsRun();
-    this.tpsRunInput = undefined;
-    this.tpsRunOutput = 0;
-    this.tpsRunEntries.clear();
-    this.contextTokens = null;
-    this.compactionInProgress = false;
-    this.transcript = [];
-    this.toolIndexes.clear();
-    this.snapshotToolCalls.clear();
-    this.clearPartialAssistant();
-    for (const entry of snapshot.entries) {
-      this.observeEntryMetadata(entry);
-      for (const message of entry.model ?? []) {
-        this.rememberSnapshotToolCalls(message);
-        this.observeMessageMetadata(message);
-        this.appendMessage(message);
-      }
-    }
-    if (snapshot.generation?.message) {
-      const message = snapshot.generation.message as Message;
-      this.rememberSnapshotToolCalls(message);
-      // An in-flight snapshot has no final response timing yet.
-      if (message.role === "assistant") this.observeAssistantUsage(message.usage);
-      this.writePartialAssistant(message);
-    }
-    for (const slot of snapshot.tools) {
-      if (slot.status === "done") continue;
-      this.snapshotToolCalls.add(slot.callId);
-      const details = toolDetails(slot.details);
-      this.updateTool(
-        slot.callId,
-        (item) => ({
-          ...item,
-          name: slot.name,
-          ...(slot.output === undefined ? {} : { result: slot.output }),
-          ...(details === undefined ? {} : { details }),
-          inProgress: true,
-        }),
-        slot.name,
-      );
-    }
-    for (const toolCallId of this.toolIndexes.keys()) {
-      if (this.snapshotHistoryToolCalls.has(toolCallId)) continue;
-      this.snapshotHistoryToolCalls.add(toolCallId);
-      if (!this.countedToolCalls.has(toolCallId)) this.toolCallTotal++;
-    }
-    this.trim();
-  }
-
-  private observeEntryMetadata(entry: EntryRecord): void {
-    if (entry.kind === COMPACTION_ENTRY_KIND || entry.kind === RESET_ENTRY_KIND) {
-      this.contextTokens = null;
-      return;
-    }
-    for (const message of entry.model ?? []) this.observeMessageMetadata(message);
   }
 
   private observeMessageMetadata(message: Message): void {
@@ -455,232 +401,98 @@ export class DurableTranscript {
     }
   }
 
-  private rememberSnapshotToolCalls(message: Message): void {
-    if (message.role !== "assistant") return;
-    for (const block of contentBlocks(message.content)) {
-      if (block.type === "toolCall") this.snapshotToolCalls.add(block.id);
-    }
-  }
-
-  private appendMessage(message: Message, countLiveTools = false): void {
+  private appendMessage(message: Message): void {
     const timestamp = timestampOf(message);
     if (message.role === "user") {
       const text = textContent(message.content);
-      if (text) this.append({ type: "user", text, timestamp });
+      if (text) this.transcript.push({ type: "user", text, timestamp });
       return;
     }
     if (message.role === "assistant") {
       const assistant = asAssistant(message)!;
       if (assistant.text || assistant.thinking) {
         if (this.partialAssistantIndex !== undefined) {
+          // The settled answer supersedes the streamed partial in place.
           this.transcript[this.partialAssistantIndex] = assistant;
-          this.clearPartialAssistant();
+          this.partialAssistantIndex = undefined;
         } else {
-          this.append(assistant);
+          this.transcript.push(assistant);
         }
       } else if (this.partialAssistantIndex !== undefined) {
         this.transcript.splice(this.partialAssistantIndex, 1);
-        this.clearPartialAssistant();
+        this.partialAssistantIndex = undefined;
         this.rebuildIndexes();
       }
       for (const block of contentBlocks(message.content)) {
         const item = toolCall(block, timestamp);
-        if (item) {
-          if (countLiveTools) this.observeToolCall(item.toolCallId);
-          this.upsertTool(item);
-        }
+        if (item) this.setTool(item);
       }
       return;
     }
     if (message.role === "toolResult") {
-      if (countLiveTools) this.observeToolCall(message.toolCallId);
-      this.snapshotToolCalls.delete(message.toolCallId);
-      const result = textContent(message.content);
       const details = toolDetails(message.details);
-      const durationMs = messageDuration(message);
-      const existingIndex = this.toolIndexes.get(message.toolCallId);
-      if (existingIndex === undefined) {
-        this.upsertTool({
-          type: "tool",
-          name: message.toolName || "tool",
-          toolCallId: message.toolCallId,
-          args: {},
-          ...(details === undefined ? {} : { details }),
-          ...(durationMs === undefined ? {} : { durationMs }),
-          result: result || undefined,
-          isError: Boolean(message.isError),
-          timestamp,
-          inProgress: false,
-        });
-      } else {
-        const existing = this.transcript[existingIndex];
-        if (existing?.type === "tool") {
-          this.transcript[existingIndex] = {
-            ...existing,
-            name: message.toolName || existing.name,
-            ...(details === undefined ? {} : { details }),
-            ...(durationMs === undefined ? {} : { durationMs }),
-            result: result || undefined,
-            isError: Boolean(message.isError),
-            inProgress: false,
-            timestamp,
-          };
-        }
-      }
+      const durationMs = authoritativeDurationMs(message.durationMs);
+      this.setTool({
+        type: "tool",
+        name: message.toolName || "tool",
+        toolCallId: message.toolCallId,
+        args: {},
+        ...(details === undefined ? {} : { details }),
+        ...(durationMs === undefined ? {} : { durationMs }),
+        result: textContent(message.content) || undefined,
+        isError: Boolean(message.isError),
+        timestamp,
+        inProgress: false,
+      });
     }
   }
 
-  private writePartialAssistant(message: Message, countLiveTools = false): void {
+  private writePartialAssistant(message: AssistantMessage): void {
     const assistant = asAssistant(message, true);
     if (!assistant) return;
-    this.partialTextBlocks.clear();
-    this.partialThinkingBlocks.clear();
-    for (const [index, block] of indexedContentBlocks(message.content)) {
-      if (block.type === "text") this.partialTextBlocks.set(index, block.text);
-      else if (block.type === "thinking") this.partialThinkingBlocks.set(index, block.thinking);
-    }
     if (this.partialAssistantIndex === undefined) {
       this.partialAssistantIndex = this.transcript.length;
-      this.append(assistant);
+      this.transcript.push(assistant);
     } else {
       this.transcript[this.partialAssistantIndex] = assistant;
     }
-    this.syncPartialAssistant();
     for (const block of contentBlocks(message.content)) {
       const item = toolCall(block, assistant.timestamp);
-      if (item) {
-        if (countLiveTools) this.observeToolCall(item.toolCallId);
-        this.upsertTool(item);
-      }
+      if (item) this.setTool(item);
     }
   }
 
-  private applyMessageChanges(
-    changes: Extract<AgentEvent, { type: "message_update" }>["changes"],
-  ): void {
-    for (const change of changes) {
-      if (change.type === "message") {
-        this.writePartialAssistant(change.message, true);
-        continue;
-      }
-      if (change.type === "text_delta") {
-        this.partialTextBlocks.set(
-          change.contentIndex,
-          (this.partialTextBlocks.get(change.contentIndex) ?? "") + change.delta,
-        );
-        this.syncPartialAssistant();
-        continue;
-      }
-      if (change.type === "thinking_delta") {
-        this.partialThinkingBlocks.set(
-          change.contentIndex,
-          (this.partialThinkingBlocks.get(change.contentIndex) ?? "") + change.delta,
-        );
-        this.syncPartialAssistant();
-        continue;
-      }
-      if (!("block" in change)) continue;
-      const block = parseContentBlock(change.block);
-      if (!block) continue;
-      if (change.type === "text_start" && block.type === "text") {
-        this.partialTextBlocks.set(change.contentIndex, block.text);
-        this.syncPartialAssistant();
-      } else if (change.type === "thinking_start" && block.type === "thinking") {
-        this.partialThinkingBlocks.set(change.contentIndex, block.thinking);
-        this.syncPartialAssistant();
-      } else if (
-        (change.type === "toolcall_start" || change.type === "block") &&
-        block.type === "toolCall"
-      ) {
-        const item = toolCall(block, "");
-        if (item) {
-          this.observeToolCall(item.toolCallId);
-          this.upsertTool(item);
-        }
-      } else if (change.type === "block" && block.type === "text") {
-        this.partialTextBlocks.set(change.contentIndex, block.text);
-        this.syncPartialAssistant();
-      } else if (change.type === "block" && block.type === "thinking") {
-        this.partialThinkingBlocks.set(change.contentIndex, block.thinking);
-        this.syncPartialAssistant();
-      }
+  /**
+   * Insert or update the item of one tool call. The live slot carries running
+   * output and details; the settled toolResult entry carries the final result,
+   * so a later slot projection never erases what the entry established.
+   */
+  private setTool(item: ToolTranscriptItem): void {
+    if (!this.countedToolCalls.has(item.toolCallId)) {
+      this.countedToolCalls.add(item.toolCallId);
+      this.toolCallTotal++;
     }
-  }
-
-  private observeToolCall(toolCallId: string): void {
-    if (this.countedToolCalls.has(toolCallId)) return;
-    this.countedToolCalls.add(toolCallId);
-    if (!this.snapshotToolCalls.delete(toolCallId)) this.toolCallTotal++;
-  }
-
-  private syncPartialAssistant(): void {
-    const text = [...this.partialTextBlocks.entries()]
-      .sort(([left], [right]) => left - right)
-      .map(([, value]) => value)
-      .join("\n");
-    const thinking = [...this.partialThinkingBlocks.entries()]
-      .sort(([left], [right]) => left - right)
-      .map(([, value]) => value)
-      .join("\n");
-    if (this.partialAssistantIndex === undefined) {
-      this.partialAssistantIndex = this.transcript.length;
-      this.append({ type: "assistant", text, streaming: true, timestamp: "", ...(thinking ? { thinking } : {}) });
-      return;
-    }
-    const current = this.transcript[this.partialAssistantIndex];
-    if (current?.type === "assistant") {
-      const { thinking: _oldThinking, ...withoutThinking } = current;
-      this.transcript[this.partialAssistantIndex] = {
-        ...withoutThinking,
-        text,
-        ...(thinking ? { thinking } : {}),
-      };
-    }
-  }
-
-  private clearPartialAssistant(): void {
-    this.partialAssistantIndex = undefined;
-    this.partialTextBlocks.clear();
-    this.partialThinkingBlocks.clear();
-  }
-
-  private upsertTool(item: ToolTranscriptItem): void {
-    const existingIndex = this.toolIndexes.get(item.toolCallId);
-    if (existingIndex === undefined) {
-      this.toolIndexes.set(item.toolCallId, this.transcript.length);
-      this.append(item);
-      return;
-    }
-    const existing = this.transcript[existingIndex];
-    if (existing?.type === "tool") {
-      this.transcript[existingIndex] = { ...existing, ...item };
-    }
-  }
-
-  private updateTool(
-    toolCallId: string,
-    update: (item: ToolTranscriptItem) => ToolTranscriptItem,
-    name: string,
-  ): void {
-    const index = this.toolIndexes.get(toolCallId);
+    const index = this.toolIndexes.get(item.toolCallId);
     if (index === undefined) {
-      const created: ToolTranscriptItem = {
-        type: "tool",
-        name,
-        toolCallId,
-        args: {},
-        timestamp: "",
-        inProgress: true,
-      };
-      this.upsertTool(update(created));
+      this.toolIndexes.set(item.toolCallId, this.transcript.length);
+      this.transcript.push(item);
       return;
     }
-    const item = this.transcript[index];
-    if (item?.type === "tool") this.transcript[index] = update(item);
-  }
-
-  private append(item: TranscriptItem): void {
-    this.transcript.push(item);
+    const current = this.transcript[index];
+    if (current?.type !== "tool") return;
+    const merged: ToolTranscriptItem = {
+      ...current,
+      ...item,
+      args: Object.keys(item.args).length > 0 ? item.args : current.args,
+      details: item.details ?? current.details,
+      durationMs: item.durationMs ?? current.durationMs,
+      result: item.result ?? current.result,
+      isError: item.isError ?? current.isError,
+      // A settled call never returns to running.
+      inProgress: current.inProgress === false ? false : item.inProgress,
+    };
+    if (sameTool(current, merged)) return;
+    this.transcript[index] = merged;
   }
 
   private trim(): void {
@@ -702,4 +514,16 @@ export class DurableTranscript {
       }
     });
   }
+}
+
+/** Whether two projections of one tool call render identically, so the item object can be kept. */
+function sameTool(left: ToolTranscriptItem, right: ToolTranscriptItem): boolean {
+  return left.name === right.name
+    && left.inProgress === right.inProgress
+    && left.result === right.result
+    && left.isError === right.isError
+    && left.durationMs === right.durationMs
+    && left.timestamp === right.timestamp
+    && left.details === right.details
+    && left.args === right.args;
 }

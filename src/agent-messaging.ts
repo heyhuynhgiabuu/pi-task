@@ -18,7 +18,7 @@
  * - The sender header is added here; a body imitating pi-task framing is refused.
  */
 
-import { Type } from "typebox";
+import { obj, oneOf, opt, str } from "@earendil-works/pi-schema";
 
 import { readTaskSessionHistory } from "./conversation.js";
 import type { TaskSessionHistoryEntry } from "./types.js";
@@ -105,13 +105,15 @@ export const agentsToolDescription = [
 ].join(" ");
 
 export function agentsParametersSchema() {
-  return Type.Object({
-    action: Type.Union([Type.Literal("list"), Type.Literal("send"), Type.Literal("read")], {
+  // `open` keeps the additional-properties-permitting object the TypeBox schema
+  // this replaced emitted.
+  return obj({
+    action: oneOf(["list", "send", "read"], {
       description: "list | send | read",
     }),
-    agent: Type.Optional(Type.String({ description: "Target: `main` or a subagent task id (send/read)." })),
-    message: Type.Optional(Type.String({ description: "Text to deliver (send)." })),
-  });
+    agent: opt(str({ description: "Target: `main` or a subagent task id (send/read)." })),
+    message: opt(str({ description: "Text to deliver (send)." })),
+  }, { open: true });
 }
 
 /** What a durable subagent can do: offered tool names and working directory. */

@@ -1,4 +1,4 @@
-import { Type, type Static } from "typebox";
+import { arr, bool, obj, opt, str, type Static } from "@earendil-works/pi-schema";
 import { PI_THINKING_LEVELS } from "../thinking.js";
 
 /**
@@ -21,60 +21,61 @@ import { PI_THINKING_LEVELS } from "../thinking.js";
 export function taskParametersSchema() {
   // Keep a single object at the schema root. Pi's Anthropic adapter reads
   // root-level properties/required and does not preserve a root anyOf union.
-  return Type.Object({
-    agent_type: Type.String({
+  // `open` keeps the open-object behaviour of the TypeBox schema this replaced.
+  return obj({
+    agent_type: str({
       description: "Specialist agent type for this task",
     }),
-    description: Type.String({
+    description: str({
       description: "A short (3-5 words) summary of the task",
     }),
-    prompt: Type.String({
+    prompt: str({
       description:
         "Handoff: goal, scope, non-goals, write policy, acceptance, checks. Parent-only reasoning: parent_context/proposed_changes.",
     }),
-    thinking: Type.Optional(Type.String({
+    thinking: opt(str({
       description: `Thinking; frontmatter wins: ${PI_THINKING_LEVELS.join("|")}`,
     })),
-    task_id: Type.Optional(
-      Type.String({
+    task_id: opt(
+      str({
         description: "Resume this existing task instead of starting a fresh one; an unknown id is an error",
       }),
     ),
-    conversation_id: Type.Optional(
-      Type.String({
+    conversation_id: opt(
+      str({
         description: "Start/resume a named conversation on the HerdR and tmux backends; not task_id",
       }),
     ),
-    parent_context: Type.Optional(
-      Type.String({
+    parent_context: opt(
+      str({
         description:
           "Parent-only facts, decisions, constraints. Required for reviewer tasks.",
       }),
     ),
-    proposed_changes: Type.Optional(
-      Type.Array(Type.String(), {
+    proposed_changes: opt(
+      arr(str(), {
         description:
           "Changes + acceptance. Required non-empty for reviewer tasks; use 'no design changes' if none.",
       }),
     ),
-    workspace_group: Type.Optional(Type.String({
+    workspace_group: opt(str({
       description: "Group HerdR panes into a shared workspace",
     })),
-    cwd: Type.Optional(Type.String({
+    cwd: opt(str({
       description: "Absolute existing directory; default caller, resume uses stored cwd. No worktree creation.",
     })),
-    compare: Type.Optional(
-      Type.Boolean({
+    compare: opt(
+      bool({
         description: "Run a dual-model comparison on read-only agents",
       }),
     ),
-    background: Type.Optional(
-      Type.Boolean({
+    background: opt(
+      bool({
         description: "Run async in background; default true",
         default: true,
       }),
     ),
-  });
+  }, { open: true });
 }
 
 export type TaskToolParameters = Static<ReturnType<typeof taskParametersSchema>>;

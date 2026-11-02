@@ -1,12 +1,12 @@
-import { Type } from "typebox";
+import { arr, bool, map, num, obj, opt, str, union } from "@earendil-works/pi-schema";
 
 /** One `pi.usage` bucket of a durable child conversation, as `details.usage` reports it. */
-const durableUsageTotals = Type.Object({
-  inputTokens: Type.Number(),
-  outputTokens: Type.Number(),
-  totalTokens: Type.Number(),
-  costTotal: Type.Number({ description: "Provider-computed cost; 0 when unknown" }),
-});
+const durableUsageTotals = obj({
+  inputTokens: num(),
+  outputTokens: num(),
+  totalTokens: num(),
+  costTotal: num({ description: "Provider-computed cost; 0 when unknown" }),
+}, { open: true });
 
 /**
  * The JSON contract codemode scripts receive instead of the text content once
@@ -19,71 +19,73 @@ const durableUsageTotals = Type.Object({
  * additional ones are allowed.
  */
 export function taskResultOutputSchema() {
-  return Type.Object({
+  // `open` keeps the additional-properties-permitting object the TypeBox schema
+  // this replaced emitted: `details` carries more than the fields named here.
+  return obj({
     // Lifecycle and identity.
-    phase: Type.Optional(
-      Type.String({ description: "Lifecycle phase: running | done | failed" }),
+    phase: opt(
+      str({ description: "Lifecycle phase: running | done | failed" }),
     ),
-    execution_phase: Type.Optional(
-      Type.String({ description: "Compare settlement: done | partial" }),
+    execution_phase: opt(
+      str({ description: "Compare settlement: done | partial" }),
     ),
-    task_id: Type.Optional(
-      Type.String({
+    task_id: opt(
+      str({
         description: "Durable id; pass it back as task_id to resume or inspect",
       }),
     ),
-    task_ids: Type.Optional(
-      Type.Array(Type.String(), { description: "Both sibling ids in compare mode" }),
+    task_ids: opt(
+      arr(str(), { description: "Both sibling ids in compare mode" }),
     ),
-    conversation_id: Type.Optional(
-      Type.String({ description: "Durable conversation key, when the task belongs to one" }),
+    conversation_id: opt(
+      str({ description: "Durable conversation key, when the task belongs to one" }),
     ),
-    session_id: Type.Optional(
-      Type.String({ description: "Child Pi session id for ACP-linked tasks" }),
+    session_id: opt(
+      str({ description: "Child Pi session id for ACP-linked tasks" }),
     ),
-    pi_tool_call_id: Type.Optional(
-      Type.String({ description: "Parent tool call the child session is linked to" }),
+    pi_tool_call_id: opt(
+      str({ description: "Parent tool call the child session is linked to" }),
     ),
     // Outcome.
-    status: Type.Optional(
-      Type.String({
+    status: opt(
+      str({
         description: "Normalized status: running | done | cancelled | aborted | failed | timeout",
       }),
     ),
-    reported_status: Type.Optional(Type.String()),
-    raw_status: Type.Optional(
-      Type.String({ description: "The child's literal status word before normalization" }),
+    reported_status: opt(str()),
+    raw_status: opt(
+      str({ description: "The child's literal status word before normalization" }),
     ),
-    result_valid: Type.Optional(Type.Boolean()),
-    result: Type.Optional(
-      Type.String({ description: "The child's full report text" }),
+    result_valid: opt(bool()),
+    result: opt(
+      str({ description: "The child's full report text" }),
     ),
-    background: Type.Optional(
-      Type.Boolean({
+    background: opt(
+      bool({
         description: "true = async receipt, result delivered later; false = sync result",
       }),
     ),
-    compare: Type.Optional(
-      Type.Boolean({ description: "Result describes a two-model comparison" }),
+    compare: opt(
+      bool({ description: "Result describes a two-model comparison" }),
     ),
-    models: Type.Optional(
-      Type.Array(Type.String(), { description: "The two compared models, sibling order" }),
+    models: opt(
+      arr(str(), { description: "The two compared models, sibling order" }),
     ),
     // Report sections, parsed from the child's structured report.
-    summary: Type.Optional(Type.String()),
-    findings: Type.Optional(Type.String()),
-    evidence: Type.Optional(Type.String()),
-    files: Type.Optional(Type.String()),
-    caveats: Type.Optional(Type.String()),
-    next_steps: Type.Optional(Type.String()),
-    full_output: Type.Optional(
-      Type.String({
+    summary: opt(str()),
+    findings: opt(str()),
+    evidence: opt(str()),
+    files: opt(str()),
+    caveats: opt(str()),
+    next_steps: opt(str()),
+    full_output: opt(
+      str({
         description: "Full unparsed child output when the report sections are absent",
       }),
     ),
-    structured_result: Type.Optional(
-      Type.Union(
-        [Type.Boolean(), Type.Object({})],
+    structured_result: opt(
+      union(
+        [bool(), obj({}, { open: true })],
         {
           description:
             "Whether the report parsed as structured; the object form carries status details",
@@ -91,38 +93,38 @@ export function taskResultOutputSchema() {
       ),
     ),
     // Cost and timing.
-    tool_uses: Type.Optional(Type.Number()),
-    turn_count: Type.Optional(Type.Number()),
-    duration_ms: Type.Optional(Type.Number()),
+    tool_uses: opt(num()),
+    turn_count: opt(num()),
+    duration_ms: opt(num()),
     // Launch context and failure diagnostics.
-    agent_type: Type.Optional(Type.String()),
-    description: Type.Optional(Type.String()),
-    backend: Type.Optional(
-      Type.String({ description: "Execution backend that ran the task" }),
+    agent_type: opt(str()),
+    description: opt(str()),
+    backend: opt(
+      str({ description: "Execution backend that ran the task" }),
     ),
-    runtime: Type.Optional(
-      Type.String({ description: "pi | claude" }),
+    runtime: opt(
+      str({ description: "pi | claude" }),
     ),
-    operation: Type.Optional(Type.String()),
-    error: Type.Optional(
-      Type.String({ description: "Stable failure code" }),
+    operation: opt(str()),
+    error: opt(
+      str({ description: "Stable failure code" }),
     ),
-    reason: Type.Optional(
-      Type.String({ description: "Human-readable failure detail" }),
+    reason: opt(
+      str({ description: "Human-readable failure detail" }),
     ),
-    file: Type.Optional(
-      Type.String({ description: "Durable file that could not be read" }),
+    file: opt(
+      str({ description: "Durable file that could not be read" }),
     ),
     // Spend of the child conversation. Durable backend only: the other backends
     // report none, so the field is absent rather than zeroed.
-    usage: Type.Optional(
-      Type.Object({
-        models: Type.Record(Type.String(), durableUsageTotals),
-        tools: Type.Record(Type.String(), durableUsageTotals),
+    usage: opt(
+      obj({
+        models: map(durableUsageTotals),
+        tools: map(durableUsageTotals),
         totals: durableUsageTotals,
-      }),
+      }, { open: true }),
     ),
-  });
+  }, { open: true });
 }
 
 /** A result that carries task data on `details` and may carry a structured twin. */

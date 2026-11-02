@@ -2,47 +2,38 @@
  * The schema is the handoff contract, so this checks it against the validator
  * Pi actually runs.
  *
- * Pi validates tool arguments before `execute`: `getValidator` compiles
- * `parameters` with typebox's `Compile`, `validator.Check(args)` must pass, and
- * a failure throws with the offending path. `formatValidationPath` names the
- * missing property for a `required` failure. Reproducing that pair here means a
- * change to the schema is measured against the real enforcement, not against
- * the intent behind it.
+ * Pi validates tool arguments before `execute`: pi-ai's `validateToolArguments`
+ * compiles `parameters` with `@earendil-works/pi-schema`'s `compile` and calls
+ * `.parse()` on the arguments (pi-ai `dist/utils/validation.js`, reached from
+ * pi-agent-core's agent loop), and a failure throws naming the failing path.
+ * This file therefore measures the schema with the SAME library Pi uses, not
+ * with TypeBox, which pi 1.5 no longer uses for tool arguments.
  */
 
 import { strict as assert } from "node:assert";
 import test from "node:test";
 
-import { Compile } from "typebox/compile";
+import { compile } from "@earendil-works/pi-schema";
 
 import { taskParametersSchema } from "../src/tool/schema.js";
-interface ValidationError {
-	keyword?: string;
-	instancePath?: string;
-	params?: { requiredProperties?: string[] };
-	message?: string;
-}
 
-const validator = Compile(taskParametersSchema());
+const validator = compile(taskParametersSchema());
 
 /**
- * The property paths a validation error is about.
+ * The property paths a validation error is about, as dotted names.
  *
- * A `required` failure reports every missing property in one error, so it is
- * expanded here into one path per property. Pi's own formatValidationPath names
- * only the first, which is fine for a single missing field but hides the rest.
+ * pi-schema reports one error per failing keyword with a JSON-Pointer `path`
+ * (`/agent_type` -> `agent_type`), and a `required` failure is already one
+ * error per missing property, so nothing has to be expanded here.
  */
-function errorPaths(error: ValidationError): string[] {
-	if (error.keyword === "required") {
-		const base = String(error.instancePath ?? "").replace(/^\//, "").replace(/\//g, ".");
-		return (error.params?.requiredProperties ?? []).map((property) => (base ? `${base}.${property}` : property));
-	}
-	return [String(error.instancePath ?? "").replace(/^\//, "")];
+function errorPaths(error: { path: string }): string[] {
+	const path = error.path.replace(/^\//, "").replace(/\//g, ".");
+	return [path === "" ? "root" : path];
 }
 
 function validate(args: Record<string, unknown>): { accepted: boolean; errors: string[] } {
-	if (validator.Check(args)) return { accepted: true, errors: [] };
-	return { accepted: false, errors: validator.Errors(args).flatMap(errorPaths) };
+	if (validator.check(args)) return { accepted: true, errors: [] };
+	return { accepted: false, errors: validator.errors(args).flatMap(errorPaths) };
 }
 
 test("the handoff fields are required by the schema Pi enforces", () => {

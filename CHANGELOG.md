@@ -6,6 +6,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.14.4] - 2026-11-02
+
+### Changed
+
+- pi-durable (and chord, pi-ai, pi-coding-agent, pi-tui) moved to 1.5.0. pi-durable 1.5 removes
+  `watchEvents()` with the `AgentEvent`, `AgentEventStream`, `SnapshotEvent`, `MessageChange` and
+  `ToolEventCall` types, so the live child transcript is now projected from `Conversation.watch()`
+  conversation views instead of assembled from a per-commit event stream. `DurableTranscript`
+  folds state: entries by entry ID, then the partial answer and tool slots of `pi.live`.
+- **The `onSnapshot`/`onEvents` pair is one `onView(view)` callback.** Both were internal to the
+  durable backend and never exported, so no public tool schema or task lifecycle changed. The two
+  callbacks could not survive 1.5: a folded watch callback can carry a run's entries and its end at
+  once. `onTaskProgress` is unchanged.
+- Tool schemas build with `@earendil-works/pi-schema` instead of `typebox`, which pi 1.5 no longer
+  uses to validate tool arguments. `typebox` is gone from this package. Every object schema is
+  `open`, emitted exactly as TypeBox emitted it: `taskParametersSchema()` is byte-identical, and
+  `taskResultOutputSchema()` differs only in how a `Record` is written.
+
+### Fixed
+
+- A durable harness report is logged with its `kind` and its error. 1.5 passes `onReport` one
+  `Report` object, so the previous `(error)` signature printed `[object Object]`; the test that
+  guarded it only asserted a line prefix and passed anyway.
+- A harness that ends in failure is detected by `SessionEnd.kind`, which 1.5 tags, instead of the
+  removed `reason`.
+- A child transcript no longer double-counts a run's tokens, and a run observed only mid-flight
+  still reports no rate rather than a fabricated one.
+
 ## [0.14.3] - 2026-11-01
 
 ### Fixed

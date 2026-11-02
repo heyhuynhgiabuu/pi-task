@@ -17,6 +17,7 @@ import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { readTaskSessionHistory } from "../conversation.js";
 import { isStaleExtensionCtxError } from "../stale-ctx.js";
 import { DurableTranscript, type DurableChildHistoryTranscript } from "../panel/durable-transcript.js";
+import { MAX_TRANSCRIPT_ITEMS } from "../panel/transcript.js";
 import { createTaskFastModeModelMatcher } from "../fast-mode.js";
 import {
   classifyModelFailover,
@@ -134,6 +135,59 @@ type CachedHarness = {
 };
 
 const harnessCache = new Map<string, CachedHarness>();
+
+/**
+ * How much of a child's transcript a live view keeps. The panel renders the
+ * newest MAX_TRANSCRIPT_ITEMS items and never pages, so the window is sized to
+ * fill that display: one tool round is two entries but a single item, and past
+ * `max` the view splices its oldest entries down to `min`.
+ */
+const DURABLE_TRANSCRIPT_WINDOW: import("@earendil-works/pi-durable").ConversationWindow = {
+  min: 2 * MAX_TRANSCRIPT_ITEMS,
+  max: 4 * MAX_TRANSCRIPT_ITEMS,
+};
+
+/**
+ * Watch one conversation's view for a transcript, delivering the attach-time
+ * revision and then every commit. A `failed` watch call is not a revision:
+ * durable failures end the watch instead.
+ *
+ * Best-effort by design — a watch that fails to attach is reported and leaves
+ * the task unaffected, so the caller keeps its own handle to stop.
+ */
+async function watchDurableTranscript(
+  handle: DurableHarnessHandle,
+  conversationId: ConversationId,
+  onView: (view: import("@earendil-works/pi-durable").ConversationView) => void,
+  reportError: (error: unknown) => void,
+): Promise<import("@earendil-works/pi-durable").ConversationWatch | undefined> {
+  let watch: import("@earendil-works/pi-durable").ConversationWatch | undefined;
+  try {
+    const conversation = await handle.harness.conversation(conversationId, handle.context);
+    if (!conversation) throw new Error(`Durable conversation ${conversationId} is unavailable.`);
+    watch = await conversation.watch(handle.context, DURABLE_TRANSCRIPT_WINDOW);
+    onView(watch.value);
+    watch.start(async (call) => {
+      if (call.kind !== "value") return;
+      try {
+        onView(call.value);
+      } catch (error) {
+        reportError(error);
+      }
+    });
+    return watch;
+  } catch (error) {
+    reportError(error);
+    if (watch) {
+      try {
+        await watch.stop();
+      } catch (stopError) {
+        reportError(stopError);
+      }
+    }
+    return undefined;
+  }
+}
 
 type RetrySettingsSource = () => Partial<ConversationRetryPolicy>;
 /** Until the extension registers its source, pi-durable keeps its own defaults. */
@@ -647,9 +701,10 @@ export async function openDurableHarness(
           // restarts in a row, and pi-task never calls retryTask(), so a parked task would stay
           // stuck behind one log line. Keep the pre-1.4 behavior here and park nothing.
           settings: { restartLimit: Infinity, get retry() { return retrySettingsSource(); } },
-          onReport: (error: unknown) => {
+          onReport: (report: import("@earendil-works/pi-durable").Report) => {
+            const { error } = report;
             console.error(
-              `[pi-task] durable harness report: ${error instanceof Error ? error.message : String(error)}`,
+              `[pi-task] durable harness report (${report.kind}): ${error instanceof Error ? error.message : String(error)}`,
             );
           },
           env: ({ cwd }: { cwd?: string }) =>
@@ -1727,11 +1782,12 @@ export async function runDurableTask(input: {
   onSubmitted?: (conversationId: string) => void;
   /** Best-effort committed ledger for a failed/cancelled run; never persisted in pi-task history. */
   onTerminalUsage?: (usage: DurableUsage) => void;
-  /** Initial committed state for a live durable transcript view. */
-  onSnapshot?: (snapshot: import("@earendil-works/pi-durable").SnapshotEvent) => void;
-  /** One committed batch from the child conversation's event stream. */
-  onEvents?: (events: readonly import("@earendil-works/pi-durable").AgentEvent[]) => void;
-  /** Live events are best-effort; report a watch/callback failure without failing the task. */
+  /**
+   * Each revision of the child conversation's view: the first one at
+   * attachment, then every commit, with its window of entries and `pi.live`.
+   */
+  onView?: (view: import("@earendil-works/pi-durable").ConversationView) => void;
+  /** The live view is best-effort; report a watch/callback failure without failing the task. */
   onWatchError?: (error: unknown) => void;
   signal?: AbortSignal;
 }): Promise<DurableRunResult> {
@@ -1765,7 +1821,7 @@ export async function runDurableTask(input: {
     },
   );
   const conversation = (await handle.harness.conversation(childId, handle.context))!;
-  let eventStream: import("@earendil-works/pi-durable").AgentEventStream | undefined;
+  let viewWatch: import("@earendil-works/pi-durable").ConversationWatch | undefined;
   const reportWatchError = (error: unknown) => {
     try {
       input.onWatchError?.(error);
@@ -1773,34 +1829,8 @@ export async function runDurableTask(input: {
       // A presentation failure must not replace the durable task's outcome.
     }
   };
-  if (input.onSnapshot || input.onEvents) {
-    try {
-      eventStream = await handle.module.watchEvents(
-        handle.harness,
-        childId,
-        handle.context,
-      );
-      input.onSnapshot?.(eventStream.snapshot);
-      if (input.onEvents) {
-        eventStream.start(async (events) => {
-          try {
-            input.onEvents?.(events);
-          } catch (error) {
-            reportWatchError(error);
-          }
-        });
-      }
-    } catch (error) {
-      reportWatchError(error);
-      if (eventStream) {
-        try {
-          await eventStream.stop();
-        } catch (stopError) {
-          reportWatchError(stopError);
-        }
-        eventStream = undefined;
-      }
-    }
+  if (input.onView) {
+    viewWatch = await watchDurableTranscript(handle, childId, input.onView, reportWatchError);
   }
 
   let submissionAdmitted = false;
@@ -2067,9 +2097,9 @@ export async function runDurableTask(input: {
       }
     } finally {
       if (abortPromise) await abortPromise;
-      if (eventStream) {
+      if (viewWatch) {
         try {
-          await eventStream.stop();
+          await viewWatch.stop();
         } catch (error) {
           reportWatchError(error);
         }
@@ -2254,9 +2284,10 @@ export async function readDurableTaskHistoryTranscript(
   }
   const conversation = await handle.harness.conversation(selected.conversationId as unknown as ConversationId, handle.context);
   if (!conversation) throw new Error(`Durable child conversation for task ${selectedTaskId} is unavailable.`);
-  const stream = await handle.module.watchEvents(handle.harness, conversation.id, handle.context);
+  // A history read takes the attach-time revision only; it follows no later commits.
+  const view = await conversation.watch(handle.context, DURABLE_TRANSCRIPT_WINDOW);
   try {
-    const transcript = new DurableTranscript(stream.snapshot);
+    const transcript = new DurableTranscript(view.value);
     return {
       option: historyOption(selected),
       items: transcript.items(),
@@ -2265,9 +2296,9 @@ export async function readDurableTaskHistoryTranscript(
     };
   } finally {
     try {
-      await stream.stop();
+      await view.stop();
     } catch {
-      // A static snapshot is already captured; watcher cleanup must not hide it.
+      // A static view is already captured; watcher cleanup must not hide it.
     }
   }
 }
@@ -2551,13 +2582,10 @@ export async function resumeDurableTasks(
     requestIdForTask?: (taskId: string) => string | undefined;
     /** Return false to resume without exposing this task in the current session. */
     onActive?: (taskId: string, conversationId: string) => boolean | void;
-    onSnapshot?: (
+    /** Each revision of the recovered task's conversation view. */
+    onView?: (
       taskId: string,
-      snapshot: import("@earendil-works/pi-durable").SnapshotEvent,
-    ) => void;
-    onEvents?: (
-      taskId: string,
-      events: readonly import("@earendil-works/pi-durable").AgentEvent[],
+      view: import("@earendil-works/pi-durable").ConversationView,
     ) => void;
     onWatchError?: (taskId: string, error: unknown) => void;
     onSettled?: (taskId: string, status: "done" | "failed" | "cancelled") => void;
@@ -2711,35 +2739,14 @@ export async function resumeDurableTasks(
       shouldWatch = false;
       reportWatchError(error);
     }
-    let eventStream: import("@earendil-works/pi-durable").AgentEventStream | undefined;
-    if (shouldWatch && (hooks.onSnapshot || hooks.onEvents)) {
-      try {
-        eventStream = await handle.module.watchEvents(
-          handle.harness,
-          conversationId,
-          handle.context,
-        );
-        hooks.onSnapshot?.(taskId, eventStream.snapshot);
-        if (hooks.onEvents) {
-          eventStream.start(async (events) => {
-            try {
-              hooks.onEvents?.(taskId, events);
-            } catch (error) {
-              reportWatchError(error);
-            }
-          });
-        }
-      } catch (error) {
-        reportWatchError(error);
-        if (eventStream) {
-          try {
-            await eventStream.stop();
-          } catch (stopError) {
-            reportWatchError(stopError);
-          }
-          eventStream = undefined;
-        }
-      }
+    let viewWatch: import("@earendil-works/pi-durable").ConversationWatch | undefined;
+    if (shouldWatch && hooks.onView) {
+      viewWatch = await watchDurableTranscript(
+        handle,
+        conversationId,
+        (view) => hooks.onView?.(taskId, view),
+        reportWatchError,
+      );
     }
 
     let outcome: "done" | "failed" | "cancelled" = "failed";
@@ -2799,9 +2806,9 @@ export async function resumeDurableTasks(
         await reportFailure(error instanceof Error ? error.message : String(error));
       })
       .finally(async () => {
-        if (eventStream) {
+        if (viewWatch) {
           try {
-            await eventStream.stop();
+            await viewWatch.stop();
           } catch (error) {
             reportWatchError(error);
           }

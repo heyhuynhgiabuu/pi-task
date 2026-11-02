@@ -14,6 +14,7 @@ import {
   runDurableTask,
 } from "../src/subagent/durable.js";
 import { readTaskSessionHistory, upsertTaskSessionHistory } from "../src/conversation.js";
+import { readPersistedAgentHistoryTranscript } from "../src/lifecycle/agent-history.js";
 import { executeSdkChildBuiltinCommand } from "../src/subagent/runSdk.js";
 import type { ChildBuiltinCommand, TaskSessionHistoryEntry } from "../src/types.js";
 
@@ -406,6 +407,44 @@ test("durable /resume lists all mapped project child tasks and snapshots history
       { models: modelFactory },
     );
     assert.ok(currentOwned.items.some((item) => item.type === "user" && item.text.includes("resume-current task")));
+    // Assert the child's ANSWER too, not just the prompt we sent it: the prompt
+    // and the reply come from different places, and a history reader that lost
+    // the assistant entries would still satisfy the prompt check.
+    assert.ok(
+      currentOwned.items.some((item) => item.type === "assistant" && item.text.includes("Current transcript body.")),
+      `the child's answer survives into the history snapshot, got ${JSON.stringify(currentOwned.items)}`,
+    );
+    assert.equal(currentOwned.option.taskId, "resume-current");
+    assert.equal(
+      currentOwned.items.filter((item) => item.type === "tool").length,
+      0,
+      "a plain question-and-answer child has no tool rows to project",
+    );
+
+    // The /agents adapter: the same child read through the panel's reader, which
+    // re-checks attribution and stamps the recorded TPS onto the metadata.
+    const persisted = await readPersistedAgentHistoryTranscript(
+      piDir,
+      "parent-a",
+      entries.find((entry) => entry.id === "resume-current")!,
+      { models: modelFactory },
+    );
+    assert.ok(persisted, "the /agents reader returns the attributed durable child");
+    assert.ok(persisted.items.some((item) => item.type === "assistant" && item.text.includes("Current transcript body.")));
+    assert.equal(persisted.cwd, "/work/child", "the child's recorded cwd is carried through");
+    assert.equal(typeof persisted.agent?.model, "string", "pi.agent reaches the panel footer");
+
+    // Attribution is re-checked after the read: another parent cannot see it.
+    assert.equal(
+      await readPersistedAgentHistoryTranscript(
+        piDir,
+        "parent-b",
+        entries.find((entry) => entry.id === "resume-current")!,
+        { models: modelFactory },
+      ),
+      undefined,
+      "a different parent session gets no transcript",
+    );
 
     const activeConversation = await handle.harness.conversation(activeConversationId as never, handle.context);
     assert.ok(activeConversation);
@@ -422,6 +461,13 @@ test("durable /resume lists all mapped project child tasks and snapshots history
     assert.equal(historical.option.taskId, "resume-active");
     assert.equal(historical.option.status, "running", "an active foreign-owner task is browseable as a snapshot");
     assert.ok(historical.items.some((item) => item.type === "user" && item.text.includes("active historical child task")));
+    // The child is mid-request, so there is no answer entry yet: the snapshot
+    // must show exactly the prompt, and must not invent content.
+    assert.deepEqual(
+      historical.items.map((item) => item.type),
+      ["user"],
+      "a child still waiting on its model shows its prompt and nothing fabricated",
+    );
     assert.deepEqual(after, before, "browsing a history snapshot does not alter task lifecycle metadata");
     assert.deepEqual(afterRuns, beforeRuns, "browsing a foreign active child does not mutate its durable run state");
   } finally {

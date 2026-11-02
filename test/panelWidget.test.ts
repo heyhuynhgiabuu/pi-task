@@ -951,30 +951,24 @@ test("child panel footer shows the failover model, not the stale primary", () =>
   const controller = createTaskWidgetController(new Map([["t-failover-footer", task]]), new Map());
   controller.ensureTaskWidget(context);
 
-  const transcript = new DurableTranscript({
-    type: "snapshot",
-    entries: [],
-    tools: [],
-    compactions: [],
-    inbox: [],
-    agent: {
-      model: { provider: "openai-codex", modelId: "gpt-6-luna" },
-      thinkingLevel: "max",
+  const durableView = (agent: Record<string, unknown>, live: Record<string, unknown> = {}) => ({
+    conversation: { id: 1 } as never,
+    entries: [] as never,
+    docs: {
+      "pi.agent": agent as never,
+      "pi.live": live as never,
+      "pi.usage": { models: {}, tools: {} } as never,
     },
-    usage: {
-      models: {},
-      tools: {},
-      totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costTotal: 0 },
-    },
-  } as never);
-  // A failover configure commit reaches the live view as an agent_changed event.
-  transcript.apply([{
-    type: "agent_changed",
-    agent: {
-      model: { provider: "opencode-go", modelId: "deepseek-flash" },
-      thinkingLevel: "max",
-    },
-  } as never]);
+  });
+  const transcript = new DurableTranscript(durableView({
+    model: { provider: "openai-codex", modelId: "gpt-6-luna" },
+    thinkingLevel: "max",
+  }) as never);
+  // A failover configure commit reaches the live view as a new pi.agent.
+  transcript.apply(durableView({
+    model: { provider: "opencode-go", modelId: "deepseek-flash" },
+    thinkingLevel: "max",
+  }) as never);
   controller.setLiveTranscript(
     "t-failover-footer",
     transcript.items(),

@@ -16,7 +16,7 @@ import {
   initTheme,
   ToolExecutionComponent,
 } from "@earendil-works/pi-coding-agent";
-import type { AgentEvent, SnapshotEvent } from "@earendil-works/pi-durable";
+import type { ConversationView, EntryRecord, LiveState } from "@earendil-works/pi-durable";
 import { DurableTranscript } from "../src/panel/durable-transcript.js";
 import { createTaskTranscriptPane } from "../src/panel/task-pane.js";
 import type { TranscriptItem } from "../src/panel/transcript.js";
@@ -39,19 +39,24 @@ const EDIT_ARGS = {
 };
 const WRITE_ARGS = { path: "tools/new.py", content: WRITE_CONTENT };
 
-function makeSnapshot(entries: SnapshotEvent["entries"] = [], tools: SnapshotEvent["tools"] = []): SnapshotEvent {
+/** The conversation view a durable watch hands a renderer (pi-durable 1.5). */
+function makeView(
+  entries: readonly EntryRecord[] = [],
+  live: LiveState = {},
+  agent: Record<string, unknown> = {},
+): ConversationView {
   return {
-    type: "snapshot",
+    conversation: { id: 1 } as ConversationView["conversation"],
     entries,
-    tools,
-    compactions: [],
-    inbox: [],
-    agent: {},
-    usage: { models: {}, tools: {}, totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costTotal: 0 } },
-  } as SnapshotEvent;
+    docs: {
+      "pi.agent": agent as never,
+      "pi.live": live as never,
+      "pi.usage": { models: {}, tools: {} } as never,
+    },
+  };
 }
 
-function entry(id: number, message: unknown) {
+function entry(id: number, message: unknown): EntryRecord {
   return { id, conversationId: 1, kind: "pi.message", model: [message] } as never;
 }
 
@@ -100,7 +105,7 @@ function writeToolResult() {
 }
 
 /** One assistant turn calling edit and write, both answered. */
-function editAndWriteEntries(): SnapshotEvent["entries"] {
+function editAndWriteEntries(): EntryRecord[] {
   return [
     entry(1, { role: "user", content: [{ type: "text", text: "Align the script." }] }),
     entry(2, assistant([
@@ -160,7 +165,7 @@ function transcriptLines(rendered: string): string[] {
 }
 
 test("durable snapshot keeps edit diff details and write content for the pane", () => {
-  const transcript = new DurableTranscript(makeSnapshot(editAndWriteEntries()));
+  const transcript = new DurableTranscript(makeView(editAndWriteEntries()));
   const items = transcript.items();
 
   assert.deepEqual(toolItem(items, "call-edit").details, {
@@ -178,19 +183,21 @@ test("durable snapshot keeps edit diff details and write content for the pane", 
 });
 
 test("durable snapshot keeps a running tool's details and output", () => {
-  const transcript = new DurableTranscript(makeSnapshot(
+  const transcript = new DurableTranscript(makeView(
     [
       entry(1, assistant([
         { type: "toolCall", id: "call-running", name: "edit", arguments: EDIT_ARGS },
       ])),
     ],
-    [{
-      callId: "call-running",
-      name: "edit",
-      status: "running",
-      output: "partial",
-      details: { diff: EDIT_DIFF },
-    }] as SnapshotEvent["tools"],
+    {
+      tools: [{
+        callId: "call-running",
+        name: "edit",
+        status: "running",
+        output: "partial",
+        details: { diff: EDIT_DIFF },
+      }],
+    },
   ));
 
   const item = toolItem(transcript.items(), "call-running");
@@ -199,19 +206,15 @@ test("durable snapshot keeps a running tool's details and output", () => {
   assert.deepEqual(item.details, { diff: EDIT_DIFF });
 });
 
-test("durable live events keep edit diff details through the result entry", () => {
-  const transcript = new DurableTranscript(makeSnapshot());
-  transcript.apply([
-    { type: "tool_execution_start", toolCallId: "call-edit", toolName: "edit", args: EDIT_ARGS },
-    { type: "tool_execution_update", toolCallId: "call-edit", toolName: "edit", details: { diff: "preview" } },
-  ] as AgentEvent[]);
+test("durable live view keeps edit diff details through the result entry", () => {
+  const transcript = new DurableTranscript(makeView([], {
+    tools: [{ callId: "call-edit", name: "edit", status: "running", details: { diff: "preview" } }],
+  }));
 
   assert.deepEqual(toolItem(transcript.items(), "call-edit").details, { diff: "preview" });
 
-  transcript.apply([
-    { type: "message_start", message: editToolResult() },
-    { type: "message_end", entry: entry(3, editToolResult()) },
-  ] as AgentEvent[]);
+  // The tool result entry settles the call and carries the authoritative details.
+  transcript.apply(makeView([entry(3, editToolResult())]));
 
   const item = toolItem(transcript.items(), "call-edit");
   assert.equal(item.inProgress, false);
@@ -223,7 +226,7 @@ test("durable live events keep edit diff details through the result entry", () =
 });
 
 test("task pane renders a durable edit diff and write content through pi's renderers", () => {
-  const transcript = new DurableTranscript(makeSnapshot(editAndWriteEntries()));
+  const transcript = new DurableTranscript(makeView(editAndWriteEntries()));
   const rendered = renderPane(transcript.items());
 
   assert.match(rendered, /edit/, "the edit header survives");
@@ -238,7 +241,7 @@ test("task pane renders a durable edit diff and write content through pi's rende
 });
 
 test("task pane still renders a failed edit's error text", () => {
-  const transcript = new DurableTranscript(makeSnapshot([
+  const transcript = new DurableTranscript(makeView([
     entry(1, assistant([
       { type: "toolCall", id: "call-edit", name: "edit", arguments: EDIT_ARGS },
     ])),
@@ -289,7 +292,7 @@ test("durable edit and write rows match pi's own tool rendering line for line", 
 
   // No user/assistant text in this projection, so the pane's content is exactly
   // the two tool rows.
-  const transcript = new DurableTranscript(makeSnapshot(editAndWriteEntries().slice(1)));
+  const transcript = new DurableTranscript(makeView(editAndWriteEntries().slice(1)));
   assert.deepEqual(
     transcriptLines(renderPane(transcript.items())),
     native.map((line) => line.trimEnd()).filter((line) => line !== ""),
@@ -297,13 +300,12 @@ test("durable edit and write rows match pi's own tool rendering line for line", 
 });
 
 test("task pane draws the edit diff of a live durable tool result", () => {
-  const transcript = new DurableTranscript(makeSnapshot());
-  transcript.apply([
-    { type: "tool_execution_start", toolCallId: "call-edit", toolName: "edit", args: EDIT_ARGS },
-    { type: "tool_execution_end", toolCallId: "call-edit", toolName: "edit", entry: entry(3, editToolResult()) },
-    { type: "message_start", message: editToolResult() },
-    { type: "message_end", entry: entry(3, editToolResult()) },
-  ] as AgentEvent[]);
+  const transcript = new DurableTranscript(makeView(
+    [entry(2, assistant([
+      { type: "toolCall", id: "call-edit", name: "edit", arguments: EDIT_ARGS },
+    ])), entry(3, editToolResult())],
+    { tools: [{ callId: "call-edit", name: "edit", status: "done" }] },
+  ));
 
   const rendered = renderPane(transcript.items());
   assert.match(rendered, /-2 old line/);

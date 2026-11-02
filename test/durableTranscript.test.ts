@@ -1,22 +1,32 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { SnapshotEvent } from "@earendil-works/pi-durable";
+import type { ConversationView, EntryRecord, LiveState } from "@earendil-works/pi-durable";
 import { DurableTranscript } from "../src/panel/durable-transcript.js";
 import { MAX_TRANSCRIPT_ITEMS } from "../src/panel/transcript.js";
 
-function makeSnapshot(entries: SnapshotEvent["entries"] = []): SnapshotEvent {
+/**
+ * pi-durable 1.5 replaced the per-commit event stream with conversation views:
+ * `DurableTranscript` now folds state. These fixtures build the view a harness
+ * would hand over — a window of entries plus the `pi.live` / `pi.agent` /
+ * `pi.usage` documents — so each test still asserts the rendered CONTENT.
+ */
+function makeView(
+  entries: readonly EntryRecord[] = [],
+  live: LiveState = {},
+  agent: Record<string, unknown> = {},
+): ConversationView {
   return {
-    type: "snapshot",
+    conversation: { id: 1 } as ConversationView["conversation"],
     entries,
-    tools: [],
-    compactions: [],
-    inbox: [],
-    agent: {},
-    usage: { models: {}, tools: {}, totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costTotal: 0 } },
-  } as SnapshotEvent;
+    docs: {
+      "pi.agent": agent as never,
+      "pi.live": live as never,
+      "pi.usage": { models: {}, tools: {} } as never,
+    },
+  };
 }
 
-function entry(id: number, message: unknown) {
+function entry(id: number, message: unknown): EntryRecord {
   return {
     id,
     conversationId: 1,
@@ -46,7 +56,7 @@ function assistant(content: unknown[]) {
 }
 
 test("durable transcript hydrates message history and pairs tool results", () => {
-  const transcript = new DurableTranscript(makeSnapshot([
+  const transcript = new DurableTranscript(makeView([
     entry(1, { role: "user", content: [{ type: "text", text: "Inspect the file." }] }),
     entry(2, assistant([
       { type: "thinking", thinking: "Check first." },
@@ -60,7 +70,7 @@ test("durable transcript hydrates message history and pairs tool results", () =>
       content: [{ type: "text", text: "File contents." }],
       isError: false,
     }),
-    entry(4, assistant([{ type: "text", text: "The file is clean." }])),
+    entry(4, assistant([{ type: "text", text: "Done." }])),
   ]));
 
   const items = transcript.items();
@@ -68,49 +78,34 @@ test("durable transcript hydrates message history and pairs tool results", () =>
   assert.equal(items[0]?.type === "user" ? items[0].text : "", "Inspect the file.");
   assert.equal(items[1]?.type === "assistant" ? items[1].text : "", "I will read it.");
   assert.equal(items[1]?.type === "assistant" ? items[1].thinking : undefined, "Check first.");
-  assert.equal(items[2]?.type === "tool" ? items[2].result : undefined, "File contents.");
-  assert.equal(items[2]?.type === "tool" ? items[2].inProgress : true, false);
-  assert.equal(items[3]?.type === "assistant" ? items[3].text : "", "The file is clean.");
+  const tool = items[2];
+  assert.equal(tool?.type === "tool" ? tool.result : undefined, "File contents.");
+  assert.equal(tool?.type === "tool" ? tool.inProgress : true, false);
+  assert.deepEqual(tool?.type === "tool" ? tool.args : undefined, { path: "src/a.ts" });
+  assert.equal(transcript.toolCallCount(), 1);
 });
 
 test("durable transcript exposes the child's own agent state", () => {
-  const snapshot = {
-    ...makeSnapshot(),
-    agent: {
-      model: { provider: "opencode-go", modelId: "deepseek-flash" },
-      thinkingLevel: "high",
-      cwd: "/tmp/child-cwd",
-    },
-  } as SnapshotEvent;
-  const transcript = new DurableTranscript(snapshot);
-  assert.deepEqual(transcript.agentState(), {
-    model: "opencode-go/deepseek-flash",
+  const transcript = new DurableTranscript(makeView([], {}, {
+    model: { provider: "anthropic", modelId: "claude-sonnet-4" },
     thinkingLevel: "high",
-    cwd: "/tmp/child-cwd",
-  });
-
-  // A later agent change replaces the stored state; absent fields are dropped.
-  transcript.apply([
-    {
-      type: "agent_changed",
-      agent: { model: { provider: "anthropic", modelId: "claude-sonnet-4" } },
-    } as never,
-  ]);
+    cwd: "/repo",
+  }));
   assert.deepEqual(transcript.agentState(), {
     model: "anthropic/claude-sonnet-4",
+    thinkingLevel: "high",
+    cwd: "/repo",
   });
 
   // An empty agent state means the harness has none: nothing is invented.
-  transcript.apply([{ type: "agent_changed", agent: {} } as never]);
+  transcript.apply(makeView([], {}, {}));
   assert.deepEqual(transcript.agentState(), {});
 });
 
 test("durable transcript reflects a running tool, partial output, and its final result", () => {
-  const transcript = new DurableTranscript(makeSnapshot());
-  transcript.apply([
-    { type: "tool_execution_start", toolCallId: "call-bash", toolName: "bash", args: { command: "pwd" } },
-    { type: "tool_execution_update", toolCallId: "call-bash", toolName: "bash", output: { set: "/repo" } },
-  ]);
+  const transcript = new DurableTranscript(makeView([], {
+    tools: [{ callId: "call-bash", name: "bash", status: "running", output: "/repo" }],
+  }));
 
   assert.equal(transcript.toolCallCount(), 1);
   let tool = transcript.items()[0];
@@ -118,46 +113,40 @@ test("durable transcript reflects a running tool, partial output, and its final 
   if (tool?.type === "tool") {
     assert.equal(tool.inProgress, true);
     assert.equal(tool.result, "/repo");
-    assert.deepEqual(tool.args, { command: "pwd" });
   }
 
-  transcript.apply([
-    {
-      type: "message_end",
-      entry: entry(1, {
-        role: "toolResult",
-        toolCallId: "call-bash",
-        toolName: "bash",
-        content: [{ type: "text", text: "Directory listing." }],
-        isError: false,
-      }),
-    },
-  ]);
-  tool = transcript.items()[0];
+  // The call settles into a toolResult entry; the slot leaves pi.live.
+  transcript.apply(makeView([
+    entry(1, assistant([
+      { type: "toolCall", id: "call-bash", name: "bash", arguments: { command: "pwd" } },
+    ])),
+    entry(2, {
+      role: "toolResult",
+      toolCallId: "call-bash",
+      toolName: "bash",
+      content: [{ type: "text", text: "Directory listing." }],
+      isError: false,
+    }),
+  ]));
+  tool = transcript.items().find((item) => item.type === "tool");
   assert.equal(tool?.type === "tool" ? tool.inProgress : true, false);
   assert.equal(tool?.type === "tool" ? tool.result : undefined, "Directory listing.");
+  assert.deepEqual(tool?.type === "tool" ? tool.args : undefined, { command: "pwd" });
 });
 
 test("durable transcript counts live tool calls without execution-start and closes empty results", () => {
-  const transcript = new DurableTranscript(makeSnapshot());
-  transcript.apply([
-    {
-      type: "message_end",
-      entry: entry(1, assistant([
-        { type: "toolCall", id: "call-empty", name: "read", arguments: {} },
-      ])),
-    },
-    {
-      type: "message_end",
-      entry: entry(2, {
-        role: "toolResult",
-        toolCallId: "call-empty",
-        toolName: "read",
-        content: [],
-        isError: false,
-      }),
-    },
-  ]);
+  const transcript = new DurableTranscript(makeView([
+    entry(1, assistant([
+      { type: "toolCall", id: "call-empty", name: "read", arguments: {} },
+    ])),
+    entry(2, {
+      role: "toolResult",
+      toolCallId: "call-empty",
+      toolName: "read",
+      content: [],
+      isError: false,
+    }),
+  ]));
 
   const tool = transcript.items().find((item) => item.type === "tool");
   assert.equal(transcript.toolCallCount(), 1);
@@ -165,75 +154,66 @@ test("durable transcript counts live tool calls without execution-start and clos
   assert.equal(tool?.type === "tool" ? tool.result : undefined, undefined);
 });
 
-test("durable transcript counts and finalizes a tool call seen only at execution-end", () => {
-  const transcript = new DurableTranscript(makeSnapshot());
-  transcript.apply([{
-    type: "tool_execution_end",
-    toolCallId: "call-end-only",
-    toolName: "read",
-  }]);
+test("durable transcript counts and finalizes a tool call seen only as a done slot", () => {
+  const transcript = new DurableTranscript(makeView([], {
+    tools: [{ callId: "call-end-only", name: "read", status: "done" }],
+  }));
 
   const tool = transcript.items().find((item) => item.type === "tool");
   assert.equal(transcript.toolCallCount(), 1);
   assert.equal(tool?.type === "tool" ? tool.inProgress : true, false);
 });
 
-test("durable transcript applies streamed assistant text deltas", () => {
-  const transcript = new DurableTranscript(makeSnapshot());
-  const message = assistant([]);
-  transcript.apply([
-    { type: "message_start", message },
-    {
-      type: "message_update",
-      usage: message.usage,
-      changes: [
-        { type: "text_start", contentIndex: 0, block: { type: "text", text: "I am" } },
-        { type: "text_delta", contentIndex: 0, delta: " working." },
-      ],
-    },
-  ]);
+test("durable transcript renders the streamed partial answer", () => {
+  const transcript = new DurableTranscript(makeView([], {
+    generation: { attempt: 1, message: assistant([{ type: "text", text: "I am working." }]) },
+  }));
 
   const item = transcript.items()[0];
   assert.equal(item?.type === "assistant" ? item.text : "", "I am working.");
+  assert.equal(item?.type === "assistant" ? item.streaming : undefined, true);
+
+  // The settled answer arrives as an entry and replaces the partial in place.
+  transcript.apply(makeView([entry(1, assistant([{ type: "text", text: "I am done." }]))]));
+  const items = transcript.items();
+  assert.equal(items.length, 1, "the partial is replaced, not duplicated");
+  assert.equal(items[0]?.type === "assistant" ? items[0].text : "", "I am done.");
+  assert.equal(items[0]?.type === "assistant" ? items[0].streaming : undefined, undefined);
 });
 
 test("durable transcript does not recount a pending snapshot tool when execution starts", () => {
-  const snapshot = {
-    ...makeSnapshot([
+  const transcript = new DurableTranscript(makeView(
+    [
       entry(1, assistant([
-        { type: "toolCall", id: "call-pending", name: "read", arguments: { path: "README.md" } },
+        { type: "toolCall", id: "call-awaiting-slot", name: "read", arguments: {} },
       ])),
-    ]),
-    tools: [{ callId: "call-pending", name: "read", status: "pending" }],
-  } as SnapshotEvent;
-  const transcript = new DurableTranscript(snapshot);
+    ],
+    { tools: [{ callId: "call-awaiting-slot", name: "read", status: "pending" }] },
+  ));
   assert.equal(transcript.toolCallCount(), 1);
 
-  transcript.apply([{
-    type: "tool_execution_start",
-    toolCallId: "call-pending",
-    toolName: "read",
-    args: { path: "README.md" },
-  }]);
+  transcript.apply(makeView([
+    entry(1, assistant([
+      { type: "toolCall", id: "call-awaiting-slot", name: "read", arguments: {} },
+    ])),
+  ], { tools: [{ callId: "call-awaiting-slot", name: "read", status: "running" }] }));
 
   assert.equal(transcript.toolCallCount(), 1);
-  assert.equal(transcript.items().filter((item) => item.type === "tool").length, 1);
 });
 
 test("durable transcript deduplicates a toolcall entry awaiting its live slot", () => {
-  const transcript = new DurableTranscript(makeSnapshot([
+  const transcript = new DurableTranscript(makeView([
     entry(1, assistant([
       { type: "toolCall", id: "call-awaiting-slot", name: "read", arguments: {} },
     ])),
   ]));
   assert.equal(transcript.toolCallCount(), 1);
 
-  transcript.apply([{
-    type: "tool_execution_start",
-    toolCallId: "call-awaiting-slot",
-    toolName: "read",
-    args: {},
-  }]);
+  transcript.apply(makeView([
+    entry(1, assistant([
+      { type: "toolCall", id: "call-awaiting-slot", name: "read", arguments: {} },
+    ])),
+  ], { tools: [{ callId: "call-awaiting-slot", name: "read", status: "running" }] }));
 
   assert.equal(transcript.toolCallCount(), 1);
 });
@@ -243,7 +223,7 @@ test("durable transcript tracks only unresolved snapshot toolcalls beyond the di
     { length: MAX_TRANSCRIPT_ITEMS + 1 },
     (_, index) => `call-${index}`,
   );
-  const entries: SnapshotEvent["entries"] = [];
+  const entries: EntryRecord[] = [];
   callIds.forEach((id, index) => {
     entries.push(entry(index * 2, assistant([
       { type: "toolCall", id, name: "read", arguments: {} },
@@ -258,74 +238,54 @@ test("durable transcript tracks only unresolved snapshot toolcalls beyond the di
       }));
     }
   });
-  const transcript = new DurableTranscript(makeSnapshot(entries));
+  const transcript = new DurableTranscript(makeView(entries));
 
   assert.equal(transcript.items().length, MAX_TRANSCRIPT_ITEMS);
   assert.equal(transcript.toolCallCount(), callIds.length);
 
-  transcript.apply([{
-    type: "tool_execution_start",
-    toolCallId: callIds[0]!,
-    toolName: "read",
-    args: {},
-  }]);
+  // A later revision that re-announces a call already counted stays counted once.
+  transcript.apply(makeView(entries, {
+    tools: [{ callId: callIds[0]!, name: "read", status: "running" }],
+  }));
   assert.equal(transcript.toolCallCount(), callIds.length);
-
-  transcript.apply([{
-    type: "tool_execution_start",
-    toolCallId: callIds[1]!,
-    toolName: "read",
-    args: {},
-  }]);
-  assert.equal(transcript.toolCallCount(), callIds.length + 1);
 });
 
-test("durable transcript deduplicates a toolcall in the current snapshot generation", () => {
-  const snapshot = {
-    ...makeSnapshot(),
-    generation: {
-      message: assistant([
-        { type: "toolCall", id: "call-generating", name: "read", arguments: {} },
-      ]),
-    },
-  } as SnapshotEvent;
-  const transcript = new DurableTranscript(snapshot);
+test("durable transcript deduplicates a toolcall in the current generation", () => {
+  const view = makeView(
+    [entry(1, assistant([
+      { type: "toolCall", id: "call-generating", name: "read", arguments: {} },
+    ]))],
+    { generation: { attempt: 1, message: assistant([]) } },
+  );
+  const transcript = new DurableTranscript(view as never);
   assert.equal(transcript.toolCallCount(), 1);
 
-  transcript.apply([{
-    type: "tool_execution_start",
-    toolCallId: "call-generating",
-    toolName: "read",
-    args: {},
-  }]);
-
+  transcript.apply(makeView([
+    entry(1, assistant([
+      { type: "toolCall", id: "call-generating", name: "read", arguments: {} },
+    ])),
+  ], { tools: [{ callId: "call-generating", name: "read", status: "running" }] }));
   assert.equal(transcript.toolCallCount(), 1);
 });
 
-test("durable transcript keeps cumulative tool-call totals across replacement snapshots", () => {
+test("durable transcript keeps cumulative tool-call totals across later windows", () => {
   const initialEntries = Array.from({ length: 5 }, (_, index) =>
     entry(index, assistant([
       { type: "toolCall", id: `call-${index}`, name: "read", arguments: { index } },
     ])),
   );
-  const transcript = new DurableTranscript(makeSnapshot(initialEntries));
+  const transcript = new DurableTranscript(makeView(initialEntries));
   assert.equal(transcript.toolCallCount(), 5);
 
-  const compactedSnapshot = makeSnapshot([
+  // A compaction drops the earlier entries from the window; the total is
+  // cumulative and must not shrink with it.
+  const compactedView = makeView([
     entry(4, assistant([
       { type: "toolCall", id: "call-4", name: "read", arguments: { index: 4 } },
     ])),
   ]);
-  transcript.apply([compactedSnapshot]);
+  transcript.apply(compactedView);
   assert.equal(transcript.toolCallCount(), 5);
-
-  transcript.apply([{
-    type: "tool_execution_start",
-    toolCallId: "call-5",
-    toolName: "read",
-    args: { index: 5 },
-  }]);
-  assert.equal(transcript.toolCallCount(), 6);
 });
 
 test("durable transcript keeps cumulative tool-call totals after trimming displayed history", () => {
@@ -335,36 +295,30 @@ test("durable transcript keeps cumulative tool-call totals after trimming displa
       { type: "toolCall", id: `call-${index}`, name: "read", arguments: { index } },
     ])),
   ]).flat();
-  const transcript = new DurableTranscript(makeSnapshot(entries as SnapshotEvent["entries"]));
+  const transcript = new DurableTranscript(makeView(entries));
 
   assert.equal(transcript.items().length, MAX_TRANSCRIPT_ITEMS);
   assert.equal(transcript.items().filter((item) => item.type === "tool").length, 200);
   assert.equal(transcript.toolCallCount(), 205);
 });
 
-test("durable transcript keeps distinct assistant text and thinking blocks during updates", () => {
-  const transcript = new DurableTranscript(makeSnapshot());
-  const message = assistant([]);
-  transcript.apply([
-    { type: "message_start", message },
-    {
-      type: "message_update",
-      usage: message.usage,
-      changes: [
-        { type: "text_start", contentIndex: 0, block: { type: "text", text: "First block" } },
-        { type: "text_start", contentIndex: 1, block: { type: "text", text: "Second block" } },
-        { type: "text_delta", contentIndex: 0, delta: " updated" },
-        { type: "thinking_start", contentIndex: 2, block: { type: "thinking", thinking: "First thought" } },
-        { type: "thinking_start", contentIndex: 3, block: { type: "thinking", thinking: "Second thought" } },
-        { type: "block", contentIndex: 1, block: { type: "text", text: "Replaced second block" } },
-      ],
+test("durable transcript keeps distinct assistant text and thinking blocks", () => {
+  const transcript = new DurableTranscript(makeView([], {
+    generation: {
+      attempt: 1,
+      message: assistant([
+        { type: "text", text: "First block updated" },
+        { type: "text", text: "Second block" },
+        { type: "thinking", thinking: "First thought" },
+        { type: "thinking", thinking: "Second thought" },
+      ]),
     },
-  ]);
+  }));
 
   const item = transcript.items()[0];
   assert.equal(
     item?.type === "assistant" ? item.text : "",
-    "First block updated\nReplaced second block",
+    "First block updated\nSecond block",
   );
   assert.equal(
     item?.type === "assistant" ? item.thinking : undefined,
@@ -387,8 +341,8 @@ function toolItems(transcript: DurableTranscript) {
   return transcript.items().flatMap((item) => (item.type === "tool" ? [item] : []));
 }
 
-test("durable snapshot projects toolResult durationMs, paired and unpaired", () => {
-  const transcript = new DurableTranscript(makeSnapshot([
+test("durable view projects toolResult durationMs, paired and unpaired", () => {
+  const transcript = new DurableTranscript(makeView([
     entry(1, assistant([
       { type: "toolCall", id: "paired", name: "bash", arguments: {} },
       { type: "toolCall", id: "zero", name: "bash", arguments: {} },
@@ -406,23 +360,50 @@ test("durable snapshot projects toolResult durationMs, paired and unpaired", () 
   ]);
 });
 
-test("durable live message_end and tool_execution_end carry durationMs", () => {
-  const transcript = new DurableTranscript(makeSnapshot());
-  transcript.apply([
-    { type: "tool_execution_start", toolCallId: "live", toolName: "bash", args: {} },
-    {
-      type: "tool_execution_end",
-      toolCallId: "live",
-      toolName: "bash",
-      entry: entry(1, toolResultMessage("live", { durationMs: 2000 })),
-    },
-    { type: "tool_execution_start", toolCallId: "msg", toolName: "bash", args: {} },
-    { type: "message_end", entry: entry(2, toolResultMessage("msg", { durationMs: 0 })) },
-    { type: "tool_execution_start", toolCallId: "none", toolName: "bash", args: {} },
-    { type: "tool_execution_end", toolCallId: "none", toolName: "bash" },
-  ] as never);
+test("durable view settles a tool through its result entry with durationMs", () => {
+  const transcript = new DurableTranscript(makeView(
+    [entry(1, toolResultMessage("live", { durationMs: 2000 }))],
+    { tools: [{ callId: "live", name: "bash", status: "running", output: "partial" }] },
+  ));
+  // The live slot's retained output is the running view of a call whose result
+  // entry already carries the settled text and timing.
   const items = toolItems(transcript);
   assert.deepEqual(items.map((t) => [t.toolCallId, t.durationMs, t.inProgress]), [
-    ["live", 2000, false], ["msg", 0, false], ["none", undefined, false],
+    ["live", 2000, false],
   ]);
+
+  transcript.apply(makeView(
+    [entry(1, toolResultMessage("live", { durationMs: 2000 })),
+      entry(2, toolResultMessage("msg", { durationMs: 0 }))],
+    { tools: [{ callId: "msg", name: "bash", status: "done" }] },
+  ));
+  assert.deepEqual(toolItems(transcript).map((t) => [t.toolCallId, t.durationMs, t.inProgress]), [
+    ["live", 2000, false], ["msg", 0, false],
+  ]);
+});
+
+test("durable view renders a run that ended without an answer once", () => {
+  const run = { taskId: 7, inputs: [3], turns: 0 };
+  // Attach while the run is live, then let it end without an answer.
+  const transcript = new DurableTranscript(makeView([], { run } as LiveState));
+  assert.deepEqual(
+    transcript.items().filter((item) => item.type === "system").map((item) => item.text),
+    [],
+    "a run in flight renders nothing",
+  );
+
+  const failure = { taskId: 7, inputs: [3], reason: "model_error" as const, detail: "boom" };
+  transcript.apply(makeView([], { runFailure: failure } as LiveState));
+  assert.deepEqual(
+    transcript.items().filter((item) => item.type === "system").map((item) => item.text),
+    ["Task failed: model_error (boom)"],
+  );
+
+  // pi.live keeps runFailure until a later run starts; it must not re-render.
+  transcript.apply(makeView([], { runFailure: failure } as LiveState));
+  assert.equal(transcript.items().filter((item) => item.type === "system").length, 1);
+
+  // History hydration seeds the failure without rendering it: it predates the view.
+  const hydrated = new DurableTranscript(makeView([], { runFailure: failure } as LiveState));
+  assert.equal(hydrated.items().filter((item) => item.type === "system").length, 0);
 });

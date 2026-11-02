@@ -1,5 +1,13 @@
 # TODO
 
+- [x] Prepare v0.14.4: pi-durable and its siblings move to 1.5.0. The live child transcript is
+  projected from `Conversation.watch()` views now that `watchEvents()` and its five types are gone,
+  `onSnapshot`/`onEvents` collapse into one internal `onView`, tool schemas build with
+  `@earendil-works/pi-schema` instead of `typebox`, and the two 1.5 behaviour changes tsc cannot see
+  (`onReport`'s single `Report`, `SessionEnd.kind`) are handled. Typecheck, build and 865/865 tests
+  pass locally, and the transcript tests were shown failing when the watch is made silent.
+  Releasing to the registry stays a manual step.
+
 - [x] Prepare v0.14.3: a durable task refuses a resume under a different `agent_type` (#35), a Herdr outage keeps the task, recovers only a `completed` result from the session file and warns once instead of stalling silently, no settle runs after `stop()`, and poll warnings reach the user instead of `console.error` under the TUI. Typecheck, build, smoke and 864/864 tests pass locally; Greptile and GitGuardian pass on the PR. Releasing to the registry stays a manual step.
 
 - [x] Prepare v0.14.2: a `read` of a running agent now says its text is the previous run's message and that the result self-delivers, `list` says the same in one clause, and the README records why `read` stays (cross-session and subagent→main are the only channels `task` cannot reach). Typecheck and 862/862 tests pass locally. Releasing to the registry stays a manual step.

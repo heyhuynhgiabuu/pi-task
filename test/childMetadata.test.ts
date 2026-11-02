@@ -11,7 +11,7 @@ import {
   childRunTokensPerSecond,
   type ChildUsageMetadata,
 } from "../src/panel/child-metadata.js";
-import { CompactionEntry, ResetEntry, type SnapshotEvent } from "@earendil-works/pi-durable";
+import { CompactionEntry, ResetEntry, type ConversationView, type EntryRecord, type LiveState } from "@earendil-works/pi-durable";
 import { DurableTranscript } from "../src/panel/durable-transcript.js";
 import { readTaskSessionFile } from "../src/panel/transcript.js";
 import { subscribeSdkChildMetadata } from "../src/subagent/sdk-metadata.js";
@@ -70,34 +70,51 @@ test("durable child TPS counts whole runs including tools, excludes idle, and ne
   const message = { role: "assistant", content: [{ type: "text", text: "answer" }],
     usage: usage(100, 80, 20, 0, 0.1), stopReason: "toolUse", durationMs: 2_000 };
   const entry = { id: 1, conversationId: 1, kind: "pi.assistant", model: [message] };
-  const snapshot = durableSnapshot([entry] as never, message.usage);
-  const transcript = new DurableTranscript(snapshot, () => now);
+  const view = durableView([entry] as never, message.usage);
+  const transcript = new DurableTranscript(view, () => now);
   assert.equal(transcript.usageMetadata().latestTokensPerSecond, undefined, "response duration is not run duration");
-  transcript.apply([{ type: "run_start", inputs: [1] } as never]);
+
+  // A run starts when pi.live.run appears; its clock starts with this view.
+  // `run.first` names the run's first entry, so output it committed before this
+  // view still counts toward the run.
+  const running = (turns = 0, first = 1) => durableView([entry] as never, message.usage, {
+    run: { taskId: 1, inputs: [1], turns, first: first as never },
+  });
+  transcript.apply(running());
   now = 2_000;
-  transcript.apply([{ type: "message_end", entry } as never]);
-  transcript.apply([{ type: "message_end", entry } as never]); // Duplicate observations cannot count twice.
+  transcript.apply(running());
+  transcript.apply(running()); // Unchanged views cannot count twice.
   assert.equal(transcript.usageMetadata().latestTokensPerSecond, undefined, "publish only at run end, like main TPS");
+
   now = 10_000; // Includes 8 seconds executing a tool.
-  transcript.apply([{ type: "tool_execution_end", toolCallId: "slow", toolName: "bash" } as never]);
+  transcript.apply(durableView([entry] as never, message.usage, {
+    run: { taskId: 1, inputs: [1], turns: 1, first: 1 as never },
+    tools: [{ callId: "slow", name: "bash", status: "done" }],
+  }));
   now = 12_000;
-  transcript.apply([
-    { type: "message_end", entry: { ...entry, id: 2, model: [{ ...message, usage: usage(10, 20, 0, 0, 0), stopReason: "stop" }] } },
-    { type: "run_end", inputs: [1] },
-  ] as never);
+  const settled = { ...entry, id: 2, model: [{ ...message, usage: usage(10, 20, 0, 0, 0), stopReason: "stop" }] };
+  transcript.apply(durableView([entry, settled] as never, message.usage));
   assert.equal(transcript.usageMetadata().latestTokensPerSecond, 100 / 12);
   assert.ok(formatChildMetadata(transcript.usageMetadata()).usage.includes("TPS 8.3"));
+
+  // A later run measures from its own first entry, so idle time between runs is excluded.
   now = 60_000;
-  transcript.apply([{ type: "run_start", inputs: [2] } as never]);
+  transcript.apply(durableView([entry, settled] as never, message.usage, {
+    run: { taskId: 2, inputs: [2], turns: 0, first: 3 as never },
+  }));
   now = 62_000;
-  transcript.apply([
-    { type: "message_end", entry: { ...entry, id: 3, model: [{ ...message, usage: usage(10, 50, 0, 0, 0) }] } },
-    { type: "run_end", inputs: [2] },
-  ] as never);
+  const third = { ...entry, id: 3, model: [{ ...message, usage: usage(10, 50, 0, 0, 0) }] };
+  transcript.apply(durableView([entry, settled, third] as never, message.usage));
   assert.equal(transcript.usageMetadata().latestTokensPerSecond, 25, "idle between steering runs is not active run time");
-  transcript.apply([{ ...snapshot, run: { inputs: [3] } } as never]);
-  transcript.apply([{ type: "run_end", inputs: [3] } as never]);
-  assert.equal(transcript.usageMetadata().latestTokensPerSecond, undefined, "a snapshot gap invalidates unobserved run timing");
+
+  // A run already in flight at the first view has no observed start: no rate.
+  const inFlight = new DurableTranscript(
+    durableView([entry] as never, message.usage, { run: { taskId: 3, inputs: [3], turns: 0 } }),
+    () => 100_000,
+  );
+  inFlight.apply(durableView([entry] as never, message.usage, { run: { taskId: 3, inputs: [3], turns: 1 } }));
+  inFlight.apply(durableView([entry] as never, message.usage));
+  assert.equal(inFlight.usageMetadata().latestTokensPerSecond, undefined, "a run observed only mid-flight has no measured start");
 });
 
 test("Pi child JSONL TPS requires a recorded run measurement, not assistant or tool durations", () => {
@@ -173,85 +190,101 @@ function usage(input: number, output: number, cacheRead: number, cacheWrite: num
   };
 }
 
-function durableSnapshot(entries: SnapshotEvent["entries"], totals: ReturnType<typeof usage>): SnapshotEvent {
+/** The conversation view a durable watch hands a renderer (pi-durable 1.5). */
+function durableView(
+  entries: readonly EntryRecord[],
+  totals: ReturnType<typeof usage>,
+  live: LiveState = {},
+): ConversationView {
   return {
-    type: "snapshot",
+    conversation: { id: 1 } as ConversationView["conversation"],
     entries,
-    tools: [],
-    compactions: [],
-    inbox: [],
-    agent: { model: { provider: "openai", modelId: "child-model" } },
-    usage: { models: { "openai/child-model": totals }, tools: {} },
-  } as unknown as SnapshotEvent;
+    docs: {
+      "pi.agent": { model: { provider: "openai", modelId: "child-model" } } as never,
+      "pi.live": live as never,
+      "pi.usage": { models: { "openai/child-model": totals }, tools: {} } as never,
+    },
+  };
 }
 
-test("durable child metadata follows UsageState and assistant events; compaction/reset invalidate context only", () => {
+test("durable child metadata follows the view documents; compaction/reset invalidate context only", () => {
   const assistant = (u: ReturnType<typeof usage>, stopReason = "stop") => ({
     role: "assistant",
     content: [{ type: "text", text: "answer" }],
     usage: u,
     stopReason,
   });
-  const transcript = new DurableTranscript(durableSnapshot([
-    { id: "a1", conversationId: "c1", kind: "pi.assistant", model: [assistant(usage(100, 10, 40, 5, 0.1))] },
-  ] as never, usage(100, 10, 40, 5, 0.1)));
-  const metadata = () => (transcript as unknown as { usageMetadata(): ChildUsageMetadata }).usageMetadata();
+  const entry = (id: string, u: ReturnType<typeof usage>): EntryRecord => ({
+    id: id as never, conversationId: "c1" as never, kind: "pi.assistant", model: [assistant(u)],
+  });
+  const view = durableView([
+    { id: "a1", conversationId: "c1", kind: "pi.assistant", model: [assistant(usage(100, 10, 40, 5, 0.1))] } as never,
+  ], usage(100, 10, 40, 5, 0.1));
+  const transcript = new DurableTranscript(view, () => 0);
+  const metadata = () => transcript.usageMetadata();
 
   assert.deepEqual(metadata().usageTotals, { input: 100, output: 10, cacheRead: 40, cacheWrite: 5, cost: 0.1 });
   assert.equal(metadata().latestCacheHitRate, 40 / 145 * 100);
   assert.deepEqual(metadata().contextUsage, { tokens: 145 });
 
-  transcript.apply([{
-    type: "message_update",
-    usage: usage(200, 10, 100, 0, 0.2),
-    changes: [],
-  } as never]);
+  // The in-flight partial is where streamed usage lives now.
+  transcript.apply(durableView([
+    { id: "a1", conversationId: "c1", kind: "pi.assistant", model: [assistant(usage(100, 10, 40, 5, 0.1))] } as never,
+  ], usage(100, 10, 40, 5, 0.1), {
+    generation: { attempt: 1, message: assistant(usage(200, 10, 100, 0, 0.2)) },
+  }));
   assert.equal(metadata().latestCacheHitRate, 100 / 300 * 100, "cache-hit is from the latest assistant prompt, not cumulative totals");
   assert.deepEqual(metadata().contextUsage, { tokens: 300 }, "in-flight assistant usage updates current context");
 
-  transcript.apply([{
-    type: "usage_changed",
-    usage: { models: { "openai/child-model": usage(350, 20, 150, 10, 0.3) }, tools: {} },
-  } as never]);
-  assert.deepEqual(metadata().usageTotals, { input: 350, output: 20, cacheRead: 150, cacheWrite: 10, cost: 0.3 }, "usage_changed replaces the cumulative ledger instead of double-counting it");
+  // pi.usage is the authoritative cumulative ledger.
+  transcript.apply({
+    conversation: { id: 1 } as ConversationView["conversation"],
+    entries: [{ id: "a1", conversationId: "c1", kind: "pi.assistant", model: [assistant(usage(100, 10, 40, 5, 0.1))] } as never],
+    docs: {
+      "pi.agent": { model: { provider: "openai", modelId: "child-model" } } as never,
+      "pi.live": {} as never,
+      "pi.usage": { models: { "openai/child-model": usage(350, 20, 150, 10, 0.3) }, tools: {} } as never,
+    },
+  });
+  assert.deepEqual(metadata().usageTotals, { input: 350, output: 20, cacheRead: 150, cacheWrite: 10, cost: 0.3 }, "the usage document replaces the cumulative ledger instead of double-counting it");
 
-  transcript.apply([{ type: "compaction_start", taskId: "compact-1", reason: "threshold", blocking: true } as never]);
+  // A live compaction invalidates the measured context but keeps the ledger.
+  const withCompaction = (compactions: LiveState["compactions"]) => ({
+    conversation: { id: 1 } as ConversationView["conversation"],
+    entries: [{ id: "a1", conversationId: "c1", kind: "pi.assistant", model: [assistant(usage(100, 10, 40, 5, 0.1))] } as never],
+    docs: {
+      "pi.agent": { model: { provider: "openai", modelId: "child-model" } } as never,
+      "pi.live": { compactions } as never,
+      "pi.usage": { models: { "openai/child-model": usage(350, 20, 150, 10, 0.3) }, tools: {} } as never,
+    },
+  });
+  transcript.apply(withCompaction([
+    { taskId: 1 as never, trigger: "threshold", blocking: true, attempt: 1 },
+  ]));
   assert.deepEqual(metadata().contextUsage, { tokens: null }, "context becomes unknown during compaction");
   assert.equal(metadata().usageTotals.cost, 0.3, "compaction does not erase cumulative spend");
-  transcript.apply([{ type: "compaction_end", taskId: "compact-1", reason: "threshold" } as never]);
+  transcript.apply(withCompaction([]));
   assert.equal(metadata().contextUsage?.tokens, null, "compaction stays unknown until a new assistant measurement");
 
-  transcript.apply([{
-    type: "message_end",
-    entry: {
-      id: "a2", conversationId: "c1", kind: "pi.assistant",
-      model: [assistant(usage(20, 3, 80, 0, 0.05))],
-    },
-  } as never]);
+  transcript.apply(durableView([
+    { id: "a1", conversationId: "c1", kind: "pi.assistant", model: [assistant(usage(100, 10, 40, 5, 0.1))] } as never,
+    entry("a2", usage(20, 3, 80, 0, 0.05)),
+  ], usage(350, 20, 150, 10, 0.3)));
   assert.deepEqual(metadata().contextUsage, { tokens: 100 }, "post-compaction assistant usage restores measured context");
-  assert.equal(metadata().usageTotals.cost, 0.3, "message events do not double-count the authoritative UsageState");
+  assert.equal(metadata().usageTotals.cost, 0.3, "entries do not double-count the authoritative UsageState");
 
-  transcript.apply([{
-    type: "snapshot",
-    entries: [
-      { id: "old", conversationId: "c1", kind: "pi.assistant", model: [assistant(usage(10, 2, 5, 0, 0.02))] },
-      { id: "reset", conversationId: "c1", kind: ResetEntry.kind },
-    ],
-    tools: [], compactions: [], inbox: [], agent: {},
-    usage: { models: { "openai/child-model": usage(370, 25, 230, 10, 0.35) }, tools: {} },
-  } as unknown as SnapshotEvent]);
-  assert.deepEqual(metadata().contextUsage, { tokens: null }, "reset snapshots do not reuse pre-reset context");
+  // A persisted compaction boundary in the window also invalidates context.
+  transcript.apply(durableView([
+    { id: "old", conversationId: "c1", kind: "pi.assistant", model: [assistant(usage(10, 2, 5, 0, 0.02))] } as never,
+    { id: "reset", conversationId: "c1", kind: ResetEntry.kind } as never,
+  ], usage(370, 25, 230, 10, 0.35)));
+  assert.deepEqual(metadata().contextUsage, { tokens: null }, "reset windows do not reuse pre-reset context");
   assert.equal(metadata().usageTotals.cost, 0.35, "reset preserves the new child's cumulative ledger");
 
-  transcript.apply([{
-    type: "snapshot",
-    entries: [
-      { id: "old", conversationId: "c1", kind: "pi.assistant", model: [assistant(usage(10, 2, 5, 0, 0.02))] },
-      { id: "compact", conversationId: "c1", kind: CompactionEntry.kind },
-    ],
-    tools: [], compactions: [], inbox: [], agent: {},
-    usage: { models: { "openai/child-model": usage(390, 27, 235, 10, 0.4) }, tools: {} },
-  } as unknown as SnapshotEvent]);
+  transcript.apply(durableView([
+    { id: "old", conversationId: "c1", kind: "pi.assistant", model: [assistant(usage(10, 2, 5, 0, 0.02))] } as never,
+    { id: "compact", conversationId: "c1", kind: CompactionEntry.kind } as never,
+  ], usage(390, 27, 235, 10, 0.4)));
   assert.equal(metadata().contextUsage?.tokens, null, "a persisted compaction boundary invalidates previous context");
 });
 

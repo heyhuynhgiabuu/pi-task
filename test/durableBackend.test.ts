@@ -14,6 +14,23 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+import type { ConversationView } from "@earendil-works/pi-durable";
+
+/** A conversation view as a durable watch would hand it to a progress sink. */
+function durableViewFixture(
+  entries: readonly { id: number; conversationId: number; kind: string; model?: unknown[] }[] = [],
+  live: Record<string, unknown> = {},
+): ConversationView {
+  return {
+    conversation: { id: 1 } as ConversationView["conversation"],
+    entries: entries as never,
+    docs: {
+      "pi.agent": {} as never,
+      "pi.live": live as never,
+      "pi.usage": { models: {}, tools: {} } as never,
+    },
+  };
+}
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import { withClientIdentity } from "@earendil-works/pi-ai/utils/identity";
@@ -571,10 +588,10 @@ test("runDurableTask streams the child conversation snapshot and committed messa
   const root = mkdtempSync(join(tmpdir(), "pi-task-durable-events-"));
   const piDir = join(root, ".pi");
   const databasePath = join(root, "durable.sqlite");
-  let snapshot: unknown;
+  let snapshot: ConversationView | undefined;
   let transcript: DurableTranscript | undefined;
   let clock = 0;
-  const events: { type: string }[] = [];
+  const views: ConversationView[] = [];
   let handle: Awaited<ReturnType<typeof openDurableHarness>> | undefined;
   try {
     handle = await openDurableHarness(piDir, {
@@ -586,18 +603,31 @@ test("runDurableTask streams the child conversation snapshot and committed messa
       databasePath,
       taskId: "t-visible-events",
       task: "Say hello.",
-      onSnapshot: (value) => {
-        snapshot = value;
-        transcript = new DurableTranscript(value, () => (clock += 1_000));
+      onView: (view) => {
+        if (!snapshot) snapshot = view;
+        if (transcript) transcript.apply(view);
+        else transcript = new DurableTranscript(view, () => (clock += 1_000));
+        views.push(view);
       },
-      onEvents: (batch) => { events.push(...batch); transcript?.apply(batch); },
     });
 
     assert.equal(result.answer, "Visible child answer.");
-    assert.ok(snapshot, "watch attaches with an initial conversation snapshot");
-    assert.ok(events.some((event) => event.type === "message_end"), "committed child messages reach the view");
-    assert.ok(events.some((event) => event.type === "run_start"));
-    assert.ok(events.some((event) => event.type === "run_end"), "run ends reach the view before watch cleanup");
+    assert.ok(snapshot, "watch attaches with an initial conversation view");
+    // The view must carry the child's actual conversation, not just attach:
+    // these assertions fail if the watch silently died.
+    assert.ok(
+      views.some((view) => view.entries.some((entry) =>
+        (entry.model ?? []).some((message) => message.role === "assistant"))),
+      "the child's answer entry reaches the view",
+    );
+    assert.ok(
+      views.some((view) => (view.docs["pi.live"] as { run?: unknown }).run !== undefined),
+      "the run is observed live through pi.live",
+    );
+    assert.ok(
+      views.some((view) => view.entries.length > 0),
+      "committed entries arrive after attachment",
+    );
     const output = Object.values(result.usage.models).reduce((sum, usage) => sum + usage.outputTokens, 0);
     assert.ok(output > 0);
     assert.equal(transcript?.usageMetadata().latestTokensPerSecond, output, "one-second injected run clock yields actual child output TPS");
@@ -1990,20 +2020,11 @@ test("foreground durable work registers and opens its task view until the result
         attributedBeforeSettlement = readTaskSessionHistory(join(root, ".pi")).find(
           (entry) => entry.id === "t-foreground-view",
         )?.conversationId === "durable-foreground-child";
-        input.onSnapshot?.({
-          type: "snapshot",
-          entries: [],
-          tools: [],
-          compactions: [],
-          inbox: [],
-          agent: {},
-          usage: { models: {}, tools: {}, totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costTotal: 0 } },
-        } as never);
-        input.onEvents?.([{ type: "run_start", inputs: [1] } as never]);
+        input.onView?.(durableViewFixture());
+        input.onView?.(durableViewFixture([], { run: { taskId: 1, inputs: [1], turns: 0 } }));
         await new Promise((resolve) => setTimeout(resolve, 5));
-        input.onEvents?.([{
-          type: "message_end",
-          entry: {
+        input.onView?.(durableViewFixture([
+          {
             id: 1,
             conversationId: 1,
             kind: "pi.assistant",
@@ -2017,15 +2038,13 @@ test("foreground durable work registers and opens its task view until the result
               timestamp: 0,
             }],
           },
-        } as never, {
-          type: "message_end",
-          entry: {
+          {
             id: 2,
             conversationId: 1,
             kind: "pi.toolResult",
             model: [{ role: "toolResult", toolCallId: "call-no-start", toolName: "read", content: [], isError: false }],
           },
-        } as never, { type: "run_end", inputs: [1] } as never]);
+        ]));
         return {
           conversationId: "durable-foreground-child",
           answer: "Status: success\\nThe task view stayed active.",
@@ -2212,8 +2231,8 @@ test("panel stop latches durable cancellation before submission admission", asyn
           ...input,
           databasePath,
           models: () => models,
-          onSnapshot: (snapshot) => {
-            input.onSnapshot?.(snapshot);
+          onView: (view) => {
+            input.onView?.(view);
             editor.handleInput("\x1b[B");
             editor.handleInput("\x1b[B");
             editor.handleInput("x");
@@ -2293,8 +2312,8 @@ test("foreground task control latches cancellation before durable submission adm
         ...input,
         databasePath,
         models: () => models,
-        onSnapshot: (snapshot) => {
-          input.onSnapshot?.(snapshot);
+        onView: (view) => {
+          input.onView?.(view);
           cancelPromise = handleTaskControl(
             { operation: "cancel", taskId },
             {
@@ -2483,21 +2502,10 @@ test("durable background completion receipt carries its usage ledger", async () 
       },
       runTask: async (input) => {
         runInput = input;
-        input.onSnapshot?.({
-          type: "snapshot",
-          entries: [],
-          tools: [],
-          compactions: [],
-          inbox: [],
-          agent: {},
-          usage: { models: {}, tools: {}, totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costTotal: 0 } },
-        } as never);
-        input.onEvents?.([{
-          type: "tool_execution_start",
-          toolCallId: "call-background-read",
-          toolName: "read",
-          args: { path: "README.md" },
-        } as never]);
+        input.onView?.(durableViewFixture());
+        input.onView?.(durableViewFixture([], {
+          tools: [{ callId: "call-background-read", name: "read", status: "running" }],
+        }));
         await runnerGate;
         if (input.signal?.aborted) throw new DurableTaskCancelledError();
         return {
@@ -3869,7 +3877,7 @@ test("durable failover reconfigures the same child conversation and resubmits", 
   const provider = faux.provider.id;
   let handle: Awaited<ReturnType<typeof openDurableHarness>> | undefined;
   let conversationId: string | undefined;
-  const events: { type?: string }[] = [];
+  const views: ConversationView[] = [];
   try {
     const result = await runDurableTask({
       piDir,
@@ -3882,7 +3890,7 @@ test("durable failover reconfigures the same child conversation and resubmits", 
       ],
       modelRegistry: registry,
       onSubmitted: (id) => { conversationId = id; },
-      onEvents: (batch) => { events.push(...(batch as unknown as { type?: string }[])); },
+      onView: (view) => { views.push(view); },
     });
     assert.equal(result.answer, "Fallback answer.");
     assert.deepEqual(calls, ["primary", "fallback"], "strict frontmatter order, one call per model");
@@ -3902,8 +3910,8 @@ test("durable failover reconfigures the same child conversation and resubmits", 
       "both attempts are submitted into the same conversation",
     );
     assert.ok(
-      events.some((event) => event.type === "agent_changed"),
-      "the configure commit reaches the live transcript (footer) stream",
+      views.some((view) => (view.docs["pi.agent"] as { model?: { modelId?: string } }).model?.modelId === "fallback"),
+      "the configure commit reaches the live view the footer reads",
     );
   } finally {
     if (handle) await handle.harness.close(handle.context);
@@ -4570,10 +4578,14 @@ test("a real mid-session storage failure closes the harness, reports it, and the
     reopened = await openDurableHarness(piDir, { databasePath });
     assert.notEqual(reopened, first, "the failed harness is not reused");
     const end = await first.harness.closed;
-    assert.equal(end.reason, "failed", "a storage error ends the harness as failed");
+    assert.equal(end.kind, "failed", "a storage error ends the harness as failed");
+    // The report is one `Report` object tagged by `kind` (pi-durable 1.5), so
+    // assert the kind AND the reason: a prefix-only check passed while the
+    // handler was logging `[object Object]`.
     assert.ok(
-      reports.some((line) => line.startsWith("[pi-task] durable harness report:")),
-      `onReport logs the storage failure, got: ${JSON.stringify(reports)}`,
+      reports.some((line) =>
+        line.includes("durable harness report (storage_failed):") && line.includes("database is locked")),
+      `onReport logs the storage failure and its reason, got: ${JSON.stringify(reports)}`,
     );
     const reopenedRoot = await reopened.harness.root(reopened.context);
     await reopenedRoot.commit(async (tx) => {

@@ -1,6 +1,6 @@
 # TODO
 
-- [x] Prepare v0.14.4: pi-durable and its siblings move to 1.5.0. The live child transcript is
+- [x] Prepare v0.15.0: pi-durable and its siblings move to 1.5.0. The live child transcript is
   projected from `Conversation.watch()` views now that `watchEvents()` and its five types are gone,
   `onSnapshot`/`onEvents` collapse into one internal `onView`, tool schemas build with
   `@earendil-works/pi-schema` instead of `typebox`, and the two 1.5 behaviour changes tsc cannot see

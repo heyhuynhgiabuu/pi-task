@@ -6,10 +6,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
-## [0.14.4] - 2026-11-02
+## [0.15.0] - 2026-11-02
 
 ### Changed
 
+- **Requires pi 1.5.** The `@earendil-works/pi-ai` and `@earendil-works/pi-coding-agent` peer
+  ranges move to `>=1.5.0`, and `@earendil-works/pi-durable` becomes an optional `>=1.5.0` peer.
+  The transcript depends on pi-durable's tagged watch calls, and a host still on 1.4 would install
+  this happily and then show a transcript that never updates, without an error.
 - pi-durable (and chord, pi-ai, pi-coding-agent, pi-tui) moved to 1.5.0. pi-durable 1.5 removes
   `watchEvents()` with the `AgentEvent`, `AgentEventStream`, `SnapshotEvent`, `MessageChange` and
   `ToolEventCall` types, so the live child transcript is now projected from `Conversation.watch()`
@@ -33,6 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
   removed `reason`.
 - A child transcript no longer double-counts a run's tokens, and a run observed only mid-flight
   still reports no rate rather than a fabricated one.
+- A live tool row keeps the timestamp of the entry that created it, and a tool that streamed
+  running output but returned an empty result no longer shows that stale output as its result.
 
 ## [0.14.3] - 2026-11-01
 

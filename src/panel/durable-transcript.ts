@@ -480,14 +480,19 @@ export class DurableTranscript {
     }
     const current = this.transcript[index];
     if (current?.type !== "tool") return;
+    const settled = item.inProgress === false;
     const merged: ToolTranscriptItem = {
       ...current,
       ...item,
       args: Object.keys(item.args).length > 0 ? item.args : current.args,
+      // A slot carries only what it knows, so a missing field falls back to the
+      // entry's. A settled result is authoritative, including an empty one:
+      // `??` would keep running output the tool did not actually return.
       details: item.details ?? current.details,
       durationMs: item.durationMs ?? current.durationMs,
-      result: item.result ?? current.result,
+      result: settled ? item.result : (item.result ?? current.result),
       isError: item.isError ?? current.isError,
+      timestamp: item.timestamp || current.timestamp,
       // A settled call never returns to running.
       inProgress: current.inProgress === false ? false : item.inProgress,
     };

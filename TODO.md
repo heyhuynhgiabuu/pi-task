@@ -1,6 +1,6 @@
 # TODO
 
-- [x] Prepare v0.15.0: pi-durable and its siblings move to 1.5.0. The live child transcript is
+- [x] Prepare v0.15.1: `@earendil-works/pi-schema` moves from peer to dependency after 0.15.0 failed to load at all in a real pi install (`Cannot find module`), because an extension's installer only installs `dependencies`. Verified by installing the packed tarball into a clean directory and importing the three schema modules that had failed. Superseded by v0.15.0 notes above. pi-durable and its siblings move to 1.5.0. The live child transcript is
   projected from `Conversation.watch()` views now that `watchEvents()` and its five types are gone,
   `onSnapshot`/`onEvents` collapse into one internal `onView`, tool schemas build with
   `@earendil-works/pi-schema` instead of `typebox`, and the two 1.5 behaviour changes tsc cannot see

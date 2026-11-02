@@ -6,6 +6,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-11-02
+
+### Fixed
+
+- **`@earendil-works/pi-schema` is a dependency, not a peer.** The tool schemas import it at
+  module load (`dist/tool/schema.js`), and a pi extension's installer installs only its
+  `dependencies`, so the extension failed to load at all with
+  `Cannot find module '@earendil-works/pi-schema'`. 0.15.0 could not be loaded.
+
 ## [0.15.0] - 2026-11-02
 
 ### Changed

@@ -1,5 +1,13 @@
 # TODO
 
+- [ ] oh-my-pi (omp) findings (scout, 2026-11-14 — github.com/can1357/oh-my-pi, 39k★, v18.x hard fork):
+  - [ ] Adopt `spawns:` policy frontmatter (declarative per-agent spawn rights, like omp) — complements existing `tools:`/`disallowed_tools:`.
+  - [ ] Adopt schema-validated `yield` results: omp children expose typed fields readable at `agent://<id>/field`; upgrade `results_from` fan-in to consume typed fields instead of raw text (less context bloat, more precise injection).
+  - [ ] Watch omp's leaderboard cells (Ripple/Flint/GLM/DeepSeek trials already run, private staging) — the free A/B on whether subagent decomposition beats stock Pi. If decomposition wins, double down on orchestration; if tied/loses, pi-task's differentiation is durability alone.
+  - [ ] Known conflict if a user runs pi-task on omp: omp remaps `@earendil-works/*` but does not bundle `pi-durable`/`pi-schema` (pi-task would load a second upstream runtime), and both register a tool named `task`. Document in README as unsupported, or add a startup detection warning.
+- [ ] Harness-leaderboard takeaways (joelniklaus, 2026-11-13 — GLM-5.3-Flash + DeepSeek-V4.1-Flash cells, stock Pi top-tier at v1.2.0):
+  - [ ] Add a context-overflow/provider-400 retry class distinct from task failure (the leaderboard's losing harnesses all died on wrong fallback defaults — reply caps, wrong context windows — not on task difficulty; board re-runs infra failures and excludes them).
+  - [ ] Track a solve-all-attempts reliability metric for unattended orchestration (the board's "solved all 3 vs ≥1" is the right KPI for what durable retry buys).
 - [ ] Durable retry follow-ups, mapped to existing pi-durable 1.5.1 capabilities (explore-verified in dist typings, 2026-11-14):
   - [x] Item A (S): retry submits `{ type: "continue" }` when the failed run left an owed answer — shipped beyond the original sketch: host picks the variant (`harness/types.d.ts:51-64`) AND the bridge adds a bounded `:input` fallback (continue settling `unanswered/nothing_to_answer` resubmits the prompt once under a fresh `requestId:input` key, since pi-durable refuses a type change per requestId). The "model decides whether to redo" caveat is removed for owed-answer retries.
   - [x] Item B (S): render real attempt state instead of parsing error text — `LiveState.generation.attempt` / `.retry{at,error}` (`harness/live.d.ts:136-151`) already arrive in every view revision; extend `observeGeneration` in `src/panel/durable-transcript.ts:330-342` (currently reads only `.message`). Note: that covers pi-durable's INTERNAL retries; pi-task's outer retryCount stays in history (`retry.ts:127-133`).

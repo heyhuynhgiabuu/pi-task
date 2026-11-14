@@ -24,6 +24,13 @@ import { truncateResultText } from "../result-passing.js";
 import { killAgentPaneStrict } from "../subagent/tmux.js";
 import { isStaleExtensionCtxError } from "../stale-ctx.js";
 import { isProcessAliveOrUnknown } from "../process.js";
+import {
+  durableOwnerLivenessOf,
+  probeDurableStoreHolder,
+  type DurableLockHolder,
+  type DurableOwnerLiveness,
+} from "../subagent/durable-store-lock.js";
+import { resolveDurableStorePath } from "../subagent/durable.js";
 import type {
   BackgroundTask,
   CompletionDeliveryOutcome,
@@ -517,6 +524,12 @@ export const LOST_NOTICE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
  * a notice that was saved is never repeated and rows from before this check
  * need no migration. Comparison siblings keep their own delivered marker, and
  * a task whose owner process is still alive is that process's to deliver.
+ *
+ * `ownerLiveness` is the durable-only second opinion on that last rule: a store
+ * lock proves a foreign live owner better than a recycled pid can, and it can
+ * also disprove a pid that merely looks alive. It answers for durable rows
+ * only; an absent resolver or an `unknown` verdict keeps the pid rule exactly
+ * as it was, and terminal/SDK rows never consult it.
  */
 export function findLostCompletionNotices(input: {
   history: readonly TaskSessionHistoryEntry[];
@@ -524,9 +537,22 @@ export function findLostCompletionNotices(input: {
   persisted: (deliveryIds: ReadonlySet<string>) => ReadonlySet<string>;
   now?: number;
   isProcessAlive?: (pid: number) => boolean;
+  /** Durable rows only; undefined keeps this row on the pid rule. */
+  ownerLiveness?: (entry: TaskSessionHistoryEntry) => DurableOwnerLiveness | undefined;
 }): FinishedTaskEntry[] {
   const now = input.now ?? Date.now();
   const isAlive = input.isProcessAlive ?? isProcessAliveOrUnknown;
+  /** Whether this row's owner process is gone, so its notice is this process's to replay. */
+  const ownerGone = (entry: TaskSessionHistoryEntry): boolean => {
+    if (entry.ownerPid === undefined) return true;
+    if (entry.ownerPid === process.pid) return false;
+    if (entry.backend === "durable") {
+      const verdict = input.ownerLiveness?.(entry);
+      if (verdict === "alive") return false;
+      if (verdict === "dead") return true;
+    }
+    return !isAlive(entry.ownerPid);
+  };
   const candidates = input.history.filter((entry): entry is FinishedTaskEntry =>
     isFinishedTaskEntry(entry) &&
     entry.background &&
@@ -534,7 +560,7 @@ export function findLostCompletionNotices(input: {
     entry.ownerSessionId === input.sessionId &&
     entry.completedAt !== undefined &&
     now - entry.completedAt <= LOST_NOTICE_MAX_AGE_MS &&
-    (entry.ownerPid === undefined || (entry.ownerPid !== process.pid && !isAlive(entry.ownerPid)))
+    ownerGone(entry)
   );
   if (candidates.length === 0) return [];
   const saved = input.persisted(
@@ -572,6 +598,57 @@ export function lostCompletionNotice(entry: FinishedTaskEntry): {
       completion_delivery_id: completionDeliveryId(entry.id, entry.startedAt),
     },
   };
+}
+
+/**
+ * Resolve the durable-row liveness verdicts {@link findLostCompletionNotices}
+ * wants, once per affected store. Durable rows of `sessionId` whose recorded
+ * pid looks dead are probed: a store lock proves a foreign live owner even
+ * when the row's pid looks dead, and one probe serves every row in that
+ * store. Best-effort — a store that cannot be probed leaves its rows on the
+ * pid rule.
+ */
+export async function resolveLostNoticeDurableLiveness(input: {
+  history: readonly TaskSessionHistoryEntry[];
+  sessionId: string;
+  piDir: string;
+  now?: number;
+  isProcessAlive?: (pid: number) => boolean;
+}): Promise<Map<string, DurableOwnerLiveness>> {
+  const now = input.now ?? Date.now();
+  const isAlive = input.isProcessAlive ?? isProcessAliveOrUnknown;
+  const probes = new Map<string, Promise<DurableLockHolder | undefined>>();
+  const verdicts = new Map<string, DurableOwnerLiveness>();
+  for (const entry of input.history) {
+    if (
+      entry.backend !== "durable" ||
+      entry.ownerPid === undefined ||
+      !isFinishedTaskEntry(entry) ||
+      !entry.background ||
+      entry.comparisonGroupId !== undefined ||
+      entry.ownerSessionId !== input.sessionId ||
+      entry.completedAt === undefined ||
+      now - entry.completedAt > LOST_NOTICE_MAX_AGE_MS
+    ) continue;
+    let databasePath: string | undefined;
+    try {
+      databasePath = resolveDurableStorePath(input.piDir, entry.durableStore);
+    } catch {
+      // A recorded store outside `durable/` cannot be probed; the pid decides.
+      continue;
+    }
+    let probe = probes.get(databasePath);
+    if (!probe) {
+      probe = probeDurableStoreHolder(databasePath);
+      probes.set(databasePath, probe);
+    }
+    verdicts.set(entry.id, durableOwnerLivenessOf({
+      holder: await probe,
+      ownerPid: entry.ownerPid,
+      isProcessAlive: isAlive,
+    }));
+  }
+  return verdicts;
 }
 
 /**

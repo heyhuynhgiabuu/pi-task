@@ -5,6 +5,7 @@ export {
   createCompletionDeliveryQueue,
   createPersistedCompletionDeliveryScanner,
   replayLostCompletionNotices,
+  resolveLostNoticeDurableLiveness,
   type CompleteTaskOptions,
   type CompletionDeliveryQueue,
   type CompletionPhase,

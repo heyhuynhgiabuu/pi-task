@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import {
+  findTaskSessionHistory,
   readRegistry,
   updateRegistry,
   upsertTaskSessionHistory,
@@ -18,6 +19,8 @@ import {
   killAgentPaneStrictAsync,
   probePaneAsync,
 } from "../subagent/tmux.js";
+import { durableOwnerLiveness } from "../subagent/durable-store-lock.js";
+import { resolveDurableStorePath } from "../subagent/durable.js";
 import { taskRuntime, type BackgroundTask, type RegistryEntry } from "../types.js";
 import { restoredTurnBudget } from "./turn-budget.js";
 import { restoredRetryState } from "./retry.js";
@@ -73,7 +76,7 @@ export async function restoreActiveBackgroundTasks(
     return;
   }
   const staleIds: string[] = [];
-  const ownerAlive = session?.isProcessAlive ?? defaultProcessAlive;
+  const pidAlive = session?.isProcessAlive ?? defaultProcessAlive;
   const terminalReceipt = (
     entry: RegistryEntry,
     status: "done" | "failed",
@@ -197,7 +200,31 @@ export async function restoreActiveBackgroundTasks(
       session.sessionId !== "" &&
       entry.ownerSessionId !== undefined &&
       entry.ownerSessionId !== session.sessionId;
-    if (foreign && (entry.ownerPid === undefined || ownerAlive(entry.ownerPid))) {
+    // A durable entry's store lock outranks its recorded pid, so a recycled pid
+    // cannot keep a departed owner's task from being recovered. The lock is
+    // probed at the store this entry's backend uses when it records none: a
+    // durable entry left with no store confirmation keeps the pid-only gate.
+    if (foreign && entry.backend === "durable" && entry.ownerPid !== undefined) {
+      let databasePath: string | undefined;
+      try {
+        // Registry rows carry no store today, so this resolves the legacy
+        // project store. Prefer the row's recorded per-session store when
+        // history knows one — probing the wrong store must not mis-conclude
+        // "dead" for an owner whose real store is elsewhere.
+        databasePath = resolveDurableStorePath(
+          piDir,
+          findTaskSessionHistory(piDir, entry.id)?.durableStore,
+        );
+      } catch {
+        // An unresolvable store cannot be probed; the pid decides.
+      }
+      const liveness = await durableOwnerLiveness({
+        databasePath,
+        ownerPid: entry.ownerPid,
+        isProcessAlive: pidAlive,
+      });
+      if (liveness !== "dead") return;
+    } else if (foreign && (entry.ownerPid === undefined || pidAlive(entry.ownerPid))) {
       // The owner is running elsewhere (or unverifiable): leave the entry
       // untouched for that process.
       return;

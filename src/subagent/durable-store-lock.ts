@@ -22,6 +22,8 @@ import { mkdirSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync } 
 import { connect, createServer, type Server } from "node:net";
 import { basename, dirname, join } from "node:path";
 
+import { isProcessAliveOrUnknown } from "../process.js";
+
 export class DurableStoreLockedError extends Error {
   constructor(
     readonly databasePath: string,
@@ -114,14 +116,26 @@ export async function acquireDurableStoreLock(databasePath: string): Promise<() 
   };
 }
 
-async function listenExclusively(key: string): Promise<HeldLock> {
-  const hash = createHash("sha256").update(`pi-task-durable:${key}`).digest("hex").slice(0, 32);
-  const usesFile = process.platform !== "win32" && process.platform !== "linux" && process.platform !== "android";
-  const address = process.platform === "win32"
+function lockHash(key: string): string {
+  return createHash("sha256").update(`pi-task-durable:${key}`).digest("hex").slice(0, 32);
+}
+
+/** Whether the lock of this platform survives as a socket file (else abstract/pipe). */
+const LOCKS_WITH_SOCKET_FILE =
+  process.platform !== "win32" && process.platform !== "linux" && process.platform !== "android";
+
+function lockAddress(key: string, hash: string): string {
+  return process.platform === "win32"
     ? `\\\\.\\pipe\\pi-task-durable-${hash}`
-    : usesFile
+    : LOCKS_WITH_SOCKET_FILE
       ? socketFilePath(key, hash)
       : `\0pi-task-durable-${hash}`;
+}
+
+async function listenExclusively(key: string): Promise<HeldLock> {
+  const hash = lockHash(key);
+  const usesFile = LOCKS_WITH_SOCKET_FILE;
+  const address = lockAddress(key, hash);
   const server = createServer((socket) => {
     socket.end(JSON.stringify({ pid: process.pid }));
   });
@@ -201,6 +215,98 @@ function socketFilePath(key: string, hash: string): string {
   const directory = `/tmp/pi-task-${process.getuid?.() ?? 0}`;
   mkdirSync(directory, { mode: 0o700, recursive: true });
   return join(directory, `durable-${hash}.lock`);
+}
+
+/** What the store's lock socket answered, or `undefined` when it said nothing. */
+export type DurableLockHolder = { alive: boolean; pid?: number };
+
+/**
+ * What the store lock proves about a durable row's owner process. `unknown`
+ * means neither signal could decide, so the caller keeps its own semantics.
+ */
+export type DurableOwnerLiveness = "alive" | "dead" | "unknown";
+
+/**
+ * Probe a durable store's lock without acquiring it. A holder that accepts a
+ * connection proves a live process owns the store; `alive: false` means the
+ * lock is free (the owner never took it, or left it stale). `undefined` means
+ * the probe could not speak — no lock address (a missing/unresolvable store
+ * directory) or a probe that threw — so the caller must fall back to the pid.
+ */
+export async function probeDurableStoreHolder(
+  databasePath: string,
+): Promise<DurableLockHolder | undefined> {
+  try {
+    const directory = dirname(databasePath);
+    const key = join(realpathSync(directory), basename(databasePath));
+    return await probeHolder(lockAddress(key, lockHash(key)));
+  } catch {
+    // An unreadable directory or a failed probe is no evidence either way.
+    return undefined;
+  }
+}
+
+/**
+ * Combine one store's lock probe with a row's recorded pid into a single
+ * liveness verdict. Pure, so a caller that has many rows in one store probes
+ * the lock once and decides each row from it.
+ *
+ * The lock outranks the pid, which is the point: a pid is recycled, so after a
+ * reboot a dead owner's pid can name an unrelated live process, and a live
+ * owner's recorded pid can look dead. Only the lock states who owns the store
+ * now:
+ *
+ * - the row's pid is this process: `alive` — it is ours.
+ * - a foreign live process holds the store: `alive`, whatever the pid says.
+ * - this process holds the store: the pid decides. Our own hold says nothing
+ *   about a foreign row's owner (we took the store for our own work), and
+ *   calling such a row alive would block its recovery forever.
+ * - the lock is free: the pid decides — the owner may be alive and between
+ *   taking its receipt and opening the store, so a free lock is not proof of
+ *   death on its own.
+ * - no pid at all: `unknown`, leaving each caller's existing absent-pid rule in
+ *   charge (those rules are conservative; this must not loosen them).
+ *
+ * `unknown` therefore only ever arises from an absent pid, and a probe that
+ * could not speak leaves the pid as the only signal, exactly as before.
+ */
+export function durableOwnerLivenessOf(input: {
+  /** The store's lock probe, or undefined when the lock could not be probed. */
+  holder: DurableLockHolder | undefined;
+  /** The pid recorded with the row; absent means it was never recorded. */
+  ownerPid?: number | undefined;
+  /** Pid probe, so callers keep their own seam (and tests their stub). */
+  isProcessAlive?: (pid: number) => boolean;
+  /** The deciding process; overridden by tests that simulate another one. */
+  selfPid?: number;
+}): DurableOwnerLiveness {
+  const selfPid = input.selfPid ?? process.pid;
+  if (input.ownerPid === undefined) return "unknown";
+  if (input.ownerPid === selfPid) return "alive";
+  if (input.holder?.alive === true && input.holder.pid !== selfPid) return "alive";
+  return (input.isProcessAlive ?? isProcessAliveOrUnknown)(input.ownerPid) ? "alive" : "dead";
+}
+
+/**
+ * Is the process that owns a durable task's row still alive? Probes the store's
+ * lock (a live foreign holder is proof of life) and falls back to the pid. See
+ * {@link durableOwnerLivenessOf} for the precedence, and prefer probing once per
+ * store when a caller decides many rows.
+ *
+ * Best-effort by construction: an unknown store path or a throwing probe leaves
+ * today's pid behaviour untouched, and non-durable rows never reach this.
+ */
+export async function durableOwnerLiveness(input: {
+  /** Absolute store path; unknown means the lock cannot speak. */
+  databasePath?: string | undefined;
+  ownerPid?: number | undefined;
+  isProcessAlive?: (pid: number) => boolean;
+  selfPid?: number;
+}): Promise<DurableOwnerLiveness> {
+  const holder = input.databasePath === undefined
+    ? undefined
+    : await probeDurableStoreHolder(input.databasePath);
+  return durableOwnerLivenessOf({ ...input, holder });
 }
 
 /** Connect to the lock socket: accepted means a live holder. */

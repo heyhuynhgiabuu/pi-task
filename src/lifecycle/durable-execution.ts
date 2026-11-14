@@ -32,7 +32,11 @@ import {
 } from "../subagent/durable.js";
 import {
   acquireDurableStoreLock,
+  durableOwnerLivenessOf,
   isDurableStoreLockedError,
+  probeDurableStoreHolder,
+  type DurableLockHolder,
+  type DurableOwnerLiveness,
 } from "../subagent/durable-store-lock.js";
 import { gptConfigFastEnabled } from "../fast-mode.js";
 import {
@@ -589,20 +593,50 @@ export async function reconcileUnadmittedDurableTasks(deps: {
 }): Promise<string[]> {
   const reconciled: string[] = [];
   const isProcessAlive = deps.isProcessAlive ?? isProcessAliveOrUnknown;
+  // A store's lock is probed once, not once per row: every row of a store gets
+  // the same verdict from it.
+  const storeProbes = new Map<string, Promise<DurableLockHolder | undefined>>();
+  const probeStore = (databasePath: string): Promise<DurableLockHolder | undefined> => {
+    const cached = storeProbes.get(databasePath);
+    if (cached) return cached;
+    const probe = probeDurableStoreHolder(databasePath);
+    storeProbes.set(databasePath, probe);
+    return probe;
+  };
+  const storePathOf = (durableStore: string | undefined): string | undefined => {
+    try {
+      return deps.databasePath ?? resolveDurableStorePath(deps.piDir, durableStore);
+    } catch {
+      // A recorded store outside `durable/` cannot be probed; the pid decides.
+      return undefined;
+    }
+  };
+  /**
+   * Owner liveness for a durable row. The store lock outranks the pid, so a
+   * recycled pid cannot keep a dead owner's row alive. `unknown` is an absent
+   * pid: the row-dependent rules below treat it exactly as they always have.
+   */
+  const ownerAliveFor = async (history: TaskSessionHistoryEntry): Promise<DurableOwnerLiveness> => {
+    const databasePath = storePathOf(history.durableStore);
+    return durableOwnerLivenessOf({
+      holder: databasePath === undefined ? undefined : await probeStore(databasePath),
+      ownerPid: history.ownerPid,
+      isProcessAlive,
+    });
+  };
   for (const history of readTaskSessionHistory(deps.piDir)) {
-    const ownerProcessAlive = history.ownerPid === undefined
-      ? undefined
-      : isProcessAlive(history.ownerPid);
+    // Terminal/SDK rows keep pid-only semantics: this is durable-only.
+    if (history.backend !== "durable") continue;
+    const ownerLiveness = await ownerAliveFor(history);
     if (
       history.status !== "running" ||
-      history.backend !== "durable" ||
       deps.recoveredTaskIds.has(history.id) ||
       deps.activeTaskIds?.has(history.id) ||
       (history.ownerSessionId !== undefined &&
         (deps.sessionId === undefined ||
           deps.sessionId === "" ||
           history.ownerSessionId !== deps.sessionId)) ||
-      ownerProcessAlive === true
+      ownerLiveness === "alive"
     ) {
       continue;
     }
@@ -624,7 +658,7 @@ export async function reconcileUnadmittedDurableTasks(deps: {
       if (
         !history.durableRequestId ||
         history.ownerPid === undefined ||
-        ownerProcessAlive !== false
+        ownerLiveness !== "dead"
       ) continue;
       const released = await releaseUnadmittedDurableRun(
         deps.piDir,

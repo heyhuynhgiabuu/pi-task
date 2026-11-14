@@ -5,6 +5,9 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { restoreActiveBackgroundTasks } from "../src/lifecycle/restore.ts";
 import { claudeSessionFilePath } from "../src/subagent/claudeSession.ts";
+import { spawn, type ChildProcess } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { durableDatabasePath } from "../src/subagent/durable.ts";
 
 function makePiDir() {
   return mkdtempSync(join(tmpdir(), "pi-task-restore-"));
@@ -1112,6 +1115,160 @@ describe("restoreActiveBackgroundTasks turn budget (issue #30)", () => {
       assert.ok(restored, `restored for ${JSON.stringify(extra)}`);
       assert.strictEqual(restored.turnBaseline, 0, `baseline for ${JSON.stringify(extra)}`);
       assert.strictEqual(restored.wrapUp, undefined, `wrapUp for ${JSON.stringify(extra)}`);
+    }
+  });
+});
+
+// ── Durable owner liveness (TODO item C, wiring site 2) ─────────────────────
+
+/**
+ * The restore adoption gate reads a durable entry's store lock before trusting
+ * its pid, so a recycled pid (dead owner, pid now naming an unrelated live
+ * process) cannot keep the task from being recovered. Terminal/SDK entries keep
+ * pid-only semantics.
+ */
+describe("durable owner liveness in the restore adoption gate", () => {
+  const DEAD_PID = 4_000_000;
+  const lockScript = join(dirname(fileURLToPath(import.meta.url)), "durable-lock-child.ts");
+
+  async function holdStore(databasePath: string): Promise<ChildProcess> {
+    const child = spawn(process.execPath, ["--import", "tsx", lockScript, databasePath, "hold"], {
+      env: process.env,
+      stdio: ["ignore", "pipe", "inherit"],
+    });
+    await new Promise<void>((resolve, reject) => {
+      let output = "";
+      child.stdout!.on("data", (chunk: Buffer) => {
+        output += chunk.toString();
+        if (output.includes("held")) resolve();
+      });
+      child.once("exit", (code) => reject(new Error(`lock child exited early: ${code}`)));
+      setTimeout(() => reject(new Error("lock child never reported")), 20_000).unref();
+    });
+    return child;
+  }
+
+  async function kill(child: ChildProcess): Promise<void> {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    child.kill("SIGKILL");
+    await exited;
+  }
+
+  // A durable entry has no pane: a persisted `paneId` is migrated into a tmux
+  // handle (and overwrites `backend`) by `migrateRegistryEntry`.
+  function durableForeignEntry(piDir: string, id: string, over: Record<string, unknown> = {}) {
+    const taskDir = join(piDir, "artifacts", "sessions", id);
+    writeSession(taskDir, `task-${id}`);
+    return {
+      id,
+      dir: taskDir,
+      sessionName: `task-${id}`,
+      startedAt: Date.now() - 1000,
+      backend: "durable",
+      agentType: "scout",
+      description: "durable foreign task",
+      ownerSessionId: "sess-a",
+      ownerPid: DEAD_PID,
+      ...over,
+    };
+  }
+
+  it("recovers a durable orphan whose pid is dead and whose store lock is free", async () => {
+    const piDir = makePiDir();
+    writeJson(join(piDir, "task-registry.json"), [durableForeignEntry(piDir, "task-durable-free")]);
+    await restoreActiveBackgroundTasks(
+      piDir,
+      new Map(),
+      // A durable entry has no pane, so the pane probe says nothing is alive.
+      () => false,
+      () => {},
+      { sessionId: "sess-b", isProcessAlive: () => false },
+    );
+    // A free lock agrees with the dead pid, so the orphan is settled as before.
+    assert.deepEqual(
+      readJson<Array<{ id: string }>>(join(piDir, "task-registry.json")),
+      [],
+      "the dead ownered durable entry is settled and removed",
+    );
+    const history = readJson<Array<{ id: string; status: string }>>(
+      join(piDir, "task-session-history.json"),
+    );
+    assert.equal(history[0]?.status, "failed", "a terminal receipt is recorded");
+  });
+
+  it("a free lock never overrules a live-looking pid, so the recycled-pid risk stays conservative", async () => {
+    // The one case the lock cannot decide: nobody holds the store (the owner may
+    // be between writing its receipt and opening it), so a pid that looks alive
+    // still keeps the entry — exactly today's behavior.
+    const piDir = makePiDir();
+    writeJson(join(piDir, "task-registry.json"), [durableForeignEntry(piDir, "task-durable-live-pid")]);
+    let closeCount = 0;
+    await restoreActiveBackgroundTasks(
+      piDir,
+      new Map(),
+      () => true,
+      () => { closeCount += 1; },
+      { sessionId: "sess-b", isProcessAlive: () => true },
+    );
+    assert.equal(closeCount, 0, "a live-looking pid keeps the durable entry");
+  });
+
+  it("keeps a durable task out when another live process holds its store", async () => {
+    const piDir = makePiDir();
+    const holder = await holdStore(durableDatabasePath(piDir));
+    try {
+      writeJson(join(piDir, "task-registry.json"), [durableForeignEntry(piDir, "task-durable-held")]);
+      let closeCount = 0;
+      const backgroundTasks = new Map();
+      await restoreActiveBackgroundTasks(
+        piDir,
+        backgroundTasks,
+        () => true,
+        () => { closeCount += 1; },
+        { sessionId: "sess-b", isProcessAlive: () => false },
+      );
+      // The pid is provably dead, yet the store's live holder proves the owner.
+      assert.equal(closeCount, 0, "a foreign live lock holder keeps the entry");
+      assert.equal(backgroundTasks.size, 0, "and it is never adopted here");
+      assert.equal(
+        readJson<Array<{ id: string }>>(join(piDir, "task-registry.json")).length,
+        1,
+        "registry entry left for its owner",
+      );
+    } finally {
+      await kill(holder);
+    }
+  });
+
+  it("never consults the store lock for an SDK entry, which keeps pid semantics", async () => {
+    const piDir = makePiDir();
+    const holder = await holdStore(durableDatabasePath(piDir));
+    try {
+      // An SDK row with a provably dead owner is recovered as before; only the
+      // pid decides, so the held durable store changes nothing for it.
+      const taskDir = join(piDir, "artifacts", "sessions", "task-sdk-orphan");
+      writeSession(taskDir, "task-task-sdk-orphan");
+      writeJson(join(piDir, "task-registry.json"), [
+        {
+          id: "task-sdk-orphan",
+          dir: taskDir,
+          sessionName: "task-task-sdk-orphan",
+          startedAt: Date.now() - 1000,
+          handle: { backend: "tmux", resourceId: "%sdk" },
+          backend: "sdk",
+          agentType: "scout",
+          description: "sdk orphan",
+          ownerSessionId: "sess-a",
+          ownerPid: DEAD_PID,
+        },
+      ]);
+      let closeCount = 0;
+      await restoreActiveBackgroundTasks(piDir, new Map(), () => true, () => { closeCount += 1; },
+        { sessionId: "sess-b", isProcessAlive: () => false });
+      assert.equal(closeCount, 1, "SDK orphan terminated by the pid rule alone");
+    } finally {
+      await kill(holder);
     }
   });
 });

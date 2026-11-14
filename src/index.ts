@@ -64,6 +64,7 @@ import {
   createCompletionDeliveryQueue,
   createPersistedCompletionDeliveryScanner,
   replayLostCompletionNotices,
+  resolveLostNoticeDurableLiveness,
   createTaskWidgetController,
   executeTerminalTask,
   restoreActiveBackgroundTasks,
@@ -744,14 +745,25 @@ export default function (pi: ExtensionAPI) {
       // Without a session file there is nothing to check a notice against, so
       // every start would replay every finished task.
       const sessionFile = ctx.sessionManager.getSessionFile?.();
-      if (sessionFile) replayLostCompletionNotices({
-        history: readTaskSessionHistory(piDir),
-        sessionId: sessionId ?? "",
-        persisted: (ids) => persistedCompletionDeliveryIds(sessionFile, ids),
-        pi,
-        queue: completionDeliveryQueue,
-        allows: (taskId) => deliveryGuard.allows(currentSession, taskId),
-      });
+      if (sessionFile) {
+        const history = readTaskSessionHistory(piDir);
+        // Best-effort: a store that cannot be probed leaves its rows on the pid
+        // rule, exactly as before this liveness check existed.
+        const liveness = await resolveLostNoticeDurableLiveness({
+          history,
+          sessionId: sessionId ?? "",
+          piDir,
+        }).catch(() => new Map());
+        replayLostCompletionNotices({
+          history,
+          sessionId: sessionId ?? "",
+          persisted: (ids) => persistedCompletionDeliveryIds(sessionFile, ids),
+          ownerLiveness: (entry) => liveness.get(entry.id),
+          pi,
+          queue: completionDeliveryQueue,
+          allows: (taskId) => deliveryGuard.allows(currentSession, taskId),
+        });
+      }
     } catch (error) {
       console.error(
         `[pi-task] lost completion notice replay skipped: ${error instanceof Error ? error.message : String(error)}`,

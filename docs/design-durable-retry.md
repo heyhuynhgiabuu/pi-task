@@ -172,3 +172,12 @@ TUI shows a retry is happening and the child is resuming, not restarting.
   test 4.
 - Rollback: the feature is additive behind `maxRetries` (absent ⇒ zero
   behavior change); revert is a single-file revert plus the two test files.
+
+---
+
+> Status: implemented in working tree (uncommitted WIP on top of ed05235). Retry currently resubmits
+> `{ type: "input" }` with the original prompt — `{ type: "continue" }` is not wired (bridge follow-up:
+> `src/subagent/durable.ts` submits input-only), so a mid-answer ceiling retry hands the child the
+> original task again and the model decides whether to continue or redo. A crash during the backoff
+> window settles the task failed on restart (the retry chain is not resumed); recovery notices in
+> that window do not carry retry metadata.

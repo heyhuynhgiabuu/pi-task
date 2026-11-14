@@ -63,6 +63,7 @@ import {
 import { sessionViewOf, type DeliveryGuard } from "../panel/delivery.js";
 import { truncateResultText } from "../result-passing.js";
 import { durableParentOf } from "./ownership.js";
+import { planTaskRetry, type TaskRetryPlan } from "./retry.js";
 import type { TaskWidgetController } from "./widget.js";
 import { DurableTranscript, type DurableChildAgent } from "../panel/durable-transcript.js";
 import { isProcessAliveOrUnknown } from "../process.js";
@@ -95,6 +96,8 @@ export interface DurableTaskExecutionOptions {
   timeoutMinutes?: number;
   /** Retry allowance for provider/transient failures (agent frontmatter `max_retries:`). */
   maxRetries?: number;
+  /** Warn the user without a model turn (a dropped warning must never fail a task). */
+  notifyUser?: (text: string) => void;
   backgroundTasks: Map<string, BackgroundTask>;
   foregroundTasks: Map<string, BackgroundTask>;
   deliveryGuard: DeliveryGuard;
@@ -107,6 +110,37 @@ export interface DurableTaskExecutionOptions {
   ) => void;
   /** Runner injection for lifecycle tests; production uses runDurableTask. */
   runTask?: typeof runDurableTask;
+}
+
+/**
+ * A durable retry is a NEW submission on the same child, so its idempotency key
+ * must be one the harness has never seen: a reused id is deduped against the
+ * failed attempt and never runs. It carries no resume meaning. The `:call:`
+ * shape keeps `taskIdFromRequestId` able to name the task on a legacy recovery.
+ */
+function durableRetryRequestId(
+  taskId: string,
+  toolCallId: string | undefined,
+  retry: number,
+): string {
+  return durableRequestId(taskId, `${toolCallId ?? "retry"}-retry-${retry}`);
+}
+
+/** Wait out a retry backoff, ending early when the task is cancelled meanwhile. */
+function retryBackoffWait(delayMs: number, signal: AbortSignal): Promise<void> {
+  // Adding a listener to an already-aborted signal never fires, so short-circuit
+  // rather than sleeping the whole backoff before the cancel is noticed.
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, delayMs);
+    timer.unref?.();
+    signal.addEventListener("abort", done, { once: true });
+  });
 }
 
 /** Appended to a failure notice when the durable store, not the task, failed. */
@@ -624,6 +658,7 @@ export async function executeDurableTask({
   isBackground,
   timeoutMinutes,
   maxRetries,
+  notifyUser,
   backgroundTasks,
   foregroundTasks,
   deliveryGuard,
@@ -665,17 +700,30 @@ export async function executeDurableTask({
     };
   }
   const startedAt = Date.now();
-  const runnerAbortController = new AbortController();
+  // Every attempt gets its own controller: a timeout aborts the one it fired
+  // under, so rerunning with it would cancel the retry instantly.
+  let runnerAbortController = new AbortController();
   // Per-task wall-clock ceiling (per-call param, else agent frontmatter),
   // falling back to the global PI_TASK_HARD_TIMEOUT_MINUTES ceiling.
   const taskCeiling = resolveTaskTimeoutMs(timeoutMinutes, envHardTimeoutMs());
   const taskTimeoutLimitMs = () => armableTimeoutMs(taskCeiling.timeoutMs);
+  // Reads the current controller, so it stays bound across a retry.
   const forwardForegroundAbort = () => runnerAbortController.abort();
+  const warn = (text: string): void => {
+    // A warning must never change the outcome of the run that raised it.
+    try {
+      notifyUser?.(`[pi-task] ${text}`);
+    } catch {
+      // A warning that could not be shown is not a task failure.
+    }
+  };
   const model = agent.model;
   const sessionModel = ctx.model
     ? { provider: ctx.model.provider, modelId: ctx.model.id }
     : undefined;
   const requestId = durableRequestId(id, toolCallId);
+  /** Submission identity of the attempt in flight; a retry replaces it. */
+  let attemptRequestId = requestId;
   const notify = (
     content: string,
     details: Record<string, unknown>,
@@ -743,24 +791,94 @@ export async function executeDurableTask({
    * the settled primary it replaced.
    */
   let historyRequestId = requestId;
-  const noteAttemptRequestId = (attemptRequestId: string) => {
-    historyRequestId = attemptRequestId;
+  const noteAttemptRequestId = (attemptRequestIdFromRunner: string) => {
+    historyRequestId = attemptRequestIdFromRunner;
     try {
       upsertTaskSessionHistory(piDir, {
         ...historyBase,
         status: "running",
-        durableRequestId: attemptRequestId,
+        durableRequestId: attemptRequestIdFromRunner,
       });
     } catch {
       // Best-effort; the in-flight attempt still settles normally.
     }
   };
+  /**
+   * Retry bookkeeping. `retryCount` is the number of retries already
+   * scheduled, so it also indexes the next attempt. Only a background durable
+   * run retries: a foreground run has a live caller waiting on its answer (and
+   * `executeDurableTask` is never reached for a comparison sibling — the tool
+   * layer rejects `compare` on the durable backend).
+   */
+  let retryCount = 0;
+  let lastRetryReason: string | undefined;
+  const retryAllowed = isBackground;
+  /**
+   * Everything an attempt owns is rebuilt here: a fresh controller (the failed
+   * attempt's is aborted), the tracker's user-cancel handle re-bound to it, and
+   * the per-attempt progress-failure latch.
+   */
+  const beginAttempt = (rebind: boolean) => {
+    // A retry needs a controller of its own: the failed attempt's is aborted.
+    if (rebind) runnerAbortController = new AbortController();
+    progressFailureShown = false;
+    // Re-bound in one place so a live `/task` cancel always reaches the
+    // attempt that is actually running.
+    const tracker = backgroundTasks.get(id);
+    if (tracker) tracker.durableAbortController = runnerAbortController;
+  };
+  /** Classify a settled failure into a retry, or undefined when it is terminal. */
+  const planRetry = (error: unknown): TaskRetryPlan | undefined => {
+    if (!retryAllowed) return undefined;
+    const phase = failurePhase(error);
+    // A cancel is the user's decision and a storage failure leaves the run
+    // resumable on disk; neither is re-run here.
+    if (phase === "cancelled" || isDurableStorageFailure(error)) return undefined;
+    return planTaskRetry({
+      phase,
+      // The timeout error carries the ceiling wording, a provider failure its
+      // own message; the policy classifies either textually.
+      content: failureMessage(error),
+      maxRetries,
+      retryCount,
+      canRelaunch: true,
+    });
+  };
+  /** Persist the retry onto the history entry (durable tasks have no registry row). */
+  const recordRetry = (plan: TaskRetryPlan) => {
+    retryCount = plan.attempt + 1;
+    lastRetryReason = plan.reason;
+    const tracker = backgroundTasks.get(id);
+    if (tracker) tracker.retryCount = retryCount;
+    try {
+      upsertTaskSessionHistory(piDir, {
+        ...historyBase,
+        status: "running",
+        durableRequestId: historyRequestId,
+        retryCount,
+        nextRetryAt: Date.now() + plan.delayMs,
+        lastRetryReason: plan.reason,
+      });
+    } catch {
+      // Best-effort: the in-memory count still drives the retry.
+    }
+  };
+  /**
+   * The retry state on the ONE completion notice a retried task delivers. A task
+   * that never retried carries nothing, so an absent `max_retries` is unchanged.
+   */
+  const retryDetails = () => retryCount === 0
+    ? {}
+    : {
+        retry_count: retryCount,
+        ...(lastRetryReason !== undefined ? { last_retry_reason: lastRetryReason } : {}),
+      };
   const runUntimed = () =>
     (runTaskOverride ?? runDurableTask)({
       piDir,
       taskId: id,
       task: prompt,
-      requestId,
+      requestId: attemptRequestId,
       databasePath,
       cwd,
       model,
@@ -819,23 +937,53 @@ export async function executeDurableTask({
   // aborts through the runner's signal, which settles as a cancellation; the
   // flag tells that apart from a user cancel.
   const run = async () => {
-    const limitMs = taskTimeoutLimitMs();
-    let timeout: DurableTaskTimeoutError | undefined;
-    const timer = limitMs === undefined
-      ? undefined
-      : setTimeout(() => {
-          // A cancel already in flight keeps its own outcome.
-          if (runnerAbortController.signal.aborted) return;
-          timeout = new DurableTaskTimeoutError(timeoutMessage(limitMs));
-          runnerAbortController.abort();
-        }, limitMs);
-    timer?.unref();
-    try {
-      return await runUntimed();
-    } catch (error) {
-      throw timeout && error instanceof DurableTaskCancelledError ? timeout : error;
-    } finally {
-      clearTimeout(timer);
+    let pending: TaskRetryPlan | undefined;
+    for (let retry = 0; ; retry++) {
+      // The retry's controller is installed BEFORE its backoff, so a cancel
+      // that arrives while waiting lands on it and ends the task instead of
+      // resurrecting an aborted run.
+      beginAttempt(retry > 0);
+      if (pending) {
+        await retryBackoffWait(pending.delayMs, runnerAbortController.signal);
+        if (runnerAbortController.signal.aborted) {
+          throw new DurableTaskCancelledError(
+            "Durable subagent was cancelled during its retry backoff.",
+          );
+        }
+        // A fresh idempotency key: the failed attempt's id is already in the
+        // submission ledger, so a reused one would be deduped and never run.
+        attemptRequestId = durableRetryRequestId(id, toolCallId, pending.attempt + 1);
+        pending = undefined;
+      }
+      const limitMs = taskTimeoutLimitMs();
+      let timeout: DurableTaskTimeoutError | undefined;
+      const timer = limitMs === undefined
+        ? undefined
+        : setTimeout(() => {
+            // A cancel already in flight keeps its own outcome.
+            if (runnerAbortController.signal.aborted) return;
+            timeout = new DurableTaskTimeoutError(timeoutMessage(limitMs));
+            runnerAbortController.abort();
+          }, limitMs);
+      timer?.unref();
+      try {
+        return await runUntimed();
+      } catch (error) {
+        // The ceiling aborts through the runner's signal, which settles as a
+        // cancellation; the flag tells that apart from a user cancel.
+        const settledError = timeout && error instanceof DurableTaskCancelledError
+          ? timeout
+          : error;
+        const plan = planRetry(settledError);
+        if (!plan) throw settledError;
+        recordRetry(plan);
+        warn(
+          `background task ${id} ${failurePhase(settledError)} (${plan.reason}); retry ${plan.attempt + 1}/${maxRetries} in ${Math.round(plan.delayMs / 1_000)}s.`,
+        );
+        pending = plan;
+      } finally {
+        clearTimeout(timer);
+      }
     }
   };
 
@@ -915,6 +1063,7 @@ export async function executeDurableTask({
             usage: result.usage,
             structured_result: structuredResultPayload(assessment),
             full_output: parsed.raw.trim() || result.output.trim(),
+            ...retryDetails(),
           },
         );
       },
@@ -940,6 +1089,7 @@ export async function executeDurableTask({
             backend: "durable",
             task_id: id,
             ...(terminalUsage ? { usage: terminalUsage } : {}),
+            ...retryDetails(),
           },
         );
       },

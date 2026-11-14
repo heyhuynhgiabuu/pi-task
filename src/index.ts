@@ -1380,6 +1380,11 @@ export default function (pi: ExtensionAPI) {
           timeoutMinutes:
             taskParams.timeout_minutes ?? agent.timeoutMinutes,
           maxRetries: agent.maxRetries,
+          notifyUser: (text) =>
+            ignoreStaleExtensionCtx(() => {
+              if (backgroundWarnCtx) warnUser(backgroundWarnCtx, text);
+              else console.error(text);
+            }),
           backgroundTasks,
           foregroundTasks,
           deliveryGuard,

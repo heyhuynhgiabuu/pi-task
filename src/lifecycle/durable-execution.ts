@@ -171,6 +171,23 @@ function failureMessage(error: unknown): string {
   return isDurableStorageFailure(error) ? `${message}\n\n${STORAGE_FAILURE_NOTE}` : message;
 }
 
+/** States that end a run with nothing owed: there is no answer to continue. */
+const NOTHING_OWED_RE = /\b(?:nothing_to_answer|turn_limit)\b/i;
+
+/**
+ * Whether the failed attempt died OWING an answer, so its retry continues the
+ * child's context instead of handing it the original prompt again. Every
+ * durable failure pi-task retries (a provider/transient failure or the
+ * wall-clock ceiling) ends the run mid-generation; a settle that says the run
+ * ended `nothing_to_answer`/`turn_limit` owes nothing, so the prompt is the
+ * right draft for it. The bridge also falls back to the prompt once when a
+ * continue turns out to settle `nothing_to_answer` anyway.
+ */
+export function retryContinuesContext(error: unknown): boolean {
+  if (failurePhase(error) === "timeout") return true;
+  return !NOTHING_OWED_RE.test(failureMessage(error));
+}
+
 export function formatDurableBackgroundReceipt(id: string): string {
   return [
     taskStateLine(id, "running"),
@@ -873,7 +890,7 @@ export async function executeDurableTask({
         retry_count: retryCount,
         ...(lastRetryReason !== undefined ? { last_retry_reason: lastRetryReason } : {}),
       };
-  const runUntimed = () =>
+  const runUntimed = (continueOnly: boolean) =>
     (runTaskOverride ?? runDurableTask)({
       piDir,
       taskId: id,
@@ -889,6 +906,10 @@ export async function executeDurableTask({
       tools: agent.tools,
       parentExtensionToolSources,
       disallowedTools: agent.disallowedTools,
+      // A retry of a run that died owing an answer continues the child's context
+      // (`{ type: "continue" }`) instead of resending the prompt; the bridge
+      // falls back to the prompt once if the context turns out to owe nothing.
+      ...(continueOnly ? { continueOnly } : {}),
       // An empty body adds no section, matching the terminal backends.
       instructions: agent.body.trim() ? agent.body : undefined,
       readonly: agent.readonly,
@@ -938,6 +959,8 @@ export async function executeDurableTask({
   // flag tells that apart from a user cancel.
   const run = async () => {
     let pending: TaskRetryPlan | undefined;
+    /** Whether the scheduled retry continues the child's context (answer owed). */
+    let pendingContinueOnly = false;
     for (let retry = 0; ; retry++) {
       // The retry's controller is installed BEFORE its backoff, so a cancel
       // that arrives while waiting lands on it and ends the task instead of
@@ -967,7 +990,7 @@ export async function executeDurableTask({
           }, limitMs);
       timer?.unref();
       try {
-        return await runUntimed();
+        return await runUntimed(pendingContinueOnly);
       } catch (error) {
         // The ceiling aborts through the runner's signal, which settles as a
         // cancellation; the flag tells that apart from a user cancel.
@@ -977,6 +1000,7 @@ export async function executeDurableTask({
         const plan = planRetry(settledError);
         if (!plan) throw settledError;
         recordRetry(plan);
+        pendingContinueOnly = retryContinuesContext(settledError);
         warn(
           `background task ${id} ${failurePhase(settledError)} (${plan.reason}); retry ${plan.attempt + 1}/${maxRetries} in ${Math.round(plan.delayMs / 1_000)}s.`,
         );

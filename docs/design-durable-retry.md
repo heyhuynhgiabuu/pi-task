@@ -1,6 +1,6 @@
 # Design Note: Task-Level Retry for the Durable Backend
 
-Status: proposed — needs owner review before implementation
+Status: implemented and reviewed (2 review passes; A/B shipped, C/D tracked in TODO.md)
 Parent: P0 roadmap item 3 (retry with backoff), which shipped for the terminal backend
 Scope: `src/lifecycle/durable-execution.ts`, `src/subagent/durable.ts` (read-only), tests
 Author: implementation session, 2025-11-14
@@ -175,9 +175,12 @@ TUI shows a retry is happening and the child is resuming, not restarting.
 
 ---
 
-> Status: implemented in working tree (uncommitted WIP on top of ed05235). Retry currently resubmits
-> `{ type: "input" }` with the original prompt — `{ type: "continue" }` is not wired (bridge follow-up:
-> `src/subagent/durable.ts` submits input-only), so a mid-answer ceiling retry hands the child the
-> original task again and the model decides whether to continue or redo. A crash during the backoff
-> window settles the task failed on restart (the retry chain is not resumed); recovery notices in
-> that window do not carry retry metadata.
+> Status: implemented and committed. A retry of a run that died
+> owing an answer now submits `{ type: "continue" }` on the same child conversation (§Attempt
+> identity, TODO item A): the child continues from its own transcript instead of being handed the
+> original prompt again, and a continue that finds nothing to answer (`nothing_to_answer`) falls back
+> to one `{ type: "input" }` resubmission with the original prompt. `pi.live.generation.attempt` and
+> `.retry{at,error}` render in the live transcript, so pi-durable's own in-run attempt state is
+> visible while it happens (TODO item B). A crash during the backoff window still settles the task
+> failed on restart (the retry chain is not resumed); recovery notices in that window do not carry
+> retry metadata.

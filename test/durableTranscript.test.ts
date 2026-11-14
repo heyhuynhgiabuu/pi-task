@@ -407,3 +407,53 @@ test("durable view renders a run that ended without an answer once", () => {
   const hydrated = new DurableTranscript(makeView([], { runFailure: failure } as LiveState));
   assert.equal(hydrated.items().filter((item) => item.type === "system").length, 0);
 });
+
+// ─── pi-durable's own attempt state (TODO item B) ──────────────────────────
+
+function generationNotes(transcript: DurableTranscript): string[] {
+  return transcript
+    .items()
+    .filter((item) => item.type === "system")
+    .map((item) => (item.type === "system" ? item.text : ""));
+}
+
+test("durable transcript renders pi-durable's own generation attempt and retry state", () => {
+  // Attempt 2 with a durable backoff: `pi.live.generation` carries both.
+  const at = 1_000_000;
+  const transcript = new DurableTranscript(
+    makeView([], {
+      generation: { attempt: 2, retry: { at, error: "overloaded" } },
+    }),
+    () => at - 3_000,
+  );
+  assert.deepEqual(generationNotes(transcript), [
+    "Attempt 2 failed: overloaded — retrying in 3s",
+  ]);
+
+  // The same state repeats on every later view; the note is drawn once.
+  transcript.apply(makeView([], { generation: { attempt: 2, retry: { at, error: "overloaded" } } }));
+  assert.equal(generationNotes(transcript).length, 1);
+
+  // The next attempt starts: attempt 3 running (no retry pending yet).
+  transcript.apply(makeView([], { generation: { attempt: 3 } }));
+  assert.deepEqual(generationNotes(transcript), [
+    "Attempt 2 failed: overloaded — retrying in 3s",
+    "Retrying: attempt 3",
+  ]);
+
+  // A retry with no error text still renders the attempt and its backoff.
+  const noError = new DurableTranscript(
+    makeView([], { generation: { attempt: 2, retry: { at, error: "" } } }),
+    () => at - 1_000,
+  );
+  assert.deepEqual(generationNotes(noError), ["Attempt 2 failed — retrying in 1s"]);
+});
+
+test("durable transcript renders nothing for the ordinary first attempt", () => {
+  // Attempt 1 is every generation: no note, so the transcript is unchanged.
+  const transcript = new DurableTranscript(makeView([], {
+    generation: { attempt: 1, message: assistant([{ type: "text", text: "I am working." }]) },
+  }));
+  assert.deepEqual(generationNotes(transcript), []);
+  assert.equal(transcript.items().length, 1, "only the streamed partial, as before");
+});

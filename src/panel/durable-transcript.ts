@@ -204,6 +204,8 @@ export class DurableTranscript {
   private viewed = false;
   /** Failures already rendered as a system item; `pi.live` keeps them after the run ends. */
   private renderedFailures = new Set<string>();
+  /** Generation attempt/retry states already rendered, so one state is drawn once. */
+  private renderedGenerationNotes = new Set<string>();
 
   constructor(
     view: ConversationView,
@@ -335,10 +337,42 @@ export class DurableTranscript {
         this.partialAssistantIndex = undefined;
         this.rebuildIndexes();
       }
+    } else {
+      if (!this.compactionInProgress) this.observeAssistantUsage(message.usage);
+      this.writePartialAssistant(message);
+    }
+    // After the partial, so a note reads as what happened to the answer above it.
+    this.observeGenerationNotes(live);
+  }
+
+  /**
+   * pi-durable's own attempt state: which attempt of the current generation is
+   * running, and the backoff after a failed one. Both live in `pi.live`, so the
+   * transcript shows a retry as it happens instead of only after it failed.
+   * Attempt 1 with no retry is the ordinary case and renders nothing, and each
+   * distinct state is drawn once — `pi.live` repeats it on every later view.
+   */
+  private observeGenerationNotes(live: LiveState): void {
+    const generation = live.generation;
+    if (generation === undefined) return;
+    const retry = generation.retry;
+    let text: string;
+    let key: string;
+    if (retry !== undefined) {
+      key = `retry\u0000${generation.attempt}\u0000${retry.at}\u0000${retry.error}`;
+      const waitMs = retry.at - this.now();
+      const wait = waitMs > 0 ? ` in ${Math.ceil(waitMs / 1_000)}s` : "";
+      const error = retry.error ? `: ${retry.error}` : "";
+      text = `Attempt ${generation.attempt} failed${error} — retrying${wait}`;
+    } else if (generation.attempt > 1) {
+      key = `attempt\u0000${generation.attempt}`;
+      text = `Retrying: attempt ${generation.attempt}`;
+    } else {
       return;
     }
-    if (!this.compactionInProgress) this.observeAssistantUsage(message.usage);
-    this.writePartialAssistant(message);
+    if (this.renderedGenerationNotes.has(key)) return;
+    this.renderedGenerationNotes.add(key);
+    this.transcript.push({ type: "system", text, timestamp: "" });
   }
 
   private observeToolSlot(slot: ToolSlot): void {

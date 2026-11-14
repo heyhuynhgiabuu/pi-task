@@ -15,13 +15,18 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
+import { createModels } from "@earendil-works/pi-ai/models";
+import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
+
 import { readTaskSessionHistory } from "../src/conversation.js";
-import { executeDurableTask } from "../src/lifecycle/durable-execution.js";
+import { executeDurableTask, retryContinuesContext } from "../src/lifecycle/durable-execution.js";
 import { planTaskRetry } from "../src/lifecycle/retry.js";
 import { formatMs } from "../src/helpers.js";
 import { DeliveryGuard } from "../src/panel/delivery.js";
 import {
   DurableTaskCancelledError,
+  DurableTaskTimeoutError,
+  openDurableHarness,
   runDurableTask,
 } from "../src/subagent/durable.js";
 import type { BackgroundTask } from "../src/types.js";
@@ -58,6 +63,8 @@ interface Harness {
   backgroundTasks: Map<string, BackgroundTask>;
   /** The `requestId` each attempt submitted with, in order. */
   requestIds: string[];
+  /** Per attempt, whether the runner was asked to submit `{ type: "continue" }`. */
+  continueOnly: (boolean | undefined)[];
 }
 
 /**
@@ -77,6 +84,7 @@ function harness(
   const sent: Sent[] = [];
   const warnings: string[] = [];
   const requestIds: string[] = [];
+  const continueOnly: (boolean | undefined)[] = [];
   let calls = 0;
   const backgroundTasks = new Map<string, BackgroundTask>();
   const options = {
@@ -114,6 +122,7 @@ function harness(
     runTask: (input: RunInput) => {
       const attempt = calls++;
       requestIds.push(input.requestId ?? "");
+      continueOnly.push(input.continueOnly);
       input.onRequestId?.(input.requestId ?? "");
       input.onSubmitted?.("child");
       return run(input, attempt);
@@ -125,6 +134,7 @@ function harness(
     warnings,
     backgroundTasks,
     requestIds,
+    continueOnly,
     options: options as never as Parameters<typeof executeDurableTask>[0],
   };
 }
@@ -369,4 +379,246 @@ test("a crash mid-retry would recover the retry attempt, in the durable request-
     assert.equal(run.sent[0]?.details?.phase, "done");
     assert.equal(historyOf(root)?.status, "done");
   });
+});
+
+// ─── 6. A retry of a run that died owing an answer continues the context ────
+
+test("a ceiling retry continues the child's context instead of resending the prompt", async () => {
+  await withRoot(async (root) => {
+    const run = harness(
+      root,
+      { maxRetries: 1, timeoutMinutes: 0.00083 },
+      async (input, attempt) => {
+        if (attempt === 0) return hangsUntilAborted(input);
+        return { conversationId: "child", answer: DONE_ANSWER, usage };
+      },
+    );
+    await executeDurableTask(run.options);
+    await until(() => run.sent.length === 1);
+
+    assert.equal(run.continueOnly.length, 2, "both attempts were submitted");
+    assert.equal(
+      run.continueOnly[0],
+      undefined,
+      "attempt 0 is the normal prompt submission",
+    );
+    assert.equal(
+      run.continueOnly[1],
+      true,
+      "the timeout retry continues the context the dead generation owed an answer on",
+    );
+    assert.notEqual(run.requestIds[1], run.requestIds[0], "under a fresh idempotency key");
+    assert.equal(run.sent[0]?.details?.phase, "done");
+  });
+});
+
+test("a transient provider failure retry also continues the context", async () => {
+  await withRoot(async (root) => {
+    const run = harness(root, { maxRetries: 1 }, async (_input, attempt) => {
+      if (attempt === 0) throw new Error("503 Service Unavailable");
+      return { conversationId: "child", answer: DONE_ANSWER, usage };
+    });
+    await executeDurableTask(run.options);
+    await until(() => run.sent.length === 1);
+    assert.equal(run.continueOnly[1], true);
+  });
+});
+
+test("a failure that owes no answer selects the prompt draft, not a continue", () => {
+  // The selection rule (`planTaskRetry` never retries these two, so they are
+  // asserted here rather than through a settle): a run that ended with nothing
+  // owed must resubmit the prompt — a continue would settle `nothing_to_answer`.
+  assert.equal(retryContinuesContext(new Error("nothing_to_answer")), false);
+  assert.equal(retryContinuesContext(new Error("turn_limit: out of turns")), false);
+  // A dead generation always owes its answer, whichever side of the bridge
+  // reported it.
+  assert.equal(
+    retryContinuesContext(new Error("durable subagent failed: model_error: overloaded")),
+    true,
+  );
+  assert.equal(retryContinuesContext(new Error("interrupted: the host stopped")), true);
+  assert.equal(
+    retryContinuesContext(new DurableTaskTimeoutError("Durable subagent exceeded the hard timeout")),
+    true,
+  );
+});
+
+test("a continue that finds nothing to answer falls back to ONE input resubmission", async () => {
+  // The bridge's bounded fallback, against the real durable harness: a
+  // `continueOnly` run whose context owes nothing settles
+  // `unanswered/nothing_to_answer`, and the prompt is then submitted exactly
+  // once under its own idempotency key (a submission's type is fixed by its
+  // request id, so the fallback cannot reuse the continue's).
+  const root = mkdtempSync(join(tmpdir(), "pi-task-durable-continue-fallback-"));
+  const piDir = join(root, ".pi");
+  const databasePath = join(root, "durable.sqlite");
+  const taskId = "t-continue-fallback";
+  const requestId = "pi-task:t-continue-fallback:call:call-continue-fallback";
+  const retryRequestId = `${requestId}-retry`;
+  let handle: Awaited<ReturnType<typeof openDurableHarness>> | undefined;
+  try {
+    const models = createModels();
+    const faux = fauxProvider();
+    models.setProvider(faux.provider);
+    faux.setResponses([
+      fauxAssistantMessage("The original answer."),
+      fauxAssistantMessage("Answered after the prompt came back."),
+    ]);
+    // A child that already answered: its context owes the model nothing.
+    const first = await runDurableTask({
+      piDir,
+      databasePath,
+      taskId,
+      task: "Original prompt.",
+      requestId,
+      models: () => models,
+    });
+    assert.equal(first.answer, "The original answer.");
+
+    // Record every draft the bridge hands the harness from here on.
+    const drafts: { type: string; content?: unknown; requestId?: string }[] = [];
+    handle = await openDurableHarness(piDir, { databasePath, models: () => models });
+    const originalConversation = handle.harness.conversation.bind(handle.harness);
+    handle.harness.conversation = async (id, context) => {
+      const conversation = await originalConversation(id, context);
+      if (!conversation) return conversation;
+      const originalSubmit = conversation.submit.bind(conversation);
+      conversation.submit = ((...args: Parameters<typeof conversation.submit>) => {
+        const [draft] = args as [{ type: string; content?: unknown; requestId?: string }];
+        drafts.push({ type: draft.type, content: draft.content, requestId: draft.requestId });
+        return originalSubmit(...(args as Parameters<typeof originalSubmit>));
+      }) as typeof conversation.submit;
+      return conversation;
+    };
+
+    const second = await runDurableTask({
+      piDir,
+      databasePath,
+      taskId,
+      task: "Original prompt.",
+      requestId: retryRequestId,
+      continueOnly: true,
+      models: () => models,
+    });
+    assert.equal(
+      second.answer,
+      "Answered after the prompt came back.",
+      "the prompt fallback produced the answer",
+    );
+    assert.deepEqual(
+      drafts.map((draft) => [draft.type, draft.requestId]),
+      [["continue", retryRequestId], ["input", `${retryRequestId}:input`]],
+      "one continue, then exactly one prompt fallback under its own id",
+    );
+    assert.equal(drafts[1]?.content, "Original prompt.");
+  } finally {
+    if (handle) await handle.harness.close(handle.context);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a continue retry keeps the child's context: the prompt is not delivered twice", async () => {
+  // The real bridge, no runTask override. Attempt 0 submits the prompt and is
+  // aborted mid-generation (what the wall-clock ceiling does); attempt 1 is the
+  // retry the lifecycle now sends as a continue. The model context must hold the
+  // original prompt ONCE — that is the point of continuing instead of resending.
+  const root = mkdtempSync(join(tmpdir(), "pi-task-durable-continue-context-"));
+  const piDir = join(root, ".pi");
+  const databasePath = join(root, "durable.sqlite");
+  const taskId = "t-continue-context";
+  const requestId = "pi-task:t-continue-context:call:call-continue-context";
+  const task = "UNIQUE_ORIGINAL_PROMPT_TEXT";
+  let handle: Awaited<ReturnType<typeof openDurableHarness>> | undefined;
+  let conversationId: string | undefined;
+  // Hold the first provider response so attempt 0 is genuinely mid-generation
+  // when it is aborted, the way the wall-clock ceiling kills a live attempt.
+  let releaseFirst!: () => void;
+  const firstHeld = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  try {
+    const models = createModels();
+    const faux = fauxProvider();
+    models.setProvider(faux.provider);
+    faux.setResponses([
+      fauxAssistantMessage("Attempt 1 answered."),
+      fauxAssistantMessage("Attempt 2 answered."),
+    ]);
+    let call = 0;
+    const streamSimple = models.streamSimple.bind(models);
+    models.streamSimple = (model, context, options) => {
+      const stream = streamSimple(model, context, options);
+      if (call++ === 0) {
+        const result = stream.result.bind(stream);
+        stream.result = async () => {
+          // Release on the abort too: the held request has no other way out.
+          await new Promise<void>((resolve, reject) => {
+            firstHeld.then(resolve, reject);
+            options.signal?.addEventListener(
+              "abort",
+              () => reject(new DurableTaskCancelledError()),
+              { once: true },
+            );
+          });
+          return result();
+        };
+      }
+      return stream;
+    };
+    const drafts: { type: string; requestId?: string }[] = [];
+    handle = await openDurableHarness(piDir, { databasePath, models: () => models });
+    const originalConversation = handle.harness.conversation.bind(handle.harness);
+    handle.harness.conversation = async (id, context) => {
+      const conversation = await originalConversation(id, context);
+      if (!conversation) return conversation;
+      const originalSubmit = conversation.submit.bind(conversation);
+      conversation.submit = ((...args: Parameters<typeof conversation.submit>) => {
+        const [draft] = args as [{ type: string; requestId?: string }];
+        drafts.push({ type: draft.type, requestId: draft.requestId });
+        return originalSubmit(...(args as Parameters<typeof originalSubmit>));
+      }) as typeof conversation.submit;
+      return conversation;
+    };
+
+    const controller = new AbortController();
+    const first = runDurableTask({
+      piDir,
+      databasePath,
+      taskId,
+      task,
+      requestId,
+      models: () => models,
+      signal: controller.signal,
+      onSubmitted: (id) => { conversationId = id; },
+    });
+    await until(() => drafts.length === 1);
+    controller.abort();
+    await assert.rejects(first, DurableTaskCancelledError);
+    releaseFirst();
+
+    const second = await runDurableTask({
+      piDir,
+      databasePath,
+      taskId,
+      task,
+      requestId: `${requestId}-retry-1`,
+      continueOnly: true,
+      models: () => models,
+    });
+    assert.equal(second.answer, "Attempt 2 answered.");
+    assert.deepEqual(
+      drafts.map((draft) => [draft.type, draft.requestId]),
+      [["input", requestId], ["continue", `${requestId}-retry-1`]],
+      "the retry is a continue under a fresh idempotency key",
+    );
+
+    const conversation = await handle.harness.conversation(conversationId as never, handle.context);
+    assert.ok(conversation);
+    const context = JSON.stringify((await conversation.context(handle.context)).messages);
+    const occurrences = context.split(task).length - 1;
+    assert.equal(occurrences, 1, "the child was not handed the original prompt a second time");
+    assert.match(context, /Attempt 2 answered\./, "the continue's own answer is in the context");
+  } finally {
+    releaseFirst();
+    if (handle) await handle.harness.close(handle.context);
+    rmSync(root, { recursive: true, force: true });
+  }
 });

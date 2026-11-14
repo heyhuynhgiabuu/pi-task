@@ -514,7 +514,7 @@ export function durableRequestId(taskId: string, toolCallId?: string): string {
 
 function taskIdFromRequestId(requestId: unknown): string | undefined {
   if (typeof requestId !== "string" || !requestId.startsWith("pi-task:")) return undefined;
-  const suffix = requestId.slice("pi-task:".length);
+  const suffix = requestId.slice("pi-task:".length).replace(/:input$/, "");
   const callMarker = suffix.indexOf(":call:");
   if (callMarker < 0) return suffix || undefined;
   const encodedTaskId = suffix.slice(0, callMarker);
@@ -1776,6 +1776,13 @@ export async function runDurableTask(input: {
   modelSpecs?: AgentModelSpec[];
   /** Called with each attempt's request id before it is submitted (recovery identity). */
   onRequestId?: (requestId: string) => void;
+  /**
+   * Submit `{ type: "continue" }` instead of the task as an input: a retry of a
+   * run that died owing an answer continues the child's context rather than
+   * re-sending the prompt. A continue on a context that owes nothing settles
+   * `unanswered/nothing_to_answer`; the prompt is then resubmitted once.
+   */
+  continueOnly?: boolean;
   /** Mirror the parent's fast mode onto the child's Codex requests. */
   fast?: boolean;
   /** Called once the submission is durably admitted, before it settles. */
@@ -1907,6 +1914,12 @@ export async function runDurableTask(input: {
     }
     return true;
   };
+  /**
+   * Set when a `continue` settled `nothing_to_answer`: the attempt is resubmitted
+   * once as the prompt, under its own idempotency key. A submission's type is
+   * fixed by its request id, so the fallback cannot reuse the continue's.
+   */
+  let continueFallbackRequestId: string | undefined;
   try {
     for (let index = 0; index < attempts.length; index++) {
       const attempt = attempts[index]!;
@@ -1920,9 +1933,14 @@ export async function runDurableTask(input: {
         failAttempt(attempt, failure, true, index + 1 < attempts.length);
         continue;
       }
-      const requestId = index === 0
+      // A retried attempt whose failed run owed an answer continues the child's
+      // context instead of handing it the original prompt again.
+      const fallbackRequestId = continueFallbackRequestId;
+      continueFallbackRequestId = undefined;
+      const continueOnly = input.continueOnly === true && fallbackRequestId === undefined;
+      const requestId = fallbackRequestId ?? (index === 0
         ? baseRequestId
-        : durableFallbackRequestId(baseRequestId, input.taskId, index);
+        : durableFallbackRequestId(baseRequestId, input.taskId, index));
       input.onRequestId?.(requestId);
       conversationIdle = false;
       const reservation = await reserveDurableRun(
@@ -1987,13 +2005,12 @@ export async function runDurableTask(input: {
         return { conversationId: String(childId), answer, usage };
       }
 
+      const draft: import("@earendil-works/pi-durable").SubmissionDraft = continueOnly
+        ? { type: "continue", requestId }
+        : { type: "input", content: input.task, requestId };
       let submission: import("@earendil-works/pi-durable").Submission;
       try {
-        submission = await conversation.submit({
-          type: "input",
-          content: input.task,
-          requestId,
-        }, handle.context);
+        submission = await conversation.submit(draft, handle.context);
       } catch (error) {
         await conversation.commit(async (tx) => {
           const runs = await tx.doc(handle.runsDoc, conversation.id);
@@ -2040,7 +2057,21 @@ export async function runDurableTask(input: {
         return { conversationId: String(childId), answer, usage };
       }
 
-      await submission.wait(handle.context);
+      const settledSubmission = await submission.wait(handle.context);
+      if (
+        continueOnly &&
+        settledSubmission.status === "unanswered" &&
+        settledSubmission.reason === "nothing_to_answer"
+      ) {
+        // The context owed nothing: settle the continue's lifecycle record so the
+        // prompt resubmission can own the task, then run this attempt once as an
+        // input under a fresh id.
+        await settleDurableRun(handle, conversation, input.taskId, requestId);
+        conversationIdle = true;
+        continueFallbackRequestId = `${requestId}:input`;
+        index--;
+        continue;
+      }
       const settledRun = await settleDurableRun(
         handle,
         conversation,

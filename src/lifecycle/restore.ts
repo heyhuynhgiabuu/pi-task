@@ -20,6 +20,7 @@ import {
 } from "../subagent/tmux.js";
 import { taskRuntime, type BackgroundTask, type RegistryEntry } from "../types.js";
 import { restoredTurnBudget } from "./turn-budget.js";
+import { restoredRetryState } from "./retry.js";
 
 /** A syntactically valid Claude Code session UUID. */
 function isClaudeSessionId(value: string | undefined): value is string {
@@ -157,6 +158,7 @@ export async function restoreActiveBackgroundTasks(
       ownerSessionId: entry.ownerSessionId,
       ownerLeafId: entry.ownerLeafId,
       maxTurns: entry.maxTurns,
+      ...restoredRetryState(entry),
       // Same-run restart keeps the request budget; it never grants a new one.
       ...restoredTurnBudget(entry),
       recentCalls: [],

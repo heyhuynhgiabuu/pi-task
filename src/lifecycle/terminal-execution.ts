@@ -3,6 +3,8 @@ import type { ExtensionContext, ExtensionAPI } from "@earendil-works/pi-coding-a
 import {
   formatBackgroundReceipt,
   envTurnLimit,
+  envHardTimeoutMs,
+  resolveTaskTimeoutMs,
 } from "../helpers.js";
 import { describeCommandFailure } from "../subagent/terminalBackend.js";
 import {
@@ -19,6 +21,7 @@ import type { DeliveryGuard } from "../panel/delivery.js";
 import { durableParentOf } from "./ownership.js";
 import { executeTerminalForegroundTask } from "./terminal-foreground.js";
 import { registerBackgroundTask } from "./background-registration.js";
+import { updateRegistry } from "../conversation.js";
 import { snapshotPiTurns } from "./turn-budget.js";
 import type { ForegroundProgressPollOptions } from "../tool/foregroundProgress.js";
 
@@ -48,6 +51,10 @@ export interface TerminalExecutionOptions {
   workspaceGroup?: string;
   foregroundTask?: BackgroundTask;
   agentMaxTurns?: () => number | undefined;
+  /** Per-task wall-clock ceiling in minutes (per-call param, else agent frontmatter). */
+  timeoutMinutes?: number;
+  /** Retry allowance for provider/transient failures (agent frontmatter `max_retries:`). */
+  maxRetries?: number;
   signal?: AbortSignal;
   onUpdate?: ForegroundProgressPollOptions["onUpdate"];
   ctx: ExtensionContext;
@@ -94,6 +101,8 @@ export async function executeTerminalTask({
   workspaceGroup,
   foregroundTask,
   agentMaxTurns,
+  timeoutMinutes,
+  maxRetries,
   signal,
   onUpdate,
   ctx,
@@ -226,6 +235,14 @@ export async function executeTerminalTask({
     toolUses: 0,
     turns: 0,
     maxTurns: agentMaxTurns?.() ?? envTurnLimit(),
+    ...(() => {
+      const resolved = resolveTaskTimeoutMs(timeoutMinutes, envHardTimeoutMs());
+      return {
+        ...(resolved.timeoutMinutes !== undefined ? { timeoutMinutes: resolved.timeoutMinutes } : {}),
+        ...(timeoutMinutes !== undefined ? { timeoutMs: resolved.timeoutMs } : {}),
+      };
+    })(),
+    ...(maxRetries !== undefined && maxRetries > 0 ? { maxRetries } : {}),
     ...(turnBaseline > 0 ? { turnBaseline } : {}),
     conversationId,
     ownerSessionId,
@@ -266,6 +283,59 @@ export async function executeTerminalTask({
   // Do not kill a background subagent when the parent session aborts or is
   // replaced. Background tasks are intentionally detached; the registry and
   // polling loop own their lifecycle after the pane is spawned.
+
+  // Retry relaunch (process-local, terminal background only): a fresh run of
+  // the same prompt on a new pane, reusing the exact launch arguments. The
+  // polling loop's retry policy owns when this runs; a throw here propagates
+  // to the timer callback, which settles the task as failed.
+  if (!foregroundTask) {
+    const relaunchLaunchArgs = {
+      backend: selectedBackend,
+      terminalBackend,
+      agentArgs: piArgs,
+      initialPrompt: prompt,
+      cwd,
+      sessionDir,
+      sessionName,
+      // PI_TASK_TOOL_DISABLED only matters for pi children, matching the
+      // original launch: a Claude child must not receive it.
+      environment: claudeRuntime
+        ? ({} as Record<string, string>)
+        : { PI_TASK_TOOL_DISABLED: "1" },
+      runtime,
+      claudeSessionFile,
+      label: `${agentName}-${id.slice(0, 8)}`,
+      workspaceGroup,
+      remainOnExit: false,
+      selfDestruct: true,
+    };
+    bgtask.relaunch = async () => {
+      try {
+        await closeLaunchedResource(handle, paneId, originalPane, terminalBackend);
+      } catch {
+        // A dead pane from the failed attempt is not a relaunch blocker.
+      }
+      const launched = await launchTerminalTask(relaunchLaunchArgs);
+      ({ handle, paneId, originalPane } = launched);
+      bgtask.handle = handle;
+      bgtask.paneId = paneId;
+      bgtask.originalPane = originalPane;
+      bgtask.startedAt = Date.now();
+      bgtask.toolUses = 0;
+      bgtask.turns = 0;
+      bgtask.turnBaseline = 0;
+      bgtask.wrapUp = undefined;
+      bgtask.recentCalls = [];
+      bgtask.retryPending = false;
+      updateRegistry(piDir, (entries) =>
+        entries.map((entry) =>
+          entry.id === id
+            ? { ...entry, startedAt: bgtask.startedAt, retryCount: bgtask.retryCount }
+            : entry,
+        ),
+      );
+    };
+  }
 
   return {
     content: [

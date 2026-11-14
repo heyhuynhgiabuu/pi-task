@@ -24,6 +24,7 @@ import {
   grantFollowUpBudget,
   snapshotPiTurns,
 } from "./turn-budget.js";
+import { restoredRetryState } from "./retry.js";
 
 export interface TaskResumeResult {
   content: [{ type: "text"; text: string }];
@@ -62,6 +63,11 @@ export interface TaskResumeOptions {
   backgroundTasks: Map<string, BackgroundTask>;
   deliveryGuard: DeliveryGuard;
   registryEntryStatus: (entry: RegistryEntry) => "alive" | "missing" | "unavailable";
+  /**
+   * Resolved `results_from` section. A live resume steers it into the running
+   * child; a completed resume puts it in the follow-up prompt.
+   */
+  resultInjection?: string;
 }
 
 export function resolveTaskResume({
@@ -76,6 +82,7 @@ export function resolveTaskResume({
   backgroundTasks,
   deliveryGuard,
   registryEntryStatus,
+  resultInjection,
 }: TaskResumeOptions): TaskResumeResolution {
   const entries = readRegistry(piDir);
   const registryEntry = entries.find(
@@ -266,6 +273,11 @@ export function resolveTaskResume({
       conversationId: entry.conversationId,
       ...durableParentOf(sessionViewOf(ctx)),
       ...carriedTrackerState(prior, registryEntry),
+      // Keep the task's own ceiling and retry allowance across a reattach:
+      // they are properties of the task, not of the interaction. The rebuilt
+      // tracker has no relaunch closure, so it still never retries this
+      // process (documented restored-task scope).
+      ...(registryEntry ? restoredRetryState(registryEntry) : {}),
     };
     backgroundTasks.set(id, bgtask);
     deliveryGuard.track(id, sessionViewOf(ctx));
@@ -276,6 +288,7 @@ export function resolveTaskResume({
         prompt: taskParams.prompt,
         parentContext: taskParams.parent_context,
         proposedChanges: taskParams.proposed_changes,
+        ...(resultInjection ? { results: resultInjection } : {}),
       }),
       bgtask.handle,
     );

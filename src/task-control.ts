@@ -50,6 +50,10 @@ export interface TaskStartRequest {
   conversation_id?: string;
   background?: boolean;
   compare?: boolean;
+  /** Ids of settled tasks whose results are injected into the child prompt. */
+  results_from?: string[];
+  /** Per-task wall-clock ceiling in minutes; overrides agent frontmatter and the global ceiling. */
+  timeout_minutes?: number;
 }
 
 export interface TaskControlRecord {
@@ -286,6 +290,40 @@ function validateTaskStartRequest(value: unknown): TaskStartValidation {
       suppliedProposedChanges = items;
     }
   }
+  let suppliedResultsFrom: string[] | undefined;
+  if (candidate.results_from !== undefined) {
+    if (!Array.isArray(candidate.results_from)) {
+      problems.push("results_from must be an array of task ids");
+    } else {
+      const items = candidate.results_from
+        .filter((id): id is string => typeof id === "string")
+        .map((id) => id.trim())
+        .filter(Boolean);
+      if (items.length !== candidate.results_from.length) {
+        const hasNonString = candidate.results_from.some((id) => typeof id !== "string");
+        problems.push(
+          hasNonString
+            ? "results_from must contain only strings"
+            : "results_from contains blank items; each entry must be a non-empty task id",
+        );
+      }
+      if (items.some((id) => id === (candidate.task_id as string | undefined)?.trim())) {
+        problems.push(
+          "results_from cannot reference this task's own task_id; a task cannot depend on its own result",
+        );
+      }
+      suppliedResultsFrom = items.length > 0 ? items : undefined;
+    }
+  }
+  let suppliedTimeoutMinutes: number | undefined;
+  if (candidate.timeout_minutes !== undefined) {
+    const value = candidate.timeout_minutes;
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+      problems.push("timeout_minutes must be a positive number of minutes");
+    } else {
+      suppliedTimeoutMinutes = value;
+    }
+  }
   if (problems.length > 0) return { problems };
 
   const parentContext = suppliedParentContext ?? parsedPromptHandoff.parentContext;
@@ -327,6 +365,8 @@ function validateTaskStartRequest(value: unknown): TaskStartValidation {
       ...(typeof candidate.conversation_id === "string" ? { conversation_id: candidate.conversation_id } : {}),
       ...(typeof candidate.background === "boolean" ? { background: candidate.background } : {}),
       ...(typeof candidate.compare === "boolean" ? { compare: candidate.compare } : {}),
+      ...(suppliedResultsFrom !== undefined ? { results_from: suppliedResultsFrom } : {}),
+      ...(suppliedTimeoutMinutes !== undefined ? { timeout_minutes: suppliedTimeoutMinutes } : {}),
     },
   };
 }

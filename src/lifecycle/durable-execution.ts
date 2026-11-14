@@ -47,6 +47,7 @@ import type {
   CompletionDeliveryOutcome,
 } from "../types.js";
 import { armableTimeoutMs } from "../subagent/runSdk.js";
+import { resolveTaskTimeoutMs } from "../helpers.js";
 import {
   assessTaskResult,
   buildTaskEnvelope,
@@ -60,6 +61,7 @@ import {
   type AgentConfig,
 } from "../helpers.js";
 import { sessionViewOf, type DeliveryGuard } from "../panel/delivery.js";
+import { truncateResultText } from "../result-passing.js";
 import { durableParentOf } from "./ownership.js";
 import type { TaskWidgetController } from "./widget.js";
 import { DurableTranscript, type DurableChildAgent } from "../panel/durable-transcript.js";
@@ -89,6 +91,10 @@ export interface DurableTaskExecutionOptions {
   /** Parent extension module entry paths by tool name, for bridgeable research tools. */
   parentExtensionToolSources?: Record<string, string>;
   isBackground: boolean;
+  /** Per-task wall-clock ceiling in minutes (per-call param, else agent frontmatter). */
+  timeoutMinutes?: number;
+  /** Retry allowance for provider/transient failures (agent frontmatter `max_retries:`). */
+  maxRetries?: number;
   backgroundTasks: Map<string, BackgroundTask>;
   foregroundTasks: Map<string, BackgroundTask>;
   deliveryGuard: DeliveryGuard;
@@ -118,7 +124,7 @@ function hardTimeoutLimitMs(): number | undefined {
 }
 
 function timeoutMessage(limitMs: number): string {
-  return `Durable subagent exceeded the hard timeout of ${formatMs(Math.round(limitMs))} (PI_TASK_HARD_TIMEOUT_MINUTES).`;
+  return `Durable subagent exceeded the hard timeout of ${formatMs(Math.round(limitMs))} (PI_TASK_HARD_TIMEOUT_MINUTES or the task's own timeout_minutes).`;
 }
 
 function failurePhase(error: unknown): "cancelled" | "timeout" | "failed" {
@@ -303,7 +309,19 @@ export async function resumeDurableAfterRestart(deps: {
       }
       resumedHistory.set(taskId, durableHistory);
       authorizedTasks.add(taskId);
-      const limitMs = hardTimeoutLimitMs();
+      // A recovered task re-arms its own persisted ceiling when it has one;
+      // only a legacy entry falls back to the global PI_TASK_HARD_TIMEOUT_MINUTES.
+      // The persisted number is the raw minutes→ms product, so clamp it the
+      // way the launch path does (armableTimeoutMs) — a corrupt or >2^31-1
+      // value would otherwise coerce setTimeout to 1 ms and insta-kill the
+      // recovered run.
+      const persistedCeiling = durableHistory?.timeoutMs;
+      const limitMs =
+        persistedCeiling !== undefined &&
+        Number.isFinite(persistedCeiling) &&
+        persistedCeiling > 0
+          ? (armableTimeoutMs(persistedCeiling) ?? hardTimeoutLimitMs())
+          : hardTimeoutLimitMs();
       if (limitMs !== undefined) armRecoveryTimeout(taskId, limitMs);
       try {
         deps.onTaskResumed?.(taskId, durableHistory, conversationId);
@@ -364,6 +382,9 @@ export async function resumeDurableAfterRestart(deps: {
             rawStatus: assessment.rawStatus,
             resultValid: assessment.valid,
             completedAt: Date.now(),
+            // A recovered run's answer comes from SQLite; record it here so a
+            // later `results_from` does not need the store.
+            ...(output.trim() ? { resultText: truncateResultText(output.trim()) } : {}),
           });
         } catch {
           // History is best-effort; delivery below still runs.
@@ -601,6 +622,8 @@ export async function executeDurableTask({
   fast,
   parentExtensionToolSources,
   isBackground,
+  timeoutMinutes,
+  maxRetries,
   backgroundTasks,
   foregroundTasks,
   deliveryGuard,
@@ -643,6 +666,10 @@ export async function executeDurableTask({
   }
   const startedAt = Date.now();
   const runnerAbortController = new AbortController();
+  // Per-task wall-clock ceiling (per-call param, else agent frontmatter),
+  // falling back to the global PI_TASK_HARD_TIMEOUT_MINUTES ceiling.
+  const taskCeiling = resolveTaskTimeoutMs(timeoutMinutes, envHardTimeoutMs());
+  const taskTimeoutLimitMs = () => armableTimeoutMs(taskCeiling.timeoutMs);
   const forwardForegroundAbort = () => runnerAbortController.abort();
   const model = agent.model;
   const sessionModel = ctx.model
@@ -703,6 +730,10 @@ export async function executeDurableTask({
     backend: "durable" as const,
     durableRequestId: requestId,
     ...(durableStore !== undefined ? { durableStore } : {}),
+    ...(taskCeiling.timeoutMinutes !== undefined
+      ? { timeoutMinutes: taskCeiling.timeoutMinutes, timeoutMs: taskCeiling.timeoutMs }
+      : {}),
+    ...(maxRetries !== undefined && maxRetries > 0 ? { maxRetries } : {}),
     ...owner,
     ownerPid: process.pid,
   };
@@ -788,7 +819,7 @@ export async function executeDurableTask({
   // aborts through the runner's signal, which settles as a cancellation; the
   // flag tells that apart from a user cancel.
   const run = async () => {
-    const limitMs = hardTimeoutLimitMs();
+    const limitMs = taskTimeoutLimitMs();
     let timeout: DurableTaskTimeoutError | undefined;
     const timer = limitMs === undefined
       ? undefined
@@ -822,6 +853,10 @@ export async function executeDurableTask({
       toolUses: 0,
       turns: 0,
       conversationId,
+      ...(taskCeiling.timeoutMinutes !== undefined
+        ? { timeoutMinutes: taskCeiling.timeoutMinutes, timeoutMs: taskCeiling.timeoutMs }
+        : {}),
+      ...(maxRetries !== undefined && maxRetries > 0 ? { maxRetries } : {}),
       ...owner,
       recentCalls: [],
     };
@@ -980,6 +1015,10 @@ export async function executeDurableTask({
       rawStatus: assessment.rawStatus,
       resultValid: assessment.valid,
       completedAt: Date.now(),
+      // This child lives in SQLite, not a pi session JSONL, so its answer is
+      // recorded here for a later `results_from`. The placeholder must not
+      // become a recorded result — only real assistant output is injectable.
+      ...(output.trim() ? { resultText: truncateResultText(output.trim()) } : {}),
     });
     foregroundTask.status = "done";
     foregroundTask.result = finalOutput;

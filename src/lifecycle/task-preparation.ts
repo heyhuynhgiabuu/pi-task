@@ -41,6 +41,12 @@ export interface TaskPreparationOptions {
   persistedTaskCwd?: string;
   /** `taskBackend` from pi settings, resolved by the caller before launch. */
   settingsBackend?: string;
+  /**
+   * Injected `results_from` section, already resolved by the caller. The
+   * resolution runs at admission so a missing or foreign task id fails before
+   * any backend resource exists; an empty string injects nothing.
+   */
+  resultInjection?: string;
 }
 
 export interface TaskMaterializationOptions {
@@ -60,6 +66,7 @@ export async function prepareTaskExecution({
   conversationId,
   persistedTaskCwd,
   settingsBackend,
+  resultInjection,
 }: TaskPreparationOptions): Promise<TaskPreparationResolution> {
   const taskCwdResolution = resolveTaskCwd(ctx.cwd, taskParams.cwd, persistedTaskCwd);
   if (taskCwdResolution.kind === "invalid") {
@@ -116,6 +123,7 @@ export async function prepareTaskExecution({
     parentContext: taskParams.parent_context,
     proposedChanges: taskParams.proposed_changes,
     cwd: taskCwd,
+    ...(resultInjection ? { results: resultInjection } : {}),
   });
 
   const sessionDir = join(artifactsDir, "sessions", id);

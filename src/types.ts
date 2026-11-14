@@ -116,6 +116,34 @@ export interface BackgroundTask {
   /** Soft turn limit (issue #19); undefined = unlimited. */
   maxTurns?: number;
   /**
+   * Per-task wall-clock ceiling in minutes: the agent's `timeout_minutes:`
+   * frontmatter default, overridable by the per-call `timeout_minutes`
+   * parameter. Undefined = the global `PI_TASK_HARD_TIMEOUT_MINUTES` ceiling.
+   */
+  timeoutMinutes?: number;
+  /** Resolved per-task wall-clock ceiling in ms; overrides the global ceiling. */
+  timeoutMs?: number;
+  /**
+   * Retry allowance for provider/transient failures (agent frontmatter
+   * `max_retries:`). 0 or absent = never retry. Foreground and comparison
+   * tasks never retry.
+   */
+  maxRetries?: number;
+  /** Retries already attempted for this task id; every retry is a fresh run. */
+  retryCount?: number;
+  /**
+   * A relaunch is scheduled: the polling loop must not settle this tracker
+   * again and the retry timer owns it. Process-local, never persisted.
+   */
+  retryPending?: boolean;
+  /**
+   * Fresh-run relaunch for the retry policy (process-local, never persisted):
+   * closes the failed attempt's resource, launches the same prompt on a new
+   * pane, and resets the tracker's runtime fields in place. Only background
+   * terminal trackers carry one; the retry gate requires it.
+   */
+  relaunch?: () => Promise<void>;
+  /**
    * Lifetime Pi turn count at the start of the current explicit request
    * (issue #30). `turns` stays lifetime; the soft limit applies to
    * `turns - turnBaseline`. Absent = 0 (whole session counts).
@@ -183,6 +211,19 @@ export interface RegistryEntry {
   sessionRef?: string;
   /** Soft turn limit persisted so restore keeps enforcing it (issue #19). */
   maxTurns?: number;
+  /** Per-task wall-clock ceiling in minutes (`timeout_minutes:`); absent = global ceiling. */
+  timeoutMinutes?: number;
+  /** Resolved per-task ceiling in ms, persisted so restore keeps it. */
+  timeoutMs?: number;
+  /** Retry allowance persisted so restore and live reattach keep it. */
+  maxRetries?: number;
+  /** Retries already attempted; carried onto the relaunched tracker. */
+  retryCount?: number;
+  // `nextRetryAt` / `lastRetryReason` are declared further below.
+  /** Epoch ms of the scheduled relaunch; replaced when the retry run registers. */
+  nextRetryAt?: number;
+  /** Why the last attempt was retried (classification reason), for diagnostics. */
+  lastRetryReason?: string;
   /** Lifetime turn count at the start of the current request (issue #30); absent/invalid = 0. */
   turnBaseline?: number;
   /** Wrap-up anchor (lifetime turns) persisted so a same-run restart does not regrant grace. */
@@ -233,6 +274,13 @@ export interface TaskSessionHistoryEntry extends RegistryEntry {
   completedAt?: number;
   /** Durable child's last observed whole-run TPS, recorded so read-only history can show it. */
   tokensPerSecond?: number;
+  /**
+   * The child's final assistant text, truncated at settle time so a later
+   * `results_from` injection survives a parent restart without re-parsing the
+   * session file. Absent while a task runs and on records that settled before
+   * this field existed.
+   */
+  resultText?: string;
   background: boolean;
 }
 

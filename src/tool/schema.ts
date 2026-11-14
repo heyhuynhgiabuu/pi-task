@@ -1,4 +1,4 @@
-import { arr, bool, obj, opt, str, type Static } from "@earendil-works/pi-schema";
+import { arr, bool, num, obj, opt, str, type Static } from "@earendil-works/pi-schema";
 import { PI_THINKING_LEVELS } from "../thinking.js";
 
 /**
@@ -60,6 +60,16 @@ export function taskParametersSchema() {
     ),
     workspace_group: opt(str({
       description: "Group HerdR panes into a shared workspace",
+    })),
+    results_from: opt(
+      arr(str(), {
+        description:
+          "Settled task ids whose results are injected into this child's prompt (same session only)",
+      }),
+    ),
+    timeout_minutes: opt(num({
+      description:
+        "Per-task wall-clock ceiling in minutes; overrides the agent's timeout_minutes and the global PI_TASK_HARD_TIMEOUT_MINUTES ceiling (applies to durable tasks and background terminal tasks; terminal-foreground and SDK runs keep the global ceiling)",
     })),
     cwd: opt(str({
       description: "Absolute existing directory; default caller, resume uses stored cwd. No worktree creation.",

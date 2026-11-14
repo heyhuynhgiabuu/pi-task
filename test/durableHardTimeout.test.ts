@@ -321,3 +321,180 @@ test("an abort that rejects after the run settled does not arm the ceiling again
   );
   assert.equal(calls, 1, "nothing re-armed for a settled task");
 });
+
+test("a per-call timeout_minutes overrides the global ceiling on a durable run", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-durable-per-task-timeout-"));
+  try {
+    // Global ceiling stays long (30 minutes); the per-call 50 ms ceiling must win.
+    const { options } = executeOptions(root, {
+      runTask: hangsUntilAborted,
+      timeoutMinutes: 0.00083,
+    });
+    const result = await withHardTimeout("30", () => executeDurableTask(options));
+    assert.equal(result.details.phase, "timeout");
+    const entry = readTaskSessionHistory(join(root, ".pi")).find((e) => e.id === "t-hard-timeout");
+    assert.equal(entry?.status, "timeout");
+    // The persisted ceiling lets a recovery re-arm the same per-task limit.
+    assert.ok(entry?.timeoutMs !== undefined, "per-task timeoutMs is persisted");
+    assert.ok(entry?.timeoutMinutes !== undefined, "per-task timeoutMinutes is persisted");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a per-task ceiling does not disturb a completing durable run", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-durable-per-task-done-"));
+  try {
+    const { options } = executeOptions(root, {
+      runTask: async () => ({ conversationId: "child", answer: "<status>success</status>\n<summary>Done.</summary>", usage }),
+      timeoutMinutes: 5,
+    });
+    const result = await withHardTimeout("30", () => executeDurableTask(options));
+    assert.equal(result.details.phase, "done");
+    const entry = readTaskSessionHistory(join(root, ".pi")).find((e) => e.id === "t-hard-timeout");
+    assert.equal(entry?.status, "done");
+    assert.equal(entry?.timeoutMinutes, 5);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a recovered durable run re-arms its own persisted per-task ceiling", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-durable-recovery-per-task-"));
+  const piDir = join(root, ".pi");
+  const databasePath = join(piDir, "durable", "tasks.sqlite");
+  const taskId = "t-recovered-timeout";
+  const models = createModels();
+  const faux = fauxProvider();
+  models.setProvider(faux.provider);
+  faux.setResponses([
+    fauxAssistantMessage([fauxToolCall("bash", { command: "sleep 30" })], { stopReason: "toolUse" }),
+    fauxAssistantMessage("The aborted tool must not continue."),
+  ]);
+  const sent: { content?: string; details?: Record<string, unknown> }[] = [];
+  let settledStatus: string | undefined;
+  let handle: Awaited<ReturnType<typeof openDurableHarness>> | undefined;
+  let completion: Promise<unknown> = Promise.resolve();
+  try {
+    // Seed a running durable task whose PERSISTED ceiling is short (50 ms);
+    // the global env ceiling stays long (30 minutes), so only the persisted
+    // per-task ceiling can abort the recovered run.
+    upsertTaskSessionHistory(piDir, {
+      id: taskId,
+      status: "running",
+      background: true,
+      backend: "durable",
+      agentType: "general",
+      description: "Time out recovered durable work",
+      sessionName: `task-${taskId}`,
+      startedAt: Date.now() - 3_600_000,
+      piDir,
+      dir: join(piDir, "artifacts"),
+      cwd: root,
+      ownerSessionId: "sess-timeout",
+      timeoutMinutes: 0.00083,
+      timeoutMs: 50,
+    });
+    handle = await openDurableHarness(piDir, { databasePath, models: () => models });
+    let markSubmitted!: () => void;
+    const submitted = new Promise<void>((resolve) => { markSubmitted = resolve; });
+    completion = runDurableTask({
+      piDir,
+      databasePath,
+      taskId,
+      task: "Run a long tool.",
+      models: () => models,
+      onSubmitted: () => markSubmitted(),
+    }).then(() => undefined, (error: unknown) => error);
+    await submitted;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    await withHardTimeout("30", () => resumeDurableAfterRestart({
+      pi: { sendMessage: (message: (typeof sent)[number]) => { sent.push(message); } } as never,
+      piDir,
+      sessionId: "sess-timeout",
+      databasePath,
+      models: () => models,
+      onTaskSettled: (_id, _history, status) => { settledStatus = status; },
+    }));
+    await until(() => settledStatus !== undefined, 8_000);
+    assert.equal(settledStatus, "timeout", "the persisted 50 ms ceiling aborted the recovered run");
+    assert.equal(readTaskSessionHistory(piDir).find((entry) => entry.id === taskId)?.status, "timeout");
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0]?.details?.phase, "timeout");
+  } finally {
+    await abortDurableTask(piDir, taskId, { databasePath }).catch(() => null);
+    await completion;
+    if (handle) await handle.harness.close(handle.context);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a corrupt or huge persisted ceiling does not insta-kill a recovered durable run", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-durable-recovery-clamp-"));
+  const piDir = join(root, ".pi");
+  const databasePath = join(piDir, "durable", "tasks.sqlite");
+  const taskId = "t-recovered-clamp";
+  const models = createModels();
+  const faux = fauxProvider();
+  models.setProvider(faux.provider);
+  faux.setResponses([
+    fauxAssistantMessage([fauxToolCall("bash", { command: "sleep 30" })], { stopReason: "toolUse" }),
+    fauxAssistantMessage("Recovered work continues."),
+  ]);
+  let handle: Awaited<ReturnType<typeof openDurableHarness>> | undefined;
+  let completion: Promise<unknown> = Promise.resolve();
+  try {
+    // timeoutMinutes: 60000 ≈ 41 days → 3.6e9 ms, above Node's 2^31-1 setTimeout
+    // ceiling. Unclamped, setTimeout would coerce it to 1 ms and insta-kill the
+    // recovered run as a timeout.
+    upsertTaskSessionHistory(piDir, {
+      id: taskId,
+      status: "running",
+      background: true,
+      backend: "durable",
+      agentType: "general",
+      description: "clamp check",
+      sessionName: `task-${taskId}`,
+      startedAt: Date.now() - 3_600_000,
+      piDir,
+      dir: join(piDir, "artifacts"),
+      cwd: root,
+      ownerSessionId: "sess-clamp",
+      timeoutMinutes: 60000,
+      timeoutMs: 60000 * 60_000,
+    });
+    handle = await openDurableHarness(piDir, { databasePath, models: () => models });
+    let markSubmitted!: () => void;
+    const submitted = new Promise<void>((resolve) => { markSubmitted = resolve; });
+    completion = runDurableTask({
+      piDir,
+      databasePath,
+      taskId,
+      task: "Run a long tool.",
+      models: () => models,
+      onSubmitted: () => markSubmitted(),
+    }).then(() => undefined, (error: unknown) => error);
+    await submitted;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    await resumeDurableAfterRestart({
+      pi: { sendMessage: () => {} } as never,
+      piDir,
+      sessionId: "sess-clamp",
+      databasePath,
+      models: () => models,
+      onTaskSettled: () => {},
+    });
+    // The insta-kill bug settles "timeout" within ~1 ms of arming. Give the
+    // clamped path ample time to prove it did not fire.
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    const status = readTaskSessionHistory(piDir).find((entry) => entry.id === taskId)?.status;
+    assert.equal(status, "running", "the clamped persisted ceiling must not insta-kill the recovered run");
+  } finally {
+    await abortDurableTask(piDir, taskId, { databasePath }).catch(() => null);
+    await completion;
+    if (handle) await handle.harness.close(handle.context);
+    rmSync(root, { recursive: true, force: true });
+  }
+});

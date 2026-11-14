@@ -4,6 +4,7 @@ import {
   upsertTaskSessionHistory,
 } from "../conversation.js";
 import { assessTaskResult, parseResultXml, taskStateLine } from "../helpers.js";
+import { truncateResultText } from "../result-passing.js";
 import { TASK_BACKGROUND_RECEIPT_GUIDANCE } from "../constants.js";
 import { isProcessAliveOrUnknown } from "../process.js";
 import type {
@@ -58,7 +59,13 @@ export interface SdkBackgroundTaskInput<
 type HistoryExtras = Partial<
   Pick<
     TaskSessionHistoryEntry,
-    "sessionRef" | "reportedStatus" | "rawStatus" | "resultValid" | "completedAt" | "tokensPerSecond"
+    | "sessionRef"
+    | "reportedStatus"
+    | "rawStatus"
+    | "resultValid"
+    | "completedAt"
+    | "tokensPerSecond"
+    | "resultText"
   >
 >;
 
@@ -146,6 +153,12 @@ export function startSdkBackgroundTask<TResult extends SdkBackgroundResult>(
           rawStatus: assessment.rawStatus,
           resultValid: assessment.valid,
           completedAt: now(),
+          // A durable run lives in SQLite and an SDK run in its own session
+          // file, so the answer is recorded now: it cannot be re-derived from
+          // a pi session JSONL later.
+          ...(result.output.trim()
+            ? { resultText: truncateResultText(result.output.trim()) }
+            : {}),
         });
       } catch (error) {
         reportDurableRecordFailure(error, "completion");

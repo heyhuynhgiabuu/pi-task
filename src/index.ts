@@ -82,6 +82,7 @@ import {
   createComparisonSettledHandler,
 } from "./lifecycle/index.js";
 import { DeliveryGuard, sessionViewOf } from "./panel/delivery.js";
+import { resolveResultsFrom } from "./lifecycle/result-resolution.js";
 import { activeParentPromptPaths } from "./panel/child-prompts.js";
 import { reconcileStaleSdkBackgroundTasks } from "./subagent/sdkBackground.js";
 import {
@@ -1156,6 +1157,22 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
+      // Resolve `results_from` at admission: every referenced id must name a
+      // settled, same-owner task, or this call is refused before any backend
+      // resource exists. Resolution happens here — not when a child is drained
+      // — because pi-task has no queue of admitted-but-unstarted children, and
+      // a child that started without its named inputs would be the wrong
+      // child. The resolved text becomes part of the prompt, so a durable
+      // resume of this child keeps it in context.
+      const resultsResolution = resolveResultsFrom({
+        piDir,
+        ids: taskParams.results_from,
+        session: sessionViewOf(ctx),
+        selfTaskId: taskParams.task_id ?? registeredTaskId,
+      });
+      if (resultsResolution.kind === "rejected") return resultsResolution.result;
+      const resultInjection = resultsResolution.injection;
+
           let id: string;
           let sessionName: string;
           let resume = false;
@@ -1177,6 +1194,7 @@ export default function (pi: ExtensionAPI) {
           backgroundTasks,
           deliveryGuard,
           registryEntryStatus,
+          ...(resultInjection ? { resultInjection } : {}),
         });
         if (resumeResolution.kind === "handled") return resumeResolution.result;
         id = resumeResolution.id;
@@ -1197,6 +1215,7 @@ export default function (pi: ExtensionAPI) {
           backgroundTasks,
           deliveryGuard,
           registryEntryStatus,
+          ...(resultInjection ? { resultInjection } : {}),
         });
         if (taskResumeResolution.kind === "handled") return taskResumeResolution.result;
         taskParams = taskResumeResolution.taskParams;
@@ -1220,6 +1239,10 @@ export default function (pi: ExtensionAPI) {
         : undefined;
       const settingsBackend = typeof settings?.taskBackend === "string" ? settings.taskBackend : undefined;
 
+      // Resolve `results_from` at admission: every referenced id must name a
+      // settled, same-owner task, or this call is refused before any backend
+      // resource exists. The resolved text becomes part of the prompt, so a
+      // durable resume of this child keeps it in context.
       const taskPreparation = await prepareTaskExecution({
         taskParams,
         agent,
@@ -1229,6 +1252,7 @@ export default function (pi: ExtensionAPI) {
         conversationId,
         persistedTaskCwd,
         settingsBackend,
+        ...(resultInjection ? { resultInjection } : {}),
       });
       if (taskPreparation.kind === "handled") return taskPreparation.result;
       const {
@@ -1353,6 +1377,9 @@ export default function (pi: ExtensionAPI) {
           fast: isolatedFast,
           parentExtensionToolSources,
           isBackground,
+          timeoutMinutes:
+            taskParams.timeout_minutes ?? agent.timeoutMinutes,
+          maxRetries: agent.maxRetries,
           backgroundTasks,
           foregroundTasks,
           deliveryGuard,
@@ -1539,6 +1566,9 @@ export default function (pi: ExtensionAPI) {
         workspaceGroup: taskParams.workspace_group,
         foregroundTask,
         agentMaxTurns: () => agent.maxTurns,
+        timeoutMinutes:
+          taskParams.timeout_minutes ?? agent.timeoutMinutes,
+        maxRetries: agent.maxRetries,
         signal,
         onUpdate,
         ctx,

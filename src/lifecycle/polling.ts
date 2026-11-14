@@ -20,6 +20,11 @@ import type {
 import { taskRuntime, type BackgroundTask } from "../types.js";
 import { completeTask, type ComparisonSettledHook } from "./completion.js";
 import { persistTurnBudget } from "./turn-budget.js";
+import {
+  planTaskRetry,
+  recordRetryAttempt,
+  retryRelaunchFailureMessage,
+} from "./retry.js";
 
 export interface BackgroundPollingDeps {
   backgroundTasks: Map<string, BackgroundTask>;
@@ -70,9 +75,79 @@ export function startBackgroundPolling(
   let inFlight = false;
   const pollErrors = new Map<string, number>();
   const durableStateReported = new Set<string>();
+  const retryTimers = new Map<string, NodeJS.Timeout>();
   // Herdr outages are counted separately from poll failures: an outage keeps the task alive, so
   // sharing `pollErrors` would let an outage end a healthy task.
   const herdrOutages = new Map<string, number>();
+
+  /**
+   * Schedule a retry relaunch for a failed/timeout settlement. Returns true
+   * when the caller must not settle: the tracker is now owned by the retry
+   * timer, and a relaunch throw settles the task as failed with the reason.
+   */
+  const maybeRetry = (
+    id: string,
+    task: BackgroundTask,
+    content: string,
+    phase: "failed" | "timeout",
+  ): boolean => {
+    if (stopped) return false;
+    const plan = planTaskRetry({
+      phase,
+      content,
+      maxRetries: task.maxRetries,
+      retryCount: task.retryCount,
+      comparisonGroupId: task.comparisonGroupId,
+      canRelaunch: typeof task.relaunch === "function",
+    });
+    if (!plan) return false;
+    task.retryCount = plan.attempt + 1;
+    task.retryPending = true;
+    // Registry bookkeeping is best-effort: the in-memory tracker carries the
+    // count, so a failed write delays persistence, not the retry.
+    try {
+      const recorded = recordRetryAttempt(deps.piDir, id, {
+        retryCount: task.retryCount,
+        nextRetryAt: Date.now() + plan.delayMs,
+        lastRetryReason: plan.reason,
+      });
+      if (!recorded) {
+        warn(`background task ${id} retry ${plan.attempt + 1} scheduled but its registry entry is gone; it will not survive a restart.`);
+      }
+    } catch (error) {
+      warn(`background task ${id} retry state was not persisted: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    warn(`background task ${id} ${phase} (${plan.reason}); retry ${plan.attempt + 1}/${task.maxRetries} in ${Math.round(plan.delayMs / 1000)}s.`);
+    const timer = setTimeout(() => {
+      retryTimers.delete(id);
+      if (stopped || deps.backgroundTasks.get(id) !== task) return;
+      const attempt = task.retryCount ?? 1;
+      task.relaunch?.().then(
+        () => {
+          // Belt and braces: the closure owns the reset, but the invariant
+          // must not depend on every future closure author remembering it.
+          task.retryPending = false;
+          warn(`background task ${id} retry ${attempt} launched.`);
+        },
+        (error) => {
+          if (stopped || deps.backgroundTasks.get(id) !== task) return;
+          // Detached from tick()'s catch: a throwing settlement here would be
+          // an unhandled rejection (process-fatal). Mirrors pollTask's
+          // reportDurableStateBlocked path, and clears retryPending so the
+          // tracker cannot wedge (the timer is already consumed).
+          try {
+            settle(id, task, retryRelaunchFailureMessage(attempt - 1, error), "failed");
+          } catch (settlementError) {
+            task.retryPending = false;
+            reportDurableStateBlocked(id, settlementError);
+          }
+        },
+      );
+    }, plan.delayMs);
+    timer.unref?.();
+    retryTimers.set(id, timer);
+    return true;
+  };
 
   // Terminal settlement for every path that ends a task: deliver durably, then retire it.
   const settle = (
@@ -101,6 +176,11 @@ export function startBackgroundPolling(
       // Panel notification is best-effort.
     }
     deps.backgroundTasks.delete(id);
+    const retryTimer = retryTimers.get(id);
+    if (retryTimer !== undefined) {
+      clearTimeout(retryTimer);
+      retryTimers.delete(id);
+    }
     try {
       deps.clearTaskWidgetIfIdle();
     } catch {
@@ -133,10 +213,14 @@ export function startBackgroundPolling(
     // SDK and durable tasks own their completion/progress stream; neither is
     // settled from the terminal-session artifact layout below.
     if (task.backend === "sdk" || task.backend === "durable") return;
+    // A scheduled retry owns the tracker: polling a tracker between a
+    // settlement and its relaunch would re-timeout the dead attempt.
+    if (task.retryPending) return;
     try {
       const sessionDir = join(task.dir, "sessions", id);
       const elapsed = Date.now() - task.startedAt;
-      if (elapsed > deps.hardTimeoutMs) {
+      const timeoutMs = task.timeoutMs ?? deps.hardTimeoutMs;
+      if (elapsed > timeoutMs) {
         if (deps.backgroundTasks.get(id) !== task) return;
         const terminalResult = getLastAssistantResultFromSessionDir(
           sessionDir,
@@ -145,14 +229,20 @@ export function startBackgroundPolling(
         );
         const timeoutContent =
           terminalResult?.content ||
-          `Task timed out after ${Math.round(deps.hardTimeoutMs / 1000)}s without producing a result.`;
-        settle(
-          id,
-          task,
-          timeoutContent,
-          terminalResult?.status === "completed" ? "done" :
-            terminalResult?.status === "failed" ? "failed" : "timeout",
-        );
+          `Task timed out after ${Math.round(timeoutMs / 1000)}s without producing a result.`;
+        const phase =
+          terminalResult?.status === "completed"
+            ? "done"
+            : terminalResult?.status === "failed"
+              ? "failed"
+              : "timeout";
+        if (
+          (phase === "failed" || phase === "timeout") &&
+          maybeRetry(id, task, timeoutContent, phase)
+        ) {
+          return;
+        }
+        settle(id, task, timeoutContent, phase);
         return;
       }
 
@@ -240,12 +330,10 @@ export function startBackgroundPolling(
       if (snapshot.status === "completed") {
         settle(id, task, snapshot.content, "done");
       } else if (snapshot.status === "failed" || snapshot.status === "timeout") {
-        settle(
-          id,
-          task,
-          snapshot.content,
-          snapshot.status === "timeout" ? "timeout" : "failed",
-        );
+        const phase = snapshot.status === "timeout" ? "timeout" : "failed";
+        if (!maybeRetry(id, task, snapshot.content, phase)) {
+          settle(id, task, snapshot.content, phase);
+        }
       }
     } catch (error) {
       // Nothing in here may act after shutdown. `stop()` leaves `backgroundTasks` intact, so an
@@ -352,5 +440,7 @@ export function startBackgroundPolling(
   return () => {
     stopped = true;
     clearInterval(interval);
+    for (const timer of retryTimers.values()) clearTimeout(timer);
+    retryTimers.clear();
   };
 }

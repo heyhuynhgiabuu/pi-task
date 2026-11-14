@@ -21,6 +21,12 @@ export interface TaskStartIntentParams {
   compare?: boolean;
   task_id?: string;
   conversation_id?: string;
+  /**
+   * Same prompt but different injected results is a different delegation, so
+   * the fan-in ids are part of the identity. Normalized (trimmed, deduped) so
+   * a reordered or re-spaced list still finds its live twin.
+   */
+  results_from?: readonly string[];
 }
 
 /**
@@ -45,6 +51,9 @@ export function startIntentHash(input: {
     params.thinking ?? null,
     params.workspace_group ?? null,
     input.claudeRuntime ? "claude" : "pi",
+    params.results_from === undefined
+      ? null
+      : [...new Set(params.results_from.map((id) => id.trim()).filter(Boolean))],
   ]);
   return createHash("sha256").update(canonical).digest("hex").slice(0, 32);
 }

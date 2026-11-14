@@ -4,6 +4,12 @@ export interface TaskHandoffOptions {
   prompt: string;
   parentContext?: string;
   proposedChanges?: readonly string[];
+  /**
+   * Pre-rendered `results_from` section (see `formatResultInjection`). It goes
+   * last, immediately before the closing instructions, because it is input the
+   * child reads after its own instructions and before it starts reporting.
+   */
+  results?: string;
 }
 
 export interface BuildTaskPromptOptions extends TaskHandoffOptions {
@@ -50,12 +56,18 @@ function renderParentHandoff(options: TaskHandoffOptions): string[] {
   ];
 }
 
+function renderResults(results: string | undefined): string[] {
+  const section = results?.trim();
+  return section ? [section, ""] : [];
+}
+
 export function buildTaskFollowUpPrompt(options: TaskHandoffOptions): string {
   return [
     options.prompt,
     "",
     ...renderParentHandoff(options),
     "",
+    ...renderResults(options.results),
     TASK_HANDOFF_INTEGRITY,
   ].join("\n");
 }
@@ -76,6 +88,7 @@ export function buildTaskPrompt(options: BuildTaskPromptOptions): string {
     "",
     TASK_HANDOFF_INTEGRITY,
     "",
+    ...renderResults(options.results),
     TASK_PROMPT_INSTRUCTIONS,
   ].join("\n");
 }

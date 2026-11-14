@@ -90,6 +90,17 @@ export interface AgentConfig {
   fast?: boolean;
   /** Soft turn limit from frontmatter `max_turns:`; undefined = unlimited. */
   maxTurns?: number;
+  /**
+   * Per-task wall-clock ceiling from frontmatter `timeout_minutes:`; undefined
+   * = the global `PI_TASK_HARD_TIMEOUT_MINUTES` ceiling. A per-call
+   * `timeout_minutes` task parameter overrides it.
+   */
+  timeoutMinutes?: number;
+  /**
+   * Provider/transient failure retries from frontmatter `max_retries:`;
+   * undefined/0 = never retry. Each retry is a fresh run of the same task.
+   */
+  maxRetries?: number;
   /** Skill names from frontmatter `skills:`; resolved to paths before launch. */
   skills?: string[];
   /** Explicit allowlist from frontmatter `tools:` */
@@ -709,6 +720,11 @@ export function loadAgentsFromDir(
     const userDisallowed = parseToolList(disallowedRaw);
     const readonlyDeny = readonly ? READONLY_TOOL_DENY : [];
     const maxTurns = parsePositiveInt(frontmatter.max_turns);
+    // Per-task wall-clock ceiling and retry allowance. Both are opt-in
+    // frontmatter settings: `parsePositiveInt` keeps a malformed value from
+    // silently disabling the global ceiling or enabling retries.
+    const timeoutMinutes = parsePositiveInt(frontmatter.timeout_minutes);
+    const maxRetries = parsePositiveInt(frontmatter.max_retries);
     const merged =
       runtime === "claude"
         ? [...new Set([...userDisallowed, ...readonlyDeny])]
@@ -750,6 +766,8 @@ export function loadAgentsFromDir(
       runtime,
       permissionMode,
       maxTurns,
+      ...(timeoutMinutes !== undefined ? { timeoutMinutes } : {}),
+      ...(maxRetries !== undefined ? { maxRetries } : {}),
       body,
       source,
       path: filePath,
@@ -926,6 +944,26 @@ export function resolveTaskThinking(
 function parsePositiveInt(value: unknown): number | undefined {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+/**
+ * Resolve a per-task wall-clock ceiling to milliseconds. A `timeout_minutes`
+ * value (per-call parameter or agent frontmatter) must be a positive finite
+ * number; anything else falls back to the global `PI_TASK_HARD_TIMEOUT_MINUTES`
+ * ceiling so a typo cannot disable the safety net.
+ */
+export function resolveTaskTimeoutMs(
+  timeoutMinutes: number | undefined,
+  globalTimeoutMs: number,
+): { timeoutMs: number; timeoutMinutes?: number } {
+  if (
+    timeoutMinutes === undefined ||
+    !Number.isFinite(timeoutMinutes) ||
+    timeoutMinutes <= 0
+  ) {
+    return { timeoutMs: globalTimeoutMs };
+  }
+  return { timeoutMs: timeoutMinutes * 60_000, timeoutMinutes };
 }
 
 /**

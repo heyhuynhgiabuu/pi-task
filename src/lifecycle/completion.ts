@@ -20,6 +20,7 @@ import {
   type TaskStateName,
 } from "../helpers.js";
 import { createSyncHerdrControl } from "../subagent/herdr.js";
+import { truncateResultText } from "../result-passing.js";
 import { killAgentPaneStrict } from "../subagent/tmux.js";
 import { isStaleExtensionCtxError } from "../stale-ctx.js";
 import { isProcessAliveOrUnknown } from "../process.js";
@@ -747,6 +748,12 @@ export function completeTask({
     rawStatus: assessment.rawStatus,
     resultValid: assessment.valid,
     completedAt: Date.now(),
+    // Recorded here rather than derived later: a Claude runtime transcript is
+    // not a pi session file, and a terminal child's session may be pruned
+    // before the parent asks for its result.
+    ...(phase === "done" && content.trim()
+      ? { resultText: truncateResultText(content.trim()) }
+      : {}),
     background: true,
     comparisonGroupId: task.comparisonGroupId,
     comparisonModel: task.comparisonModel,

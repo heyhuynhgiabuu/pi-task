@@ -10,6 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { deriveTaskResultText, truncateResultText } from "./result-passing.js";
 import { isTerminalHandle, type TerminalHandle } from "./subagent/terminalBackend.js";
 import type { RegistryEntry, TaskSessionHistoryEntry } from "./types.js";
 
@@ -322,20 +323,44 @@ export function readTaskSessionHistory(piDir: string): TaskSessionHistoryEntry[]
   return parseTaskSessionHistory(parsed);
 }
 
+/**
+ * A settled task records its own final text, so `results_from` can inject it
+ * without re-parsing a session file — including after a parent restart. Only a
+ * `done` record keeps one: a cancelled or timed-out run's last complete
+ * assistant turn belongs to earlier work, not to its result, and a fresh run
+ * of a reused id must not inherit the previous run's answer. Derivation runs
+ * before the lock so no session file is read while history is locked.
+ */
+function withSettledResultText(
+  entry: TaskSessionHistoryEntry,
+): TaskSessionHistoryEntry {
+  // Any non-`done` write clears the field. upsert spread-merges, so omitting
+  // the key would leave the previous run's answer in place: a task that just
+  // failed, was cancelled, or restarted would keep advertising a result.
+  // `undefined` is dropped by JSON.stringify, which is the clearing write.
+  if (entry.status !== "done") return { ...entry, resultText: undefined };
+  // An explicitly supplied value wins: a durable or Claude child has no pi
+  // session file to derive from, so its caller records the answer itself.
+  if (entry.resultText !== undefined) return entry;
+  const derived = deriveTaskResultText(entry);
+  return { ...entry, resultText: derived ? truncateResultText(derived) : undefined };
+}
+
 export function upsertTaskSessionHistory(
   piDir: string,
   entry: TaskSessionHistoryEntry,
 ): void {
   const file = getTaskSessionHistoryPath(piDir);
+  const record = withSettledResultText(entry);
   withFileLock(file, () => {
     const parsed = readDurableJson(file);
     if (parsed !== undefined && !Array.isArray(parsed)) unreadableShape(file);
     const entries = parseTaskSessionHistory(parsed ?? []);
-    const idx = entries.findIndex((existing) => existing.id === entry.id);
+    const idx = entries.findIndex((existing) => existing.id === record.id);
     if (idx >= 0) {
-      entries[idx] = { ...entries[idx], ...entry };
+      entries[idx] = { ...entries[idx], ...record };
     } else {
-      entries.push(entry);
+      entries.push(record);
     }
     writeJsonFile(file, entries);
   });

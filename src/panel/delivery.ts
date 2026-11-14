@@ -49,16 +49,41 @@ export class DeliveryGuard {
   allows(session: SessionView, taskId: string): boolean {
     const parent = this.parents.get(taskId);
     if (!parent) return true;
-    // Spawned in a context without a session manager: nothing to verify
-    // against, so never block delivery on that account.
-    if (parent.sessionId === "") return true;
-    if (session.getSessionId() !== parent.sessionId) return false;
-    if (parent.leafId !== null) {
-      const branchIds = new Set(session.getBranch().map((e) => e.id));
-      if (!branchIds.has(parent.leafId)) return false;
-    }
-    return true;
+    return ownerAllowsResult(session, {
+      ownerSessionId: parent.sessionId,
+      ownerLeafId: parent.leafId,
+    });
   }
+}
+
+/**
+ * Owner identity recorded on a task's durable state. `ownerLeafId` null means
+ * the branch check is disabled, exactly as in `DeliveryGuard`.
+ */
+export interface TaskOwnerIdentity {
+  ownerSessionId?: string;
+  ownerLeafId?: string | null;
+}
+
+/**
+ * One owner rule for both paths: a completion delivered into a conversation
+ * and a result injected into a child prompt must come from the same session
+ * and branch that spawned the task. An unowned (legacy) task never blocks —
+ * nothing was recorded to check against.
+ */
+export function ownerAllowsResult(
+  session: SessionView,
+  owner: TaskOwnerIdentity,
+): boolean {
+  const ownerSessionId = owner.ownerSessionId;
+  if (ownerSessionId === undefined || ownerSessionId === "") return true;
+  if (session.getSessionId() !== ownerSessionId) return false;
+  const leafId = owner.ownerLeafId ?? null;
+  if (leafId !== null) {
+    const branchIds = new Set(session.getBranch().map((e) => e.id));
+    if (!branchIds.has(leafId)) return false;
+  }
+  return true;
 }
 
 const NOOP_SESSION: SessionView = {

@@ -5,6 +5,7 @@ readonly: true
 proactive: true
 skills: memory
 tools: read, grep, find, ls
+timeout_minutes: 20
 ---
 
 # Explore Agent

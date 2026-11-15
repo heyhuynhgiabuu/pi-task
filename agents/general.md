@@ -3,6 +3,7 @@ description: PROACTIVE — Use for bounded multi-step implementation, complex mi
 thinking: max
 proactive: true
 skills: memory, development-lifecycle, test-driven-development, verification-before-completion
+timeout_minutes: 90
 ---
 
 # General

@@ -5,6 +5,7 @@ readonly: true
 tools: read, grep, find, ls, websearch, codesearch, web_fetch
 proactive: true
 skills: memory, source-driven-development
+timeout_minutes: 30
 ---
 
 # Scout Agent

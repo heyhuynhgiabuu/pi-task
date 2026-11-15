@@ -5,6 +5,7 @@ readonly: true
 tools: read, grep, find, ls
 proactive: true
 skills: memory, code-review-and-quality, verification-before-completion
+timeout_minutes: 45
 ---
 
 # Reviewer Agent

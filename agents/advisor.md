@@ -9,6 +9,7 @@ proactive: true
 tools: read, grep, find, bash, codemode
 disallowed_tools: write, edit, apply_patch, task
 skills: pi-laws, interface-and-module-design
+timeout_minutes: 20
 ---
 
 # Advisor Agent

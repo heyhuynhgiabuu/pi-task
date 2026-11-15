@@ -4,7 +4,62 @@ All notable changes to `@heyhuynhgiabuu/pi-task` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.16.0] - 2026-11-14
+
+### Added
+
+- **Per-task timeout.** `timeout_minutes:` in agent frontmatter (and a per-call `timeout_minutes`
+  parameter) overrides the global `PI_TASK_HARD_TIMEOUT_MINUTES` ceiling for background terminal
+  and durable tasks. Durable recovery re-arms the persisted ceiling, clamped through
+  `armableTimeoutMs` so a corrupt or oversized value cannot insta-kill a recovered run.
+- **Retry with backoff for background terminal tasks.** `max_retries:` frontmatter retries
+  transient/provider failures and timeouts with exponential backoff (1s, 2s, 4s … capped at 60s),
+  classified through the existing model-failover policy plus transient network/status wording.
+  Attempt bookkeeping persists on the registry; reattach keeps the ceiling and allowance; a
+  relaunch-throw settlement can no longer wedge the tracker or surface an unhandled rejection.
+  Turn limits, poll errors, cancellations, comparison siblings, foreground and SDK runs never
+  retry.
+- **Durable task-level retry.** A background durable run that settles failed/timeout (never
+  cancelled, storage-faulted, foreground, or comparison) is re-submitted after the same backoff on
+  the same child under a fresh request id. When the run died owing an answer, the retry submits
+  `{ type: "continue" }` so the child continues from its own transcript; a continue that finds
+  nothing to answer falls back to exactly one input resubmission. `beginAttempt` rebinds the abort
+  controller and tracker handle before every backoff wait, so user cancel during backoff wakes
+  early and settles cancelled.
+- **`results_from`.** The task tool accepts `results_from: string[]`: settled same-session task
+  results are resolved at admission and injected into the child prompt (same-owner guarded,
+  truncated, unknown ids refused). Result text persists at settle (`done` only; non-done writes
+  clear stale text), so fan-in survives parent restarts.
+- **Recovery notices carry retry metadata.** A durable recovery notice for a row with a retry
+  scheduled spreads `retry_count`/`last_retry_reason` into its details and names the interrupted
+  retry (retry N of M). pi-task never re-arms the retry chain across restarts; whether a placed
+  submission in flight is consumed by the resume is unverified and deferred (design note,
+  `docs/design-durable-retry.md`).
+- **Durable owner liveness.** A durable task row whose recorded pid looks dead is probed through
+  its store lock: a foreign live holder proves the owner alive and keeps stale-SDK reconciliation,
+  restore adoption, and lost-notice replay from firing. A free lock leaves the pid to decide (the
+  reboot pid-recycle case is deliberately not fixed; a boot-id follow-up is tracked in TODO).
+- **Live attempt state.** The durable transcript renders `pi.live` generation attempt and retry
+  state (`Attempt N failed: … — retrying in Ns`, `Retrying: attempt N`) once per distinct state.
+- `taskIdFromRequestId` strips a trailing `:input` so fallback request ids decode on legacy
+  recovery; the full suite runs under `--test-timeout=120000` so a stall names its test.
+
+### Changed
+
+- README and the design note (`docs/design-durable-retry.md`) document the retry semantics, the
+  crash-window wording, and the deferred placed-submission question.
+
+### Fixed
+
+- A failed durable row keeps its previous result only when it actually succeeded: non-`done`
+  history writes clear stale `resultText`, so `results_from` can never inject a failed task's old
+  answer. The foreground durable done path no longer records its "completed without assistant
+  text" placeholder as an injectable result.
+- The durable timeout message names both ceilings (global env and the task's own
+  `timeout_minutes`), and recovery of a task with a huge persisted ceiling clamps instead of
+  coercing `setTimeout` to 1 ms.
+- The task tool description states that `timeout_minutes` applies to durable and background
+  terminal tasks; terminal-foreground and SDK runs keep the global ceiling.
 
 ## [0.15.1] - 2026-11-02
 

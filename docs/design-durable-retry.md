@@ -182,5 +182,12 @@ TUI shows a retry is happening and the child is resuming, not restarting.
 > to one `{ type: "input" }` resubmission with the original prompt. `pi.live.generation.attempt` and
 > `.retry{at,error}` render in the live transcript, so pi-durable's own in-run attempt state is
 > visible while it happens (TODO item B). A crash during the backoff window still settles the task
-> failed on restart (the retry chain is not resumed); recovery notices in that window do not carry
-> retry metadata.
+> failed on restart (the retry chain is not resumed); the interrupted-retry sentence describes the
+> retry that was scheduled, which after a final-attempt failure may never actually have been
+> submitted — a narrow accepted window — and recovery notices carry the row's retry metadata
+> (`retry_count`, `last_retry_reason`), naming the interrupted retry instead of a bare failure line
+> (TODO item D, wording/metadata part).
+
+## Deferred
+
+- Deferred: placed-but-unconsumed retry submissions surviving restart (whether `resumeDurableTasks` auto-resumes a placed submission is unverified — needs a runtime experiment before wiring).

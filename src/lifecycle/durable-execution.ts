@@ -202,6 +202,35 @@ export function formatDurableBackgroundReceipt(id: string): string {
 }
 
 /**
+ * Retry bookkeeping carried onto a recovery notice, read from the history row.
+ * A task that never retried carries nothing, so its notice is unchanged.
+ */
+function recoveredRetryDetails(
+  history: TaskSessionHistoryEntry | undefined,
+): Record<string, unknown> {
+  if (history === undefined || history.retryCount === undefined) return {};
+  return {
+    retry_count: history.retryCount,
+    ...(history.lastRetryReason !== undefined
+      ? { last_retry_reason: history.lastRetryReason }
+      : {}),
+  };
+}
+
+/**
+ * The one line a recovery failure notice adds when the row shows a retry was
+ * scheduled or in flight: the crash window between a retry decision and its
+ * child settling. Empty when no retry was pending, so an ordinary crash reads
+ * exactly as before.
+ */
+function interruptedRetryLine(history: TaskSessionHistoryEntry | undefined): string {
+  if (history === undefined) return "";
+  if (history.retryCount === undefined || history.retryCount <= 0) return "";
+  if (history.lastRetryReason === undefined) return "";
+  return `\n\nA retry (retry ${history.retryCount} of ${history.maxRetries ?? "?"}) was scheduled or in flight when Pi exited; it did not survive the restart.`;
+}
+
+/**
  * A history row whose child may live in a durable store: a durable row, or a
  * legacy row from before `backend` was recorded that has no pane or handle.
  */
@@ -472,6 +501,7 @@ export async function resumeDurableAfterRestart(deps: {
           resumed: true,
           structured_result: structuredResultPayload(assessment),
           full_output: parsed.raw.trim() || output.trim(),
+          ...recoveredRetryDetails(history),
         },
       );
     },
@@ -528,7 +558,7 @@ export async function resumeDurableAfterRestart(deps: {
       }
       notify(
         completionDeliveryId(taskId, history?.startedAt ?? Date.now()),
-        `${taskStateLine(taskId, "failed")}\nBackground task ${taskId} (durable) did not survive the restart.\n\n${reason}`,
+        `${taskStateLine(taskId, "failed")}\nBackground task ${taskId} (durable) did not survive the restart.${interruptedRetryLine(history)}\n\n${reason}`,
         {
           agent_type: history?.agentType ?? "task",
           description: history?.description ?? "",
@@ -541,6 +571,7 @@ export async function resumeDurableAfterRestart(deps: {
           resumed: true,
           error: reason,
           ...(usage ? { usage } : {}),
+          ...recoveredRetryDetails(history),
         },
       );
     },

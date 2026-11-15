@@ -18,12 +18,17 @@ import test from "node:test";
 import { createModels } from "@earendil-works/pi-ai/models";
 import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
 
-import { readTaskSessionHistory } from "../src/conversation.js";
-import { executeDurableTask, retryContinuesContext } from "../src/lifecycle/durable-execution.js";
+import { readTaskSessionHistory, upsertTaskSessionHistory } from "../src/conversation.js";
+import {
+  executeDurableTask,
+  resumeDurableAfterRestart,
+  retryContinuesContext,
+} from "../src/lifecycle/durable-execution.js";
 import { planTaskRetry } from "../src/lifecycle/retry.js";
 import { formatMs } from "../src/helpers.js";
 import { DeliveryGuard } from "../src/panel/delivery.js";
 import {
+  durableRequestId,
   DurableTaskCancelledError,
   DurableTaskTimeoutError,
   openDurableHarness,
@@ -618,6 +623,94 @@ test("a continue retry keeps the child's context: the prompt is not delivered tw
     assert.match(context, /Attempt 2 answered\./, "the continue's own answer is in the context");
   } finally {
     releaseFirst();
+    if (handle) await handle.harness.close(handle.context);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ─── 7. Recovery of the crash window carries the retry metadata ─────────────
+
+test("a recovery failure of a row with a retry pending names the interrupted retry and carries its metadata", async () => {
+  // The crash window: `recordRetry` wrote `retryCount`/`nextRetryAt`/
+  // `lastRetryReason` and Pi exited before the retry attempt settled. Recovery
+  // reports the earlier failure — the chain is not resumed across a restart —
+  // but the notice must say a retry was interrupted and carry the row's
+  // metadata instead of a bare `nothing_to_answer`-style line (TODO item D).
+  const root = mkdtempSync(join(tmpdir(), "pi-task-durable-retry-recovery-"));
+  const piDir = join(root, ".pi");
+  const databasePath = join(root, "durable.sqlite");
+  const taskId = "t-retry-recovery";
+  const requestId = durableRequestId(taskId, "call-retry-recovery");
+  let handle: Awaited<ReturnType<typeof openDurableHarness>> | undefined;
+  try {
+    const models = createModels();
+    const faux = fauxProvider();
+    models.setProvider(faux.provider);
+    // Only the original attempt ever runs: the crash came before the retry
+    // submission, so the store holds no retry attempt to settle.
+    faux.setResponses([
+      fauxAssistantMessage("", { stopReason: "error", errorMessage: "429 Too Many Requests" }),
+    ]);
+    await assert.rejects(runDurableTask({
+      piDir,
+      databasePath,
+      taskId,
+      task: "Work.",
+      requestId,
+      models: () => models,
+    }));
+
+    // What `recordRetry` + `noteAttemptRequestId` leave behind in the window.
+    upsertTaskSessionHistory(piDir, {
+      id: taskId,
+      status: "running",
+      background: true,
+      agentType: "general",
+      description: "retry recovery",
+      sessionName: `task-${taskId}`,
+      startedAt: Date.now() - 5_000,
+      piDir,
+      dir: join(piDir, "artifacts"),
+      cwd: root,
+      ownerSessionId: "sess-1",
+      backend: "durable",
+      durableRequestId: requestId,
+      maxRetries: 3,
+      retryCount: 2,
+      lastRetryReason: "wall_clock_timeout",
+      nextRetryAt: Date.now() - 1_000,
+    });
+
+    const sent: { content?: string; details?: Record<string, unknown> }[] = [];
+    await resumeDurableAfterRestart({
+      pi: { sendMessage: (message: (typeof sent)[number]) => { sent.push(message); } } as never,
+      piDir,
+      sessionId: "sess-1",
+      databasePath,
+      modelRegistry: {
+        getAll: () => models.getAllModels() as never,
+        find: (provider, modelId) => models.getModel(provider, modelId),
+        streamSimple: (model, context, options) => models.streamSimple(model, context, options),
+      },
+    });
+    await until(() => sent.length === 1);
+
+    assert.equal(sent[0]?.details?.phase, "failed");
+    assert.equal(sent[0]?.details?.retry_count, 2, "the row's retry count rides on the notice");
+    assert.equal(sent[0]?.details?.last_retry_reason, "wall_clock_timeout");
+    assert.match(
+      String(sent[0]?.content),
+      /A retry \(retry 2 of 3\) was scheduled or in flight when Pi exited; it did not survive the restart\./,
+      "the notice names the interrupted retry instead of a bare failure line",
+    );
+    // The earlier attempt's own failure is still reported truthfully underneath.
+    assert.match(String(sent[0]?.content), /durable subagent failed: model_error/);
+    assert.equal(
+      historyOf(root, taskId)?.status,
+      "failed",
+      "the retry chain is not resumed across a restart",
+    );
+  } finally {
     if (handle) await handle.harness.close(handle.context);
     rmSync(root, { recursive: true, force: true });
   }

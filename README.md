@@ -232,6 +232,7 @@ Keep the parent responsible for orchestration decisions and final verification. 
 | `PI_TASK_TOOL_NAME` | Delegation tool name, default `task`. Set `Agent` to align with Claude Code's native subagent tool name. Use a unique valid tool name. |
 | `PI_TASK_HERDR_SHELL_READY_TIMEOUT_MS` | Milliseconds a HerdR launch waits for the new pane's shell to run a short marker command before `agent start`; default `10000`, or `0` to skip the wait. Only plain digits up to `600000` are accepted; anything else is ignored and the default applies. A timeout is not an error: the start proceeds anyway. |
 | `PI_TASK_TMUX_SPLIT` | Tmux pane orientation: `auto` (default), `horizontal` (side-by-side), or `vertical` (top/bottom). Auto uses a horizontal split when pane width is at least twice its height; otherwise it uses a vertical split. |
+| `PI_TASK_TMUX_TARGET` | Set to `largest` to split the largest pane by cell area in the parent Pi pane's window, including non-task panes. The default, `current`, preserves the existing behavior of splitting the current pane. The split remains unfocused and existing panes are not rebalanced. If the parent cannot be validated, selection falls back to the current pane's window; if pane listing fails, it splits the current pane. |
 
 At startup, only durable `running` records whose exact current submission is absent from storage (or whose database is missing) become retryable; unreadable storage and ambiguous legacy records are preserved. SDK/comparison cleanup runs independently of durable recovery.
 

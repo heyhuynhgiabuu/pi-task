@@ -38,6 +38,15 @@ function isMissingPaneError(error: unknown): boolean {
   return /can't find pane|no such pane|pane.*not found/i.test(tmuxErrorText(error));
 }
 
+function isDefiniteMissingTargetError(error: unknown, paneId: string): boolean {
+  const failure = error as { status?: unknown; stderr?: unknown; stdout?: unknown } | null;
+  return failure?.status === 1 &&
+    typeof failure.stderr === "string" &&
+    failure.stderr.trim() === `can't find pane: ${paneId}` &&
+    typeof failure.stdout === "string" &&
+    failure.stdout.trim() === "";
+}
+
 export type TmuxPaneProbe =
   | { state: "alive" }
   | { state: "missing" }
@@ -86,7 +95,88 @@ function getCurrentPaneSize(
   return { width, height };
 }
 
+type TmuxWindowPane = {
+  paneId: string;
+  windowId: string;
+  serverPid: string;
+  width: number;
+  height: number;
+};
+
+/** Validate the parent and enumerate only its window in the same tmux call. */
+function getWindowPanes(
+  parentPane: string,
+  serverPid?: string,
+): { parent: TmuxWindowPane; panes: TmuxWindowPane[] } | null {
+  const raw = tmuxCmdQuiet([
+    "list-panes", "-t", parentPane, "-F",
+    "#{pane_id} #{window_id} #{pid} #{pane_width} #{pane_height}",
+  ]);
+  const panes: TmuxWindowPane[] = [];
+  for (const line of raw.split("\n")) {
+    const [paneId, windowId, pid, width, height] = line.trim().split(/\s+/);
+    if (
+      !/^%\d+$/.test(paneId ?? "") ||
+      !/^@\d+$/.test(windowId ?? "") ||
+      !/^\d+$/.test(pid ?? "")
+    ) continue;
+    panes.push({ paneId, windowId, serverPid: pid, width: Number(width), height: Number(height) });
+  }
+  const parent = panes.find((pane) =>
+    pane.paneId === parentPane && (serverPid === undefined || pane.serverPid === serverPid));
+  if (!parent) return null;
+  return {
+    parent,
+    panes: panes.filter((pane) =>
+      pane.windowId === parent.windowId && pane.serverPid === parent.serverPid),
+  };
+}
+
+function splitLargestWindowPane(cwd: string, command: string): TmuxSplitResult {
+  const envPane = process.env.TMUX_PANE;
+  // Pane IDs are server-local: a stale TMUX_PANE must not identify a pane on
+  // another/restarted server. TMUX ends in ,<server-pid>,<session-id>.
+  const serverPid = process.env.TMUX?.match(/,(\d+),\d+$/)?.[1];
+  let window = envPane && /^%\d+$/.test(envPane) && serverPid
+    ? getWindowPanes(envPane, serverPid)
+    : null;
+  const originalPane = window?.parent.paneId ?? getCurrentPaneId();
+  if (!window && originalPane) window = getWindowPanes(originalPane);
+
+  let target = window?.parent;
+  let largestArea = 0;
+  for (const pane of window?.panes ?? []) {
+    const area = pane.width * pane.height;
+    if (
+      pane.width > 0 && pane.height > 0 && Number.isFinite(area) && area > largestArea
+    ) {
+      target = pane;
+      largestArea = area;
+    }
+  }
+  const parentSize = window?.parent ?? getCurrentPaneSize(originalPane);
+  const split = (paneId: string | null, size: { width: number; height: number } | null) => {
+    const direction = chooseTmuxSplitDirection(
+      size?.width ?? 0, size?.height ?? 0, process.env.PI_TASK_TMUX_SPLIT,
+    );
+    return tmuxCmd(buildTmuxSplitWindowArgs(cwd, command, direction, paneId));
+  };
+  try {
+    return { paneId: split(target?.paneId ?? originalPane, target ?? parentSize), originalPane };
+  } catch (error) {
+    // Retry only a definite pre-launch lookup failure for the selected pane.
+    // Timeouts, ambiguous errors, or any returned pane ID could mean the split
+    // succeeded already; retrying those could launch the command twice.
+    if (!originalPane || !target || target.paneId === originalPane ||
+        !isDefiniteMissingTargetError(error, target.paneId)) throw error;
+    return { paneId: split(originalPane, parentSize), originalPane };
+  }
+}
+
 export function splitWindowPane(cwd: string, command: string): TmuxSplitResult {
+  if (process.env.PI_TASK_TMUX_TARGET?.trim().toLowerCase() === "largest") {
+    return splitLargestWindowPane(cwd, command);
+  }
   const originalPane = getCurrentPaneId();
   const paneSize = getCurrentPaneSize(originalPane);
   const direction = chooseTmuxSplitDirection(
@@ -222,14 +312,18 @@ export function capturePaneTail(paneId: string, lines = 80): string {
   ]);
 }
 
+// Recheck on the server immediately before selecting: focus or pane existence
+// can change between a display-message probe and the subsequent command.
+function restoreFocusArgs(paneId: string, originalPane: string): string[] | null {
+  // Pane IDs come from tmux; reject other targets rather than interpolate them
+  // into an if-shell command string.
+  if (!/^%\d+$/.test(paneId) || !/^%\d+$/.test(originalPane)) return null;
+  return ["if-shell", "-F", "-t", paneId, "#{pane_active}", `select-pane -t ${originalPane}`];
+}
+
 export function killAgentPane(paneId: string, originalPane?: string | null): void {
-  if (originalPane) {
-    try {
-      tmuxCmd(["select-pane", "-t", originalPane]);
-    } catch {
-      // Original pane may have been closed; still try to kill the agent pane.
-    }
-  }
+  const focusArgs = originalPane ? restoreFocusArgs(paneId, originalPane) : null;
+  if (focusArgs) tmuxCmdQuiet(focusArgs);
   tmuxCmdQuiet(["kill-pane", "-t", paneId]);
 }
 
@@ -238,13 +332,6 @@ export async function killAgentPaneStrictAsync(
   originalPane: string | null = null,
   run: AsyncTmuxCommand = defaultAsyncTmuxCommand,
 ): Promise<void> {
-  if (originalPane) {
-    try {
-      await run(["select-pane", "-t", originalPane]);
-    } catch {
-      // Original pane may have been closed; still try to kill the agent pane.
-    }
-  }
   let existingPane: string;
   try {
     existingPane = (await run([
@@ -252,13 +339,22 @@ export async function killAgentPaneStrictAsync(
       "-p",
       "-t",
       paneId,
-      "#{pane_id}",
+      originalPane ? "#{pane_id} #{pane_active}" : "#{pane_id}",
     ])).trim();
   } catch (error) {
     if (isMissingPaneError(error)) return;
     throw error;
   }
-  if (existingPane !== paneId) throw new Error(`tmux pane identity mismatch: ${paneId}`);
+  const [actualPane, active] = originalPane ? existingPane.split(/\s+/) : [existingPane];
+  if (actualPane !== paneId) throw new Error(`tmux pane identity mismatch: ${paneId}`);
+  const focusArgs = originalPane && active === "1" ? restoreFocusArgs(paneId, originalPane) : null;
+  if (focusArgs) {
+    try {
+      await run(focusArgs);
+    } catch {
+      // The original or child pane may have closed; still try to kill the child.
+    }
+  }
   try {
     await run(["kill-pane", "-t", paneId]);
   } catch (error) {
@@ -269,21 +365,20 @@ export async function killAgentPaneStrictAsync(
 
 /** Close a task pane while distinguishing an unavailable tmux server from an already-gone pane. */
 export function killAgentPaneStrict(paneId: string, originalPane?: string | null): void {
-  if (originalPane) {
-    try {
-      tmuxCmd(["select-pane", "-t", originalPane]);
-    } catch {
-      // Original pane may have been closed; still try to kill the agent pane.
-    }
-  }
   let existingPane: string;
   try {
-    existingPane = tmuxCmd(["display-message", "-p", "-t", paneId, "#{pane_id}"]);
+    existingPane = tmuxCmd([
+      "display-message", "-p", "-t", paneId,
+      originalPane ? "#{pane_id} #{pane_active}" : "#{pane_id}",
+    ]);
   } catch (error) {
     if (isMissingPaneError(error)) return;
     throw error;
   }
-  if (existingPane !== paneId) throw new Error(`tmux pane identity mismatch: ${paneId}`);
+  const [actualPane, active] = originalPane ? existingPane.split(/\s+/) : [existingPane];
+  if (actualPane !== paneId) throw new Error(`tmux pane identity mismatch: ${paneId}`);
+  const focusArgs = originalPane && active === "1" ? restoreFocusArgs(paneId, originalPane) : null;
+  if (focusArgs) tmuxCmdQuiet(focusArgs);
   try {
     tmuxCmd(["kill-pane", "-t", paneId]);
   } catch (error) {

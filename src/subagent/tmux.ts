@@ -38,6 +38,15 @@ function isMissingPaneError(error: unknown): boolean {
   return /can't find pane|no such pane|pane.*not found/i.test(tmuxErrorText(error));
 }
 
+function isDefiniteMissingTargetError(error: unknown, paneId: string): boolean {
+  const failure = error as { status?: unknown; stderr?: unknown; stdout?: unknown } | null;
+  return failure?.status === 1 &&
+    typeof failure.stderr === "string" &&
+    failure.stderr.trim() === `can't find pane: ${paneId}` &&
+    typeof failure.stdout === "string" &&
+    failure.stdout.trim() === "";
+}
+
 export type TmuxPaneProbe =
   | { state: "alive" }
   | { state: "missing" }
@@ -106,17 +115,20 @@ function getWindowPanes(
   const panes: TmuxWindowPane[] = [];
   for (const line of raw.split("\n")) {
     const [paneId, windowId, pid, width, height] = line.trim().split(/\s+/);
-    if (!/^%\d+$/.test(paneId ?? "") || !/^@\d+$/.test(windowId ?? "") ||
-        !/^\d+$/.test(pid ?? "")) continue;
+    if (
+      !/^%\d+$/.test(paneId ?? "") ||
+      !/^@\d+$/.test(windowId ?? "") ||
+      !/^\d+$/.test(pid ?? "")
+    ) continue;
     panes.push({ paneId, windowId, serverPid: pid, width: Number(width), height: Number(height) });
   }
-  const parent = panes.find((pane) => pane.paneId === parentPane &&
-    (serverPid === undefined || pane.serverPid === serverPid));
+  const parent = panes.find((pane) =>
+    pane.paneId === parentPane && (serverPid === undefined || pane.serverPid === serverPid));
   if (!parent) return null;
   return {
     parent,
-    panes: panes.filter((pane) => pane.windowId === parent.windowId &&
-      pane.serverPid === parent.serverPid),
+    panes: panes.filter((pane) =>
+      pane.windowId === parent.windowId && pane.serverPid === parent.serverPid),
   };
 }
 
@@ -135,7 +147,9 @@ function splitLargestWindowPane(cwd: string, command: string): TmuxSplitResult {
   let largestArea = 0;
   for (const pane of window?.panes ?? []) {
     const area = pane.width * pane.height;
-    if (pane.width > 0 && pane.height > 0 && Number.isFinite(area) && area > largestArea) {
+    if (
+      pane.width > 0 && pane.height > 0 && Number.isFinite(area) && area > largestArea
+    ) {
       target = pane;
       largestArea = area;
     }
@@ -153,11 +167,8 @@ function splitLargestWindowPane(cwd: string, command: string): TmuxSplitResult {
     // Retry only a definite pre-launch lookup failure for the selected pane.
     // Timeouts, ambiguous errors, or any returned pane ID could mean the split
     // succeeded already; retrying those could launch the command twice.
-    const failure = error as { status?: unknown; stderr?: unknown; stdout?: unknown } | null;
     if (!originalPane || !target || target.paneId === originalPane ||
-        failure?.status !== 1 || typeof failure.stderr !== "string" ||
-        failure.stderr.trim() !== `can't find pane: ${target.paneId}` ||
-        typeof failure.stdout !== "string" || failure.stdout.trim() !== "") throw error;
+        !isDefiniteMissingTargetError(error, target.paneId)) throw error;
     return { paneId: split(originalPane, parentSize), originalPane };
   }
 }
@@ -335,8 +346,6 @@ export async function killAgentPaneStrictAsync(
     throw error;
   }
   const [actualPane, active] = originalPane ? existingPane.split(/\s+/) : [existingPane];
-  // tmux can return success with an empty format when the pane has vanished.
-  if (!existingPane) return;
   if (actualPane !== paneId) throw new Error(`tmux pane identity mismatch: ${paneId}`);
   const focusArgs = originalPane && active === "1" ? restoreFocusArgs(paneId, originalPane) : null;
   if (focusArgs) {
@@ -367,8 +376,6 @@ export function killAgentPaneStrict(paneId: string, originalPane?: string | null
     throw error;
   }
   const [actualPane, active] = originalPane ? existingPane.split(/\s+/) : [existingPane];
-  // tmux can return success with an empty format when the pane has vanished.
-  if (!existingPane) return;
   if (actualPane !== paneId) throw new Error(`tmux pane identity mismatch: ${paneId}`);
   const focusArgs = originalPane && active === "1" ? restoreFocusArgs(paneId, originalPane) : null;
   if (focusArgs) tmuxCmdQuiet(focusArgs);

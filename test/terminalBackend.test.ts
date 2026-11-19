@@ -1,4 +1,3 @@
-import "./tmux-largest-pane.test.js";
 import assert from "node:assert/strict";
 import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

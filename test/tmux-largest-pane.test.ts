@@ -44,7 +44,8 @@ if (args[0] === 'display-message') {
   if (process.env.FAKE_FAIL_SPLIT && !fs.existsSync(marker)) {
     fs.writeFileSync(marker, 'failed');
     process.stderr.write(process.env.FAKE_FAIL_SPLIT + '\\n');
-    process.exit(1);
+    if (process.env.FAKE_FAIL_SPLIT_STDOUT) process.stdout.write(process.env.FAKE_FAIL_SPLIT_STDOUT + '\\n');
+    process.exit(Number(process.env.FAKE_FAIL_SPLIT_STATUS || '1'));
   }
   process.stdout.write('%99\\n');
 }
@@ -60,6 +61,8 @@ if (args[0] === 'display-message') {
     FAKE_TMUX_PANES: JSON.stringify(panes),
     FAKE_LIST_FAIL: undefined,
     FAKE_FAIL_SPLIT: undefined,
+    FAKE_FAIL_SPLIT_STDOUT: undefined,
+    FAKE_FAIL_SPLIT_STATUS: undefined,
     FAKE_FOCUSED: undefined,
     FAKE_FOCUS_AT_SELECT: undefined,
     FAKE_CHILD_VANISHED: undefined,
@@ -176,11 +179,18 @@ test("a vanished largest pane is retried once against the parent", { skip: proce
   }, { FAKE_FAIL_SPLIT: "can't find pane: %2" });
 });
 
-test("ambiguous split failure is not retried", { skip: process.platform === "win32" }, () => {
-  withFakeTmux(panes, "largest", (calls) => {
-    assert.throws(() => splitWindowPane("/tmp", "echo ok"));
-    assert.equal(calls().filter((call) => call[0] === "split-window").length, 1);
-  }, { FAKE_FAIL_SPLIT: "server failed" });
+test("ambiguous split failures are not retried", { skip: process.platform === "win32" }, () => {
+  for (const extra of [
+    { FAKE_FAIL_SPLIT: "server failed" },
+    { FAKE_FAIL_SPLIT: "can't find pane: %3" },
+    { FAKE_FAIL_SPLIT: "can't find pane: %2", FAKE_FAIL_SPLIT_STDOUT: "%99" },
+    { FAKE_FAIL_SPLIT: "can't find pane: %2", FAKE_FAIL_SPLIT_STATUS: "2" },
+  ]) {
+    withFakeTmux(panes, "largest", (calls) => {
+      assert.throws(() => splitWindowPane("/tmp", "echo ok"));
+      assert.equal(calls().filter((call) => call[0] === "split-window").length, 1);
+    }, extra);
+  }
 });
 
 test("a failed pane listing falls back to the original pane", { skip: process.platform === "win32" }, () => {
@@ -222,10 +232,12 @@ test("strict sync cleanup retains missing, unavailable, and identity semantics",
       assert.deepEqual(calls().map((call) => call[0]), ["display-message"]);
     }, { FAKE_DISPLAY_ERROR: error });
   }
-  withFakeTmux(panes, undefined, (calls) => {
-    killAgentPaneStrict("%2", "%1");
-    assert.deepEqual(calls().map((call) => call[0]), ["display-message"]);
-  }, { FAKE_DISPLAY_OUTPUT: "" });
+  for (const originalPane of ["%1", null]) {
+    withFakeTmux(panes, undefined, (calls) => {
+      assert.throws(() => killAgentPaneStrict("%2", originalPane), /identity mismatch/);
+      assert.deepEqual(calls().map((call) => call[0]), ["display-message"]);
+    }, { FAKE_DISPLAY_OUTPUT: "" });
+  }
   withFakeTmux(panes, undefined, (calls) => {
     assert.throws(() => killAgentPaneStrict("%2", "%1"), /identity mismatch/);
     assert.deepEqual(calls().map((call) => call[0]), ["display-message"]);
@@ -249,6 +261,16 @@ test("strict async cleanup preserves kill error semantics and ignores focus erro
   }
 });
 
+test("strict async cleanup rejects blank pane identity without an original pane", async () => {
+  const calls: string[][] = [];
+  const run = async (args: readonly string[]) => {
+    calls.push([...args]);
+    return "";
+  };
+  await assert.rejects(killAgentPaneStrictAsync("%2", null, run), /identity mismatch/);
+  assert.deepEqual(calls, [["display-message", "-p", "-t", "%2", "#{pane_id}"]]);
+});
+
 test("strict async cleanup restores only an active child and rechecks races", async () => {
   for (const scenario of ["active", "other", "missing", "empty", "focus-changed", "child-gone", "unavailable", "mismatch"] as const) {
     const calls: string[][] = [];
@@ -269,7 +291,7 @@ test("strict async cleanup restores only an active child and rechecks races", as
       return "";
     };
     if (scenario === "unavailable") await assert.rejects(killAgentPaneStrictAsync("%2", "%1", run), /no server running/);
-    else if (scenario === "mismatch") await assert.rejects(killAgentPaneStrictAsync("%2", "%1", run), /identity mismatch/);
+    else if (scenario === "mismatch" || scenario === "empty") await assert.rejects(killAgentPaneStrictAsync("%2", "%1", run), /identity mismatch/);
     else await killAgentPaneStrictAsync("%2", "%1", run);
     assert.deepEqual(calls[0], ["display-message", "-p", "-t", "%2", "#{pane_id} #{pane_active}"]);
     assert.equal(selected, scenario === "active", scenario);

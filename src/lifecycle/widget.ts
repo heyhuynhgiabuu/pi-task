@@ -50,6 +50,17 @@ import type {
   DurableChildHistoryTranscript,
 } from "../panel/durable-transcript.js";
 import {
+  launchAutoRexMirror,
+  launchRexMirror,
+  type RexMirrorLaunchInput,
+  type RexMirrorLaunchResult,
+} from "../subagent/rex-mirror.js";
+import {
+  LiveSnapshotWriter,
+  buildLiveSnapshot,
+  liveSnapshotPath,
+} from "../panel/rex-snapshot.js";
+import {
   CustomEditor,
   getSelectListTheme,
   type SlashCommandInfo,
@@ -184,6 +195,16 @@ export interface TaskWidgetControllerDeps {
   getCommands?: () => SlashCommandInfo[];
   /** Test seam for an isolated prompt resource directory. */
   getPromptAgentDir?: () => string;
+  /** Test seam for opening the Rex mirror pane; defaults to the `rex split` launcher. */
+  launchRexMirror?: (input: RexMirrorLaunchInput) => Promise<RexMirrorLaunchResult>;
+  /** Test seam for the automatic mirror of a new durable child; defaults to `launchAutoRexMirror`. */
+  launchAutoRexMirror?: (input: RexMirrorLaunchInput) => Promise<RexMirrorLaunchResult>;
+  /**
+   * Test seam for "this Pi runs inside an interactive Rex", which decides
+   * whether a foreground durable run waits for its mirror or shows the Pi view
+   * at once. Defaults to the Rex session and block the launcher requires.
+   */
+  isInteractiveRex?: () => boolean;
   /** Clock for linger/ordering logic (test seam; defaults to Date.now). */
   now?: () => number;
 }
@@ -230,6 +251,21 @@ export interface TaskWidgetController {
   /** Close the transcript view only if it still shows this task. */
   closeTaskView(taskId: string): void;
   /**
+   * Register a fresh durable run for an automatic Rex mirror. Only records the
+   * request; the mirror opens once, when the task's first live transcript
+   * arrives. Nothing is launched for a headless session or from a stale one.
+   *
+   * Rex first: returns true when the mirror will be this run's display, i.e.
+   * a foreground run started inside an interactive Rex. The caller then holds
+   * the Pi transcript view; it opens only as the fallback if the mirror fails
+   * while the run is still current and the user has not navigated since. Any
+   * other case returns false and the caller shows the Pi view at once, as
+   * before. A run that settles before its first transcript needs no mirror:
+   * nothing opens, and the run's own result still carries the outcome.
+   * A background run never touches a view.
+   */
+  registerAutoMirror(taskId: string, placement: "foreground" | "background"): boolean;
+  /**
    * Replace one durable task's bounded transcript and cumulative tool-call
    * count. `agent` is the child conversation's own `pi.agent` state (model,
    * thinking level, cwd) when the live stream carries one.
@@ -255,6 +291,10 @@ export interface TaskWidgetController {
 interface FinishedTask {
   task: BackgroundTask;
   finishedAt: number;
+}
+
+function interactiveRexAvailable(): boolean {
+  return !!((process.env.REX_SESSION ?? "").trim() && (process.env.REX_BLOCK ?? "").trim());
 }
 
 export function createTaskWidgetController(
@@ -295,6 +335,30 @@ export function createTaskWidgetController(
   const liveTranscripts = new Map<
     string,
     { items: TranscriptItem[]; revision: number; agent?: DurableChildAgent }
+  >();
+  const snapshotWriter = new LiveSnapshotWriter({ now });
+  /** Open Rex mirror panes by task id; cleared when the task finishes. */
+  const rexMirrorBlocks = new Map<string, string>();
+  const rexMirrorLaunching = new Set<string>();
+  /** Tasks whose mirror was asked for; only those pay for snapshot writes. */
+  const rexMirrorRequested = new Set<string>();
+  /**
+   * Fresh durable runs awaiting or past their one automatic mirror attempt;
+   * cleared when the task finishes. `fallback` is set only for a held
+   * foreground run, whose Pi view waits for the mirror: the view state
+   * recorded at registration lets a late result touch only the display the
+   * user has left untouched since. Its presence is the held marker.
+   */
+  const autoMirrors = new Map<
+    string,
+    {
+      attempted: boolean;
+      fallback: {
+        generation: number;
+        token: number;
+        viewAtRegistration: string | null;
+      } | null;
+    }
   >();
   /** Child session facts parsed once per JSONL signature; renders only stat the file. */
   const sessionMetaCache = new Map<string, {
@@ -1541,14 +1605,29 @@ export function createTaskWidgetController(
     });
   }
 
-  function stopTaskRow(taskId: string): void {
-    if (agentsSwitcher && agentHistoryEntries.has(taskId)) {
-      const runtime = foregroundTasks.get(taskId) ?? backgroundTasks.get(taskId) ?? finishedTasks.get(taskId)?.task;
-      const belongs = runtime && (agentsOwnerSessionId
-        ? runtime.ownerSessionId === agentsOwnerSessionId
-        : runtime.ownerSessionId === undefined);
-      if (!belongs) return;
+  /**
+   * In /agents a history row may share an id with another session's runtime
+   * task; only a runtime task owned by this session may be acted on.
+   */
+  function agentsRowOwnsRuntime(taskId: string): boolean {
+    const runtime = foregroundTasks.get(taskId) ?? backgroundTasks.get(taskId) ?? finishedTasks.get(taskId)?.task;
+    return !!runtime && (agentsOwnerSessionId
+      ? runtime.ownerSessionId === agentsOwnerSessionId
+      : runtime.ownerSessionId === undefined);
+  }
+
+  function mirrorAgentRow(taskId: string, targetCtx: ExtensionContext): void {
+    if (!agentsRowOwnsRuntime(taskId)) {
+      ignoreStaleExtensionCtx(() =>
+        targetCtx.ui.notify("Rex mirror only follows live tasks in this session.", "warning"),
+      );
+      return;
     }
+    void openRexMirror(taskId, targetCtx);
+  }
+
+  function stopTaskRow(taskId: string): void {
+    if (agentsSwitcher && agentHistoryEntries.has(taskId) && !agentsRowOwnsRuntime(taskId)) return;
     const task = foregroundTasks.get(taskId) ?? backgroundTasks.get(taskId);
     if (!task) {
       if (!finishedTasks.has(taskId)) return;
@@ -1614,6 +1693,10 @@ export function createTaskWidgetController(
       else closeView();
     },
     onStop: (taskId: string) => stopTaskRow(taskId),
+    onMirror: (taskId: string) => {
+      const ctx = agentsCommandContext;
+      if (ctx) mirrorAgentRow(taskId, ctx);
+    },
     onSteer: (text: string) => {
       const taskId = panelState.viewTaskId;
       const ctx = widgetCtx;
@@ -1673,7 +1756,7 @@ export function createTaskWidgetController(
           maxRows,
           ...(agentsSwitcher
             ? {
-                hint: `Switch to: ${panelRows().length + 1} agents — ↑↓ select · enter open · esc close`,
+                hint: `Switch to: ${panelRows().length + 1} agents — ↑↓ select · enter open · o rex · esc close`,
                 showTaskIds: true,
                 shownTaskId: switcherShownId,
               }
@@ -1722,12 +1805,33 @@ export function createTaskWidgetController(
     const previous = liveTranscripts.get(taskId);
     // A watch-error update carries no agent state; keep the last one we saw.
     const nextAgent = agent ?? previous?.agent;
+    const nextRevision = (previous?.revision ?? 0) + 1;
     liveTranscripts.set(taskId, {
       items: [...retained],
-      revision: (previous?.revision ?? 0) + 1,
+      revision: nextRevision,
       ...(nextAgent === undefined ? {} : { agent: nextAgent }),
     });
     if (metadata) liveChildMetadata.set(taskId, metadata);
+    if (task.dir && rexMirrorRequested.has(taskId)) {
+      try {
+        snapshotWriter.schedule(
+          liveSnapshotPath(task.dir, taskId),
+          buildLiveSnapshot(
+            taskId,
+            task,
+            retained,
+            nextRevision,
+            nextAgent,
+            metadata ?? liveChildMetadata.get(taskId),
+            now(),
+            process.pid,
+          ),
+        );
+      } catch {
+        // The Rex mirror snapshot is best-effort and must not disturb the task path.
+      }
+    }
+    startAutoMirror(taskId);
     const calls = retained.filter((item): item is Extract<TranscriptItem, { type: "tool" }> => item.type === "tool");
     task.toolUses = toolUses ?? calls.length;
     task.recentCalls = calls.slice(-10).map((item) => {
@@ -1850,6 +1954,36 @@ export function createTaskWidgetController(
   ): void {
     const completedAt = finishedAt ?? now();
     finishedTasks.set(id, { task, finishedAt: completedAt });
+    autoMirrors.delete(id);
+    if (task.backend === "durable" && task.dir && rexMirrorRequested.delete(id)) {
+      rexMirrorBlocks.delete(id);
+      const snapPath = liveSnapshotPath(task.dir, id);
+      try {
+        const live = liveTranscripts.get(id);
+        if (live) {
+          // The viewer exits only on a terminal status. Delivery the guard suppressed
+          // records no outcome, and an unknown outcome must not read as success.
+          const finalStatus =
+            task.status && task.status !== "running" ? task.status : "finished";
+          snapshotWriter.flush(
+            snapPath,
+            buildLiveSnapshot(
+              id,
+              { ...task, status: finalStatus },
+              live.items,
+              live.revision + 1,
+              live.agent,
+              liveChildMetadata.get(id),
+              completedAt,
+              process.pid,
+            ),
+          );
+        }
+      } catch {
+        // The Rex mirror snapshot is best-effort and must not disturb task completion.
+      }
+      snapshotWriter.forget(snapPath);
+    }
     pruneFinished();
     reconcileSelection();
     syncAnimationTicker();
@@ -1857,6 +1991,174 @@ export function createTaskWidgetController(
   }
 
   let overlayOpen = false;
+
+  type RexMirrorRefusal = { message: string; level: "info" | "warning" };
+  type RexMirrorOutcome =
+    | { status: "refused"; refusal: RexMirrorRefusal }
+    | { status: "busy" }
+    | { status: "opened"; blockId: string }
+    | { status: "failed"; error: string };
+
+  /** Why a mirror cannot open for this task right now, if it cannot. */
+  function rexMirrorRefusal(taskId: string): RexMirrorRefusal | undefined {
+    const task = findTask(taskId);
+    if (!task || task.backend !== "durable") {
+      return { message: "Rex mirror needs a durable-backend task.", level: "warning" };
+    }
+    // A finished entry only means this task ended when it holds this very task:
+    // a new run of a reused id is not settled by the previous run's row.
+    if (finishedTasks.get(taskId)?.task === task || (task.status !== undefined && task.status !== "running")) {
+      return {
+        message: `Task ${taskId} is not running; the Rex mirror only follows running tasks.`,
+        level: "warning",
+      };
+    }
+    if (!liveTranscripts.has(taskId)) {
+      return { message: `Task ${taskId} has no live transcript yet; try again in a moment.`, level: "warning" };
+    }
+    const existing = rexMirrorBlocks.get(taskId);
+    if (existing) {
+      return { message: `Rex mirror for ${taskId} is already open (block ${existing}).`, level: "info" };
+    }
+    return undefined;
+  }
+
+  /**
+   * Open the view-only Rex mirror pane for one running durable task. Manual and
+   * automatic requests both come through here, so they share the snapshot,
+   * the open-pane record and the in-flight guard: a task gets one pane. Never throws.
+   */
+  async function requestRexMirror(
+    taskId: string,
+    fallbackCwd: string,
+    launch: (input: RexMirrorLaunchInput) => Promise<RexMirrorLaunchResult>,
+  ): Promise<RexMirrorOutcome> {
+    const refusal = rexMirrorRefusal(taskId);
+    if (refusal) return { status: "refused", refusal };
+    if (rexMirrorLaunching.has(taskId)) return { status: "busy" };
+    const task = findTask(taskId)!;
+    rexMirrorLaunching.add(taskId);
+    try {
+      const snapshotPath = liveSnapshotPath(task.dir, taskId);
+      // Only a task whose mirror was asked for is snapshotted, so the pane starts
+      // from the whole transcript instead of a throttled older one.
+      rexMirrorRequested.add(taskId);
+      const live = liveTranscripts.get(taskId);
+      if (live) {
+        snapshotWriter.flush(
+          snapshotPath,
+          buildLiveSnapshot(
+            taskId,
+            task,
+            live.items,
+            live.revision,
+            live.agent,
+            liveChildMetadata.get(taskId),
+            now(),
+            process.pid,
+          ),
+        );
+      }
+      const result = await launch({
+        taskId,
+        agentType: task.agentType,
+        description: task.description,
+        cwd: task.cwd ?? fallbackCwd,
+        snapshotPath,
+      });
+      if (!result.ok) {
+        // No pane will read the snapshots, so stop paying for them.
+        rexMirrorRequested.delete(taskId);
+        return { status: "failed", error: result.error };
+      }
+      // The task may have settled while the split was starting.
+      if (finishedTasks.get(taskId)?.task !== task) rexMirrorBlocks.set(taskId, result.blockId);
+      return { status: "opened", blockId: result.blockId };
+    } catch (error) {
+      rexMirrorRequested.delete(taskId);
+      return { status: "failed", error: error instanceof Error ? error.message : String(error) };
+    } finally {
+      rexMirrorLaunching.delete(taskId);
+    }
+  }
+
+  /** Manual `o`: every refusal is reported to the user with its reason. */
+  async function openRexMirror(taskId: string, targetCtx: ExtensionContext): Promise<void> {
+    const notify = (message: string, level: "info" | "warning" | "error") =>
+      ignoreStaleExtensionCtx(() => targetCtx.ui.notify(message, level));
+    const refusal = rexMirrorRefusal(taskId);
+    if (refusal) {
+      notify(refusal.message, refusal.level);
+      return;
+    }
+    const outcome = await requestRexMirror(
+      taskId,
+      targetCtx.cwd ?? process.cwd(),
+      deps?.launchRexMirror ?? launchRexMirror,
+    );
+    if (outcome.status === "failed") notify(`Rex mirror failed: ${outcome.error}`, "error");
+    else if (outcome.status === "opened") {
+      notify(`Opened Rex mirror for ${taskId} (block ${outcome.blockId}).`, "info");
+    }
+  }
+
+  function registerAutoMirror(taskId: string, placement: "foreground" | "background"): boolean {
+    const existing = autoMirrors.get(taskId);
+    if (existing) return existing.fallback !== null;
+    const task = foregroundTasks.get(taskId) ?? backgroundTasks.get(taskId);
+    const held = placement === "foreground" && !!task
+      && (deps?.isInteractiveRex ?? interactiveRexAvailable)()
+      && autoMirrorSessionIsCurrent(task);
+    autoMirrors.set(taskId, {
+      attempted: false,
+      // Only a held run can ever need the Pi view as its fallback, so only it
+      // records the view facts a late result must still match.
+      fallback: held
+        ? { generation: viewGeneration, token: activationToken, viewAtRegistration: panelState.viewTaskId }
+        : null,
+    });
+    return held;
+  }
+
+  /** The task's session is the one this widget currently shows; a stale context never counts. */
+  function autoMirrorSessionIsCurrent(task: BackgroundTask): boolean {
+    const ctx = widgetCtx;
+    if (!ctx || ctx.mode !== "tui") return false;
+    try {
+      const identity = readParentSessionIdentity(ctx);
+      return !identity.invalidViewLink && identity.ownerSessionId === task.ownerSessionId;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Runs on every transcript update; acts only on the first one of a task that
+   * was registered. Never blocks the update: the launch settles in the background.
+   */
+  function startAutoMirror(taskId: string): void {
+    const entry = autoMirrors.get(taskId);
+    if (!entry || entry.attempted) return;
+    const task = foregroundTasks.get(taskId) ?? backgroundTasks.get(taskId);
+    if (!task || !autoMirrorSessionIsCurrent(task)) return;
+    entry.attempted = true;
+    void requestRexMirror(taskId, widgetCtx?.cwd ?? process.cwd(), deps?.launchAutoRexMirror ?? launchAutoRexMirror)
+      .then((outcome) => {
+        const fallback = entry.fallback;
+        // A Rex pane is the display: nothing opens on success, whatever the user did meanwhile.
+        if (outcome.status !== "failed" || !fallback) return;
+        // The held Pi view opens only as the fallback, and only for the run the
+        // user is still looking at: not settled, same session, and no view,
+        // picker or navigation since registration (a closed-and-reopened view
+        // counts as navigation).
+        if (autoMirrors.get(taskId) !== entry) return;
+        if (foregroundTasks.get(taskId) !== task || finishedTasks.get(taskId)?.task === task) return;
+        if (!autoMirrorSessionIsCurrent(task)) return;
+        if (viewGeneration !== fallback.generation || activationToken !== fallback.token) return;
+        if (panelState.viewTaskId !== fallback.viewAtRegistration || overlayOpen || agentsSwitcher) return;
+        openTaskView(taskId);
+      });
+  }
 
   async function showOverlay(
     targetCtx: ExtensionContext,
@@ -1877,6 +2179,10 @@ export function createTaskWidgetController(
               getRows: () => panelRows(),
               now,
               onStop: (taskId) => stopTaskRow(taskId),
+              onMirror: (taskId) => {
+                if (mode === "agents") mirrorAgentRow(taskId, targetCtx);
+                else void openRexMirror(taskId, targetCtx);
+              },
               onOpen: (taskId) => {
                 done(undefined);
                 if (mode === "agents") {
@@ -2035,6 +2341,11 @@ export function createTaskWidgetController(
     childDrafts.clear();
     agentHistoryLoaded = false;
     pendingChildNavigation = undefined;
+    snapshotWriter.dispose();
+    rexMirrorBlocks.clear();
+    rexMirrorLaunching.clear();
+    rexMirrorRequested.clear();
+    autoMirrors.clear();
   }
 
   return {
@@ -2045,6 +2356,7 @@ export function createTaskWidgetController(
     toggleTaskMonitor,
     openTaskView,
     closeTaskView,
+    registerAutoMirror,
     setLiveTranscript,
     setLiveMetadata,
     requestRender,

@@ -28,6 +28,8 @@ export interface TaskOverlayHost {
   now(): number;
   /** x on a row: stop a running task, dismiss a finished one. */
   onStop(taskId: string): void;
+  /** o on a row: open the view-only Rex mirror pane for that task. */
+  onMirror(taskId: string): void;
   /** Select an agent; null returns to the main conversation. */
   onOpen(taskId: string | null): void;
   /** esc: close the overlay. */
@@ -120,6 +122,9 @@ export class TaskOverlay implements Component {
       case "stop":
         if (this.mode === "tasks") this.host.onStop(action.taskId);
         return;
+      case "mirror":
+        this.host.onMirror(action.taskId);
+        return;
       case "clear":
       case "enter":
       case "unhandled":
@@ -150,8 +155,8 @@ export class TaskOverlay implements Component {
       theme: this.theme,
       hint:
         this.mode === "agents"
-          ? `Switch to: ${rows.length + 1} agents — ↑↓ select · enter open · esc close`
-          : `tasks (${rows.length}) — ↑↓ select · enter open · x stop/dismiss · esc close`,
+          ? `Switch to: ${rows.length + 1} agents — ↑↓ select · enter open · o rex · esc close`
+          : `tasks (${rows.length}) — ↑↓ select · enter open · o rex · x stop/dismiss · esc close`,
       ...(this.mode === "agents"
         ? { shownTaskId: this.getShownTaskId(), showTaskIds: true }
         : {}),

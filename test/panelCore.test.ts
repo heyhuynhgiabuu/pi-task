@@ -138,6 +138,17 @@ test("dispatchPanelKey: x stops or dismisses a task row only", () => {
   });
 });
 
+test("dispatchPanelKey: o opens mirror on a task row and is unhandled on main", () => {
+  const rows = [row({ id: "a" }), row({ id: "b" })];
+  assert.deepEqual(dispatchPanelKey("o", "main", rows, "panel"), {
+    kind: "unhandled",
+  });
+  assert.deepEqual(dispatchPanelKey("o", { taskId: "b" }, rows, "panel"), {
+    kind: "mirror",
+    taskId: "b",
+  });
+});
+
 test("dispatchPanelKey: escape clears and non-panel keys are unhandled", () => {
   const rows = [row({ id: "a" })];
   assert.deepEqual(dispatchPanelKey("\x1b", { taskId: "a" }, rows, "panel"), {

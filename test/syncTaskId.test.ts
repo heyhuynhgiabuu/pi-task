@@ -333,6 +333,50 @@ test("SDK background completion queue id matches its persisted message", async (
   }
 });
 
+test("a deferred SDK cancellation notice preserves the finished outcome", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-sdk-cancel-notice-"));
+  try {
+    const piDir = join(root, ".pi");
+    const artifactsDir = join(piDir, "artifacts", "tasks");
+    mkdirSync(artifactsDir, { recursive: true });
+    const id = "sdk-cancel-notice";
+    const options = sdkTaskOptions(root, piDir, artifactsDir, id);
+    const { SdkSubagentInterruptedError } = await import("../src/subagent/runSdk.js");
+    let deliver: (() => void) | undefined;
+    let noticePhase: unknown;
+    const finished = Promise.withResolvers<Pick<import("../src/types.js").BackgroundTask, "status">>();
+
+    await executeSdkTask({
+      ...options,
+      isBackground: true,
+      foregroundTask: undefined,
+      ctx: {
+        ...options.ctx,
+        modelRegistry: { getAll: () => { throw new SdkSubagentInterruptedError("cancelled"); } },
+      },
+      pi: {
+        ...options.pi,
+        sendMessage: (message: { details?: { phase?: string } }) => {
+          noticePhase = message.details?.phase;
+        },
+      },
+      taskWidget: { ...options.taskWidget, noteTaskFinished: (_id: string, task: import("../src/types.js").BackgroundTask) => finished.resolve(task) },
+      enqueueDelivery: (delivery: () => void) => { deliver = delivery; },
+    } as never);
+
+    const task = await finished.promise;
+    assert.equal(task.status, "cancelled");
+    assert.equal(readTaskSessionHistory(piDir).find((entry) => entry.id === id)?.status, "cancelled");
+    assert.equal(noticePhase, undefined);
+    assert.ok(deliver);
+    deliver();
+    assert.equal(noticePhase, "cancelled");
+    assert.equal(task.status, "cancelled");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("SDK foreground clears its row when the durable write fails before the run", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-task-sync-sdk-durable-"));
   try {

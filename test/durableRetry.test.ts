@@ -118,6 +118,7 @@ function harness(
     taskWidget: {
       openTaskView() {},
       closeTaskView() {},
+      registerAutoMirror() {},
       noteTaskFinished() {},
       setLiveTranscript() {},
     },

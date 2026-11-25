@@ -93,6 +93,12 @@ function linkableSessionId(
     : undefined;
 }
 
+/** The phase an SDK failure reports: a cancel stays a cancel, never a failure. */
+function sdkFailurePhase(error: unknown): "cancelled" | "timeout" | "failed" {
+  if (!(error instanceof SdkSubagentInterruptedError)) return "failed";
+  return error.kind;
+}
+
 export async function executeSdkTask({
   id,
   piToolCallId,
@@ -264,7 +270,6 @@ export async function executeSdkTask({
         enqueueDelivery(delivery, completionDeliveryId(id, backgroundTask.startedAt)),
       onComplete: (result) => {
         if (!deliveryGuard.allows(sessionViewOf(ctx), id)) return "suppressed";
-        backgroundTask.status = "done";
         const parsed = parseResultXml(result.output);
         const assessment = assessTaskResult(parsed);
         const summary =
@@ -308,10 +313,7 @@ export async function executeSdkTask({
       },
       onFailed: (error) => {
         if (!deliveryGuard.allows(sessionViewOf(ctx), id)) return "suppressed";
-        const interrupted = error instanceof SdkSubagentInterruptedError;
-        const phase =
-          interrupted && error.kind === "timeout" ? "timeout" : "failed";
-        backgroundTask.status = phase;
+        const phase = sdkFailurePhase(error);
         const message = error instanceof Error ? error.message : String(error);
         return sendCompletionNotice(pi, {
           customType: "task-complete",
@@ -339,7 +341,12 @@ export async function executeSdkTask({
           },
         });
       },
-      onSettled: () => {
+      // onSettled owns the recorded outcome: a notice can be suppressed by the
+      // delivery guard or still sit in the retry queue, and an unrecorded outcome
+      // reads as a finished success.
+      onSettled: (status) => {
+        backgroundTask.status = status;
+        backgroundTask.completedAt = Date.now();
         taskWidget.noteTaskFinished(
           id,
           backgroundTasks.get(id) ?? backgroundTask,
@@ -402,13 +409,7 @@ export async function executeSdkTask({
   try {
     ({ output, sessionId, sessionPath } = await runSdkFallback(foregroundTask));
   } catch (error) {
-    const interrupted = error instanceof SdkSubagentInterruptedError;
-    const phase =
-      interrupted && error.kind === "cancelled"
-        ? "cancelled"
-        : interrupted && error.kind === "timeout"
-          ? "timeout"
-          : "failed";
+    const phase = sdkFailurePhase(error);
     const message = error instanceof Error ? error.message : String(error);
     const failedSessionId = linkableSessionId(sdkSessionId, sdkSessionPath);
     upsertTaskSessionHistory(piDir, {

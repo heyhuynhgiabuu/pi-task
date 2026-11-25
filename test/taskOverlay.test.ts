@@ -9,6 +9,9 @@
 
 import { strict as assert } from "node:assert";
 import { CustomEditor, initTheme } from "@earendil-works/pi-coding-agent";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import {
@@ -21,6 +24,7 @@ import {
 } from "../src/panel/task-overlay.js";
 import type { TaskPanelRow } from "../src/panel/panel-core.js";
 import type { BackgroundTask } from "../src/types.js";
+import type { RexMirrorLaunchInput } from "../src/subagent/rex-mirror.js";
 
 const DOWN = "\x1b[B";
 const UP = "\x1b[A";
@@ -57,6 +61,7 @@ function makeTask(over: Partial<BackgroundTask> = {}): BackgroundTask {
 interface OverlayCalls {
   open: Array<string | null>;
   stop: string[];
+  mirror: string[];
   close: number;
   renders: number;
 }
@@ -65,11 +70,12 @@ function makeHost(getRows: () => TaskPanelRow[]): {
   host: TaskOverlayHost;
   calls: OverlayCalls;
 } {
-  const calls: OverlayCalls = { open: [], stop: [], close: 0, renders: 0 };
+  const calls: OverlayCalls = { open: [], stop: [], mirror: [], close: 0, renders: 0 };
   const host: TaskOverlayHost = {
     getRows,
     now: () => 1000,
     onStop: (id) => calls.stop.push(id),
+    onMirror: (id) => calls.mirror.push(id),
     onOpen: (id) => calls.open.push(id),
     onClose: () => calls.close++,
     requestRender: () => calls.renders++,
@@ -127,6 +133,132 @@ test("x stops the selected row", () => {
   overlay.handleInput(DOWN);
   overlay.handleInput("x");
   assert.deepEqual(calls.stop, ["t2"]);
+});
+
+test("o opens rex mirror on a task row only and hint lists o rex", () => {
+  const { host, calls } = makeHost(() => [makeRow("t1"), makeRow("t2")]);
+  const overlay = new TaskOverlay(host, null);
+  const lines = renderLines(overlay);
+  assert.ok(lines.some((l) => l.includes("o rex")), JSON.stringify(lines));
+
+  overlay.handleInput(DOWN);
+  overlay.handleInput("o");
+  assert.deepEqual(calls.mirror, ["t2"]);
+
+  // On main row, o does nothing
+  overlay.handleInput(UP);
+  overlay.handleInput(UP);
+  overlay.handleInput("o");
+  assert.deepEqual(calls.mirror, ["t2"]);
+
+  // Agents mode mirrors the selected task row, never main
+  const { host: agentsHost, calls: agentsCalls } = makeHost(() => [makeRow("t1")]);
+  const agentsOverlay = new TaskOverlay(agentsHost, null, { mode: "agents", shownTaskId: "t1" });
+  assert.ok(renderLines(agentsOverlay).some((l) => l.includes("o rex")), "agents hint lists o rex");
+  agentsOverlay.handleInput("o");
+  assert.deepEqual(agentsCalls.mirror, ["t1"]);
+  assert.deepEqual(agentsCalls.open, [], "o does not switch agents");
+  agentsOverlay.handleInput(UP);
+  agentsOverlay.handleInput("o");
+  assert.deepEqual(agentsCalls.mirror, ["t1"], "main row never mirrors");
+});
+
+function mirrorHarness() {
+  const dir = mkdtempSync(join(tmpdir(), "pi-task-agents-o-"));
+  const background = new Map([
+    ["t1", makeTask({ backend: "durable", dir, description: "live durable" })],
+    ["t2", makeTask({ backend: "sdk", dir, description: "sdk child" })],
+  ]);
+  const launched: Array<{ taskId: string }> = [];
+  const controller = createTaskWidgetController(new Map(), background, {
+    launchRexMirror: async (input: { taskId: string }) => {
+      launched.push(input);
+      return { ok: true, blockId: "blk-1" };
+    },
+  } as never);
+  controller.setLiveTranscript("t1", [{ type: "user", text: "hi", timestamp: "2026-01-01T00:00:00Z" }] as never);
+  const notes: string[] = [];
+  const h = createOverlayContext();
+  h.context.ui.notify = (m: string) => notes.push(m);
+  return { controller, launched, notes, dir, ...h };
+}
+const tick = () => new Promise((r) => setTimeout(r, 10));
+
+test("inline agents picker: o opens Rex mirror once for the selected task, picker stays", async () => {
+  const { controller, launched, notes, dir, context, createEditor, getFactory } = mirrorHarness();
+  try {
+    controller.ensureTaskWidget(context);
+    await controller.openAgentSwitcher(context);
+    const editor = createEditor()!;
+    editor.handleInput("o"); // main selected: guard, falls through to typing
+    await tick();
+    assert.equal(launched.length, 0, "main row does not launch");
+
+    await controller.openAgentSwitcher(context);
+    editor.handleInput(DOWN);
+    editor.handleInput("o");
+    await tick();
+    assert.deepEqual(launched.map((l) => l.taskId), ["t1"]);
+    const widget = getFactory()!({ terminal: { rows: 40 }, requestRender() {} }, null);
+    const lines = (widget.render(120) as string[]).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+    assert.ok(lines.some((l) => l.includes("Switch to:") && l.includes("o rex")), JSON.stringify(lines));
+    assert.ok(lines.find((l) => l.includes("❯"))?.includes("#t1"), "selection kept");
+    editor.handleInput("o");
+    await tick();
+    assert.equal(launched.length, 1, "repeat reports the existing block");
+    assert.ok(notes.some((n) => n.includes("already open")), notes.join("|"));
+
+    editor.handleInput(DOWN); // sdk task: existing guard outcome, no launch
+    editor.handleInput("o");
+    await tick();
+    assert.equal(launched.length, 1);
+    assert.match(notes.at(-1) ?? "", /durable/i);
+  } finally {
+    controller.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("o is not a general shortcut: ordinary task-row navigation does not launch", async () => {
+  const { controller, launched, dir, context, createEditor } = mirrorHarness();
+  try {
+    controller.ensureTaskWidget(context);
+    const editor = createEditor()!;
+    editor.handleInput("o"); // plain typing
+    assert.equal(editor.getText(), "o", "o types normally outside the picker");
+    editor.setText("");
+    editor.handleInput(DOWN); // normal (non-/agents) task-row navigation
+    assert.equal(editor.getText(), "", "empty prompt down enters row navigation");
+    editor.handleInput(DOWN);
+    editor.handleInput("o");
+    await tick();
+    assert.equal(launched.length, 0, "no mirror without an /agents row selection");
+  } finally {
+    controller.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("modal agents fallback (foreign editor) o opens Rex mirror once for the selected task", async () => {
+  const { controller, launched, dir, context, customCalls } = mirrorHarness();
+  try {
+    controller.ensureTaskWidget(context);
+    context.ui.setEditorComponent(() => ({ handleInput() {} }));
+    const pending = controller.openAgentSwitcher(context);
+    const modal = customCalls[0]!;
+    const overlay = modal.factory({ terminal: { rows: 40 }, requestRender() {} }, null, {}, () => modal.resolve(undefined));
+    overlay.handleInput("o"); // main
+    overlay.handleInput(DOWN);
+    overlay.handleInput("o");
+    await tick();
+    assert.deepEqual(launched.map((l) => l.taskId), ["t1"]);
+    assert.ok(renderLines(overlay).find((l) => l.includes("❯"))?.includes("#t1"), "selection kept");
+    overlay.handleInput(ESC);
+    assert.equal(await pending, true);
+  } finally {
+    controller.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("esc closes the overlay", () => {
@@ -588,4 +720,52 @@ test("createSteerEditor falls back to the minimal editor on degraded themes", ()
   assert.ok(!(editor instanceof CustomEditor), "degraded theme gets the minimal input");
   const lines = editor.render(80).map((l: string) => l.replace(/\x1b\[[0-9;]*m/g, ""));
   assert.ok(lines.some((l) => l.includes("❯")));
+});
+
+test("agents o on a history or foreign-owned row warns instead of failing silently", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-task-agents-o-own-"));
+  const launched: RexMirrorLaunchInput[] = [];
+  const foreign = makeTask({ backend: "durable", dir, ownerSessionId: "S2" });
+  const controller = createTaskWidgetController(new Map(), new Map([["t1", foreign]]), {
+    launchRexMirror: async (input) => {
+      launched.push(input);
+      return { ok: true, blockId: "blk" };
+    },
+    readAgentHistory: () => [
+      // This session's finished history row shares the id with the foreign runtime.
+      { id: "t1", ownerSessionId: "S1", agentType: "general", description: "old",
+        sessionName: "s", startedAt: 1, status: "done", dir, backend: "durable" },
+      // A history-only row with no process-local runtime at all.
+      { id: "t-old", ownerSessionId: "S1", agentType: "general", description: "gone",
+        sessionName: "s2", startedAt: 1, status: "done", dir, backend: "durable" },
+    ],
+  });
+  try {
+    controller.setLiveTranscript("t1", [{ type: "user", text: "hi", timestamp: "2026-01-01T00:00:00Z" }] as never);
+    const { context, createEditor } = createOverlayContext();
+    const notes: string[] = [];
+    context.ui.notify = (message: string) => notes.push(message);
+    context.sessionManager = { getHeader: () => ({ id: "S1" }), getBranch: () => [] };
+    controller.ensureTaskWidget(context);
+    await controller.openAgentSwitcher(context);
+    const editor = createEditor()!;
+
+    editor.handleInput(DOWN); // t1: history row over another session's runtime
+    editor.handleInput("o");
+    await tick();
+    assert.deepEqual(launched, [], "the foreign runtime task is never launched");
+    assert.equal(notes.at(-1), "Rex mirror only follows live tasks in this session.");
+
+    await controller.openAgentSwitcher(context);
+    editor.handleInput(DOWN);
+    editor.handleInput(DOWN); // t-old: history-only row
+    editor.handleInput("o");
+    await tick();
+    assert.deepEqual(launched, []);
+    assert.equal(notes.at(-1), "Rex mirror only follows live tasks in this session.");
+    assert.equal(notes.filter((n) => n.includes("S2")).length, 0, "no foreign session detail leaks");
+  } finally {
+    controller.dispose();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

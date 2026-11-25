@@ -505,3 +505,62 @@ async function eventually(assertion: () => void): Promise<void> {
     rmSync(root, { recursive: true, force: true });
   }
 }
+
+{
+  const t = "onSettled carries the settled outcome before a deferred notification runs";
+  const root = mkdtempSync(join(tmpdir(), "pi-task-sdk-settled-"));
+  try {
+    const piDir = join(root, ".pi");
+    const artifactsDir = join(piDir, "artifacts");
+    mkdirSync(artifactsDir, { recursive: true });
+    const base = {
+      agentType: "general",
+      description: "Do work",
+      startedAt: 100,
+      piDir,
+      artifactsDir,
+      cwd: root,
+      backend: "durable" as const,
+    };
+    const events: string[] = [];
+    let deferred: (() => void) | undefined;
+
+    startSdkBackgroundTask({
+      ...base,
+      id: "m-settled-ok",
+      sessionName: "task-m-settled-ok",
+      run: async () => ({ output: "ok" }),
+      // The completion queue debounces delivery, so onComplete runs after onSettled.
+      deliver: (notify) => {
+        deferred = notify;
+      },
+      onComplete: () => {
+        events.push("notified");
+      },
+      onSettled: (status) => {
+        events.push(status);
+      },
+    });
+    await eventually(() =>
+      assert.deepEqual(events, ["done"], t + ": settled as done while the notice is still deferred"),
+    );
+    deferred?.();
+    assert.deepEqual(events, ["done", "notified"], t + ": the deferred notice ran afterwards");
+
+    events.length = 0;
+    startSdkBackgroundTask({
+      ...base,
+      id: "m-settled-fail",
+      sessionName: "task-m-settled-fail",
+      run: async () => {
+        throw new Error("boom");
+      },
+      onSettled: (status) => {
+        events.push(status);
+      },
+    });
+    await eventually(() => assert.deepEqual(events, ["failed"], t + ": a failure settles as failed"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}

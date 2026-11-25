@@ -48,6 +48,8 @@ export interface TaskPanelHost {
   onExitView(): void;
   /** Cancel the /agents picker and restore the transcript it interrupted. */
   onCancelSwitcher?(): void;
+  /** o on a task row while the /agents picker is active: open the Rex mirror. */
+  onMirror?(taskId: string): void;
   requestRender(): void;
 }
 
@@ -185,6 +187,16 @@ export class TaskPanelEditor extends CustomEditor {
         return;
       case "stop":
         host.onStop(action.taskId);
+        return;
+      case "mirror":
+        // Only the /agents picker claims o; elsewhere it types normally.
+        if (state.switcherMode && host.onMirror) {
+          host.onMirror(action.taskId);
+          return;
+        }
+        host.onSelect(null);
+        host.requestRender();
+        super.handleInput(data);
         return;
       case "unhandled":
         // Any other key returns focus to the editor and types normally.

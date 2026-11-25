@@ -1950,7 +1950,7 @@ test("a resumed durable run without a measurement does not keep the previous run
       toolCallId: "call-stale-tps", ctx: { modelRegistry: {} } as never, pi: {} as never,
       piDir, artifactsDir: join(piDir, "artifacts"), isBackground: false,
       backgroundTasks: new Map(), foregroundTasks: new Map(), deliveryGuard: new DeliveryGuard(),
-      taskWidget: { openTaskView() {}, closeTaskView() {}, noteTaskFinished() {}, setLiveTranscript() {} } as never,
+      taskWidget: { openTaskView() {}, closeTaskView() {}, registerAutoMirror() {}, noteTaskFinished() {}, setLiveTranscript() {} } as never,
       clearTaskWidgetIfIdle: () => {}, ensureTaskWidget: () => {}, enqueueDelivery: (delivery) => delivery(),
       runTask: async () => ({
         conversationId: "stale-tps-child",
@@ -1972,6 +1972,7 @@ test("foreground durable work registers and opens its task view until the result
   const foregroundTasks = new Map<string, import("../src/types.js").BackgroundTask>();
   let openedTaskId: string | undefined;
   let closedTaskId: string | undefined;
+  let mirrorRegistration: string | undefined;
   let submittedRequestId: string | undefined;
   let registeredWhileRunning = false;
   let attributedBeforeSettlement = false;
@@ -2003,6 +2004,7 @@ test("foreground durable work registers and opens its task view until the result
       taskWidget: {
         openTaskView: (taskId: string) => { openedTaskId = taskId; },
         closeTaskView: (taskId: string) => { closedTaskId = taskId; },
+        registerAutoMirror: (taskId: string, placement: string) => { mirrorRegistration = `${taskId}:${placement}`; return false; },
         noteTaskFinished: (_taskId: string, task: import("../src/types.js").BackgroundTask) => {
           finishedTask = task;
         },
@@ -2056,6 +2058,7 @@ test("foreground durable work registers and opens its task view until the result
     assert.equal(registeredWhileRunning, true, "foreground task is available to the panel while running");
     assert.equal(openedTaskId, "t-foreground-view", "foreground task view opens before waiting");
     assert.equal(closedTaskId, "t-foreground-view", "the task view closes when the synchronous call settles");
+    assert.equal(mirrorRegistration, "t-foreground-view:foreground", "a foreground durable run registers one automatic mirror");
     assert.equal(foregroundTasks.has("t-foreground-view"), false, "active row is removed after settlement");
     assert.equal(submittedRequestId, "pi-task:t-foreground-view:call:call-foreground-view");
     assert.equal(attributedBeforeSettlement, true, "submission admission immediately persists the child conversation identity");
@@ -2086,6 +2089,46 @@ test("foreground durable work registers and opens its task view until the result
       "pi-task:t-foreground-view:call:call-foreground-view",
       "foreground history records the exact submission identity before admission",
     );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("foreground durable work inside Rex holds its Pi view for the mirror and still delivers its result", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-durable-foreground-held-"));
+  const foregroundTasks = new Map<string, import("../src/types.js").BackgroundTask>();
+  let openedTaskId: string | undefined;
+  let closedTaskId: string | undefined;
+  let finishedTask: import("../src/types.js").BackgroundTask | undefined;
+  try {
+    const result = await executeDurableTask({
+      id: "t-foreground-held",
+      agent: { name: "general", description: "General task", body: "", source: "project", path: "test-agent.md" },
+      description: "Hold the view for Rex", sessionName: "task-t-foreground-held", prompt: "Return.",
+      cwd: root, toolCallId: "call-foreground-held", ctx: { modelRegistry: {} } as never, pi: {} as never,
+      piDir: join(root, ".pi"), artifactsDir: join(root, ".pi", "artifacts"), isBackground: false,
+      backgroundTasks: new Map(), foregroundTasks, deliveryGuard: new DeliveryGuard(),
+      taskWidget: {
+        openTaskView: (taskId: string) => { openedTaskId = taskId; },
+        closeTaskView: (taskId: string) => { closedTaskId = taskId; },
+        // The widget holds the view: the mirror is this run's display.
+        registerAutoMirror: () => true,
+        noteTaskFinished: (_taskId: string, task: import("../src/types.js").BackgroundTask) => { finishedTask = task; },
+        setLiveTranscript() {},
+      } as never,
+      clearTaskWidgetIfIdle: () => {},
+      ensureTaskWidget: () => {},
+      enqueueDelivery: (delivery) => delivery(),
+      runTask: async () => ({
+        conversationId: "held-child",
+        answer: "Status: success\nDone.",
+        usage: { models: {}, tools: {}, totals: { inputTokens: 0, outputTokens: 0, totalTokens: 0, costTotal: 0 } },
+      }),
+    });
+    assert.equal(openedTaskId, undefined, "no Pi view is opened while the mirror is the display");
+    assert.equal(closedTaskId, "t-foreground-held", "settlement still closes the run's view, a no-op here");
+    assert.equal(finishedTask?.status, "done", "the run's outcome is recorded without any mirror");
+    assert.equal(result.details.phase, "done", "the outcome still reaches the caller");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -2123,6 +2166,7 @@ test("foreground durable cancellation propagates its signal and settles as cance
       taskWidget: {
         openTaskView: () => {},
         closeTaskView: () => {},
+        registerAutoMirror() {},
         noteTaskFinished: (_taskId: string, task: import("../src/types.js").BackgroundTask) => {
           finishedTask = task;
         },
@@ -2302,6 +2346,7 @@ test("foreground task control latches cancellation before durable submission adm
       taskWidget: {
         openTaskView: () => {},
         closeTaskView: () => {},
+        registerAutoMirror() {},
         noteTaskFinished: () => {},
         setLiveTranscript: () => {},
       } as never,
@@ -2376,6 +2421,7 @@ for (const outcome of ["done", "failed"] as const) {
     const modelFactory = () => models;
     let admittedConversationId: string | undefined;
     let attributedAtAdmission = false;
+    const mirrorRegistrations: string[] = [];
     let handle: Awaited<ReturnType<typeof openDurableHarness>> | undefined;
     try {
       handle = await openDurableHarness(piDir, { models: modelFactory });
@@ -2400,7 +2446,11 @@ for (const outcome of ["done", "failed"] as const) {
         backgroundTasks: new Map(),
         foregroundTasks: new Map(),
         deliveryGuard: new DeliveryGuard(),
-        taskWidget: { noteTaskFinished: () => {}, setLiveTranscript: () => {} } as never,
+        taskWidget: {
+          noteTaskFinished: () => {},
+          setLiveTranscript: () => {},
+          registerAutoMirror: (id: string, placement: string) => { mirrorRegistrations.push(`${id}:${placement}`); },
+        } as never,
         clearTaskWidgetIfIdle: () => {},
         ensureTaskWidget: () => {},
         enqueueDelivery: (delivery) => delivery(),
@@ -2424,6 +2474,7 @@ for (const outcome of ["done", "failed"] as const) {
         history = readTaskSessionHistory(piDir).find((entry) => entry.id === taskId);
       }
       assert.equal(attributedAtAdmission, true, "admission persists the known durable child identity");
+      assert.deepEqual(mirrorRegistrations, [`${taskId}:background`], "a background durable run registers one automatic mirror");
       assert.ok(admittedConversationId, "the durable child was admitted");
       assert.equal(history?.status, terminalStatus, "the detached lifecycle settled as requested");
       assert.equal(
@@ -2489,6 +2540,7 @@ test("durable background completion receipt carries its usage ledger", async () 
       deliveryGuard: new DeliveryGuard(),
       taskWidget: {
         noteTaskFinished: () => {},
+        registerAutoMirror() {},
         openTaskView: () => { openedTaskViews++; },
         setLiveTranscript: (_taskId: string, items: readonly { type: string; name?: string }[]) => {
           liveTranscriptUpdates.push([...items]);
@@ -2597,6 +2649,7 @@ for (const isBackground of [false, true] as const) {
             noteTaskFinished: () => {},
             openTaskView: () => {},
             closeTaskView: () => {},
+            registerAutoMirror() {},
             setLiveTranscript: () => {},
           } as never,
           clearTaskWidgetIfIdle: () => {},
@@ -2665,6 +2718,7 @@ for (const outcome of ["success", "failure"] as const) {
         taskWidget: {
           noteTaskFinished: () => {},
           setLiveTranscript: () => {},
+          registerAutoMirror() {},
         } as never,
         clearTaskWidgetIfIdle: () => {},
         ensureTaskWidget: () => {},
@@ -4631,7 +4685,7 @@ async function runFailingDurableTask(
       backgroundTasks: new Map(),
       foregroundTasks: new Map(),
       deliveryGuard: new DeliveryGuard(),
-      taskWidget: { openTaskView() {}, closeTaskView() {}, noteTaskFinished() {}, setLiveTranscript() {} } as never,
+      taskWidget: { openTaskView() {}, closeTaskView() {}, registerAutoMirror() {}, noteTaskFinished() {}, setLiveTranscript() {} } as never,
       clearTaskWidgetIfIdle: () => {},
       ensureTaskWidget: () => {},
       enqueueDelivery: (delivery) => delivery(),
@@ -4720,7 +4774,7 @@ test("a real storage failure mid-run does not orphan the run: restart recovery d
       backgroundTasks: new Map(),
       foregroundTasks: new Map(),
       deliveryGuard: new DeliveryGuard(),
-      taskWidget: { openTaskView() {}, closeTaskView() {}, noteTaskFinished() {}, setLiveTranscript() {} } as never,
+      taskWidget: { openTaskView() {}, closeTaskView() {}, registerAutoMirror() {}, noteTaskFinished() {}, setLiveTranscript() {} } as never,
       clearTaskWidgetIfIdle: () => {},
       ensureTaskWidget: () => {},
       enqueueDelivery: (delivery) => delivery(),

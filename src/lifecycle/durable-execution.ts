@@ -1100,6 +1100,7 @@ export async function executeDurableTask({
     backgroundTasks.set(id, backgroundTask);
     deliveryGuard.track(id, sessionViewOf(ctx));
     ensureTaskWidget();
+    taskWidget.registerAutoMirror(id, "background");
 
     startSdkBackgroundTask({
       id,
@@ -1120,7 +1121,6 @@ export async function executeDurableTask({
         enqueueDelivery(delivery, completionDeliveryId(id, startedAt)),
       onComplete: (result) => {
         if (!deliveryGuard.allows(sessionViewOf(ctx), id)) return "suppressed";
-        backgroundTask.status = "done";
         const parsed = parseResultXml(result.output);
         const assessment = assessTaskResult(parsed);
         const summary =
@@ -1160,7 +1160,6 @@ export async function executeDurableTask({
       onFailed: (error) => {
         if (!deliveryGuard.allows(sessionViewOf(ctx), id)) return "suppressed";
         const phase = failurePhase(error);
-        backgroundTask.status = phase;
         const message = failureMessage(error);
         return notify(
           `${taskStateLine(id, phase)}\nBackground task ${id} (${agent.name}) ${phase}.\n\n${message}`,
@@ -1182,7 +1181,10 @@ export async function executeDurableTask({
           },
         );
       },
-      onSettled: () => {
+      onSettled: (status) => {
+        // The panel and Rex snapshot need an outcome even if delivery is suppressed.
+        backgroundTask.status = status;
+        backgroundTask.completedAt = Date.now();
         backgroundTask.durableAbortController = undefined;
         taskWidget.noteTaskFinished(id, backgroundTasks.get(id) ?? backgroundTask);
         backgroundTasks.delete(id);
@@ -1228,7 +1230,9 @@ export async function executeDurableTask({
   };
   foregroundTasks.set(id, foregroundTask);
   ensureTaskWidget();
-  taskWidget.openTaskView(id);
+  // Rex first: inside an interactive Rex the mirror is the display and the Pi
+  // view is held back as its fallback; anywhere else the view opens at once.
+  if (!taskWidget.registerAutoMirror(id, "foreground")) taskWidget.openTaskView(id);
 
   try {
     if (signal) {

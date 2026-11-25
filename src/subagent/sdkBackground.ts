@@ -51,9 +51,12 @@ export interface SdkBackgroundTaskInput<
    * `onFailed` still notifies. Default: every failure is terminal.
    */
   keepRunningOnFailure?: (error: unknown) => boolean;
-  onSettled?: () => void;
+  /** Reports the local outcome even if history stays running for recovery or notification is deferred. */
+  onSettled?: (status: SettledTaskStatus) => void;
   now?: () => number;
 }
+
+export type SettledTaskStatus = Exclude<TaskSessionHistoryEntry["status"], "running">;
 
 /** Fields that vary between the launch/success/failure history writes. */
 type HistoryExtras = Partial<
@@ -137,6 +140,8 @@ export function startSdkBackgroundTask<TResult extends SdkBackgroundResult>(
     // starting; the lifecycle handlers below keep their own guards.
   }
 
+  let settledStatus: SettledTaskStatus = "failed";
+
   // Promise.resolve().then defers input.run() so a synchronous throw is
   // routed through the failure path instead of escaping this function.
   // Each step is guarded separately: a failed durable write must not skip
@@ -145,9 +150,10 @@ export function startSdkBackgroundTask<TResult extends SdkBackgroundResult>(
   void Promise.resolve()
     .then(() => input.run())
     .then((result) => {
+      settledStatus = "done";
       const assessment = assessTaskResult(parseResultXml(result.output));
       try {
-        record("done", {
+        record(settledStatus, {
           sessionRef: result.sessionPath ?? undefined,
           reportedStatus: assessment.reportedStatus,
           rawStatus: assessment.rawStatus,
@@ -172,10 +178,10 @@ export function startSdkBackgroundTask<TResult extends SdkBackgroundResult>(
         error !== null && typeof error === "object"
           ? (error as { kind?: unknown }).kind
           : undefined;
-      const status: TaskSessionHistoryEntry["status"] =
+      settledStatus =
         kind === "timeout" ? "timeout" : kind === "cancelled" ? "cancelled" : "failed";
       try {
-        if (!input.keepRunningOnFailure?.(error)) record(status, { completedAt: now() });
+        if (!input.keepRunningOnFailure?.(error)) record(settledStatus, { completedAt: now() });
       } catch (error) {
         reportDurableRecordFailure(error, "failure");
         // Best-effort durable record of the failure.
@@ -185,7 +191,7 @@ export function startSdkBackgroundTask<TResult extends SdkBackgroundResult>(
     })
     .finally(() => {
       try {
-        input.onSettled?.();
+        input.onSettled?.(settledStatus);
       } catch {
         // Settled callbacks must never reject the lifecycle chain.
       }

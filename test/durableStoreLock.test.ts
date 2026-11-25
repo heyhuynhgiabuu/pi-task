@@ -318,7 +318,7 @@ test("a durable task is refused before any receipt or history row while another 
       toolCallId: "call-refused", ctx: { modelRegistry: {} } as never, pi: {} as never,
       piDir, artifactsDir: join(piDir, "artifacts"), isBackground: true,
       backgroundTasks: new Map(), foregroundTasks: new Map(), deliveryGuard: new DeliveryGuard(),
-      taskWidget: { openTaskView() {}, closeTaskView() {}, noteTaskFinished() {}, setLiveTranscript() {} } as never,
+      taskWidget: { openTaskView() {}, closeTaskView() {}, registerAutoMirror() {}, noteTaskFinished() {}, setLiveTranscript() {} } as never,
       clearTaskWidgetIfIdle: () => {}, ensureTaskWidget: () => {}, enqueueDelivery: (delivery) => delivery(),
       runTask: async () => {
         ran = true;
@@ -358,7 +358,7 @@ async function executeWithCapturedStore(piDir: string, root: string, id: string,
     toolCallId: `call-${id}`, ctx: sessionCtx(sessionId), pi: {} as never,
     piDir, artifactsDir: join(piDir, "artifacts"), isBackground: false,
     backgroundTasks: new Map(), foregroundTasks: new Map(), deliveryGuard: new DeliveryGuard(),
-    taskWidget: { openTaskView() {}, closeTaskView() {}, noteTaskFinished() {}, setLiveTranscript() {} } as never,
+    taskWidget: { openTaskView() {}, closeTaskView() {}, registerAutoMirror() {}, noteTaskFinished() {}, setLiveTranscript() {} } as never,
     clearTaskWidgetIfIdle: () => {}, ensureTaskWidget: () => {}, enqueueDelivery: (delivery) => delivery(),
     runTask: async (input) => {
       databasePath = input.databasePath;
@@ -506,7 +506,7 @@ test("a background durable task records its session store from the first history
       toolCallId: "call-bg", ctx: sessionCtx("sess-bg"), pi: { sendMessage: () => undefined } as never,
       piDir, artifactsDir: join(piDir, "artifacts"), isBackground: true,
       backgroundTasks: new Map(), foregroundTasks: new Map(), deliveryGuard: new DeliveryGuard(),
-      taskWidget: { openTaskView() {}, closeTaskView() {}, noteTaskFinished() {}, setLiveTranscript() {} } as never,
+      taskWidget: { openTaskView() {}, closeTaskView() {}, registerAutoMirror() {}, noteTaskFinished() {}, setLiveTranscript() {} } as never,
       clearTaskWidgetIfIdle: () => {}, ensureTaskWidget: () => {}, enqueueDelivery: () => {},
       runTask: async () => {
         await runGate;

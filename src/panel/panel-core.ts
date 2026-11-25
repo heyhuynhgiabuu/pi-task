@@ -143,6 +143,8 @@ export type PanelKeyAction =
   | { kind: "enter"; taskId: string | null }
   /** x on a task row: stop a running task, dismiss a finished one. */
   | { kind: "stop"; taskId: string }
+  /** o on a task row: open the view-only Rex mirror pane for that task. */
+  | { kind: "mirror"; taskId: string }
   /** Not a panel key; the caller should forward the input to the editor. */
   | { kind: "unhandled" };
 
@@ -172,6 +174,9 @@ export function dispatchPanelKey(
   }
   if (matchesKey(data, "x") && idx > 0) {
     return { kind: "stop", taskId: rows[idx - 1]!.id };
+  }
+  if (matchesKey(data, "o") && idx > 0) {
+    return { kind: "mirror", taskId: rows[idx - 1]!.id };
   }
   return { kind: "unhandled" };
 }

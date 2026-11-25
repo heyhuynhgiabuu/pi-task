@@ -63,7 +63,7 @@ function executeOptions(root: string, overrides: Record<string, unknown>) {
     backgroundTasks: new Map(),
     foregroundTasks: new Map(),
     deliveryGuard: new DeliveryGuard(),
-    taskWidget: { openTaskView() {}, closeTaskView() {}, noteTaskFinished() {}, setLiveTranscript() {} },
+    taskWidget: { openTaskView() {}, closeTaskView() {}, registerAutoMirror() {}, noteTaskFinished() {}, setLiveTranscript() {} },
     clearTaskWidgetIfIdle: () => {},
     ensureTaskWidget: () => {},
     enqueueDelivery: (delivery: () => void) => delivery(),
@@ -184,6 +184,39 @@ test("a background durable run that outlives the hard timeout is delivered and r
     assert.match(String(sent[0]?.content), /timeout/i);
     assert.ok(String(sent[0]?.content).startsWith('<task id="t-hard-timeout" state="timeout"/>\n'));
     await until(() => readTaskSessionHistory(join(root, ".pi")).find((e) => e.id === "t-hard-timeout")?.status === "timeout");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a background durable run whose notice is still queued records its own outcome", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-task-durable-notice-queued-"));
+  try {
+    const queued: Array<() => void> = [];
+    let finishedTask: import("../src/types.js").BackgroundTask | undefined;
+    const { options } = executeOptions(root, {
+      isBackground: true,
+      runTask: hangsUntilAborted,
+      enqueueDelivery: (delivery: () => void) => {
+        queued.push(delivery);
+      },
+      taskWidget: {
+        openTaskView() {},
+        closeTaskView() {},
+        registerAutoMirror() {},
+        noteTaskFinished(_taskId: string, task: import("../src/types.js").BackgroundTask) {
+          finishedTask = task;
+        },
+        setLiveTranscript() {},
+      },
+    });
+    await withHardTimeout(SHORT_LIMIT, () => executeDurableTask(options));
+    await until(() => finishedTask !== undefined);
+    // The notice never ran, so nothing else could have set the status; a task
+    // settled without one shows as a finished success.
+    assert.equal(queued.length, 1, "the timeout notice is still queued");
+    assert.equal(finishedTask?.status, "timeout");
+    assert.equal((options as { backgroundTasks: Map<string, unknown> }).backgroundTasks.size, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

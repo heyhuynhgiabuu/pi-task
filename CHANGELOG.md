@@ -4,6 +4,36 @@ All notable changes to `@heyhuynhgiabuu/pi-task` are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+## [0.17.0] - 2026-11-25
+
+### Added
+
+- **Automatic Rex panes for durable tasks.** In interactive Pi inside Rex, new durable tasks
+  get a transcript pane without moving focus. The parent window and each overflow window
+  hold at most two side-by-side panes created by pi-task. When another pane will not fit,
+  pi-task opens an overflow window. If Rex is unavailable, foreground tasks show their Pi
+  transcript as before; background tasks remain in `/agents` without opening a popup.
+- **Rex mirror pane.** In `/task list` or `/agents`, `o` on a running durable task opens a view-only Rex split
+  pane beside the parent Pi pane (right, 40%, unfocused) that follows the child's live transcript.
+  In a terminal pane it renders with Pi's own message and tool components (the transcript pane
+  `/task list` then Enter shows) in an alt-screen pi-tui app: up/down and page-up/page-down scroll,
+  `t` toggles tool rows, the wheel scrolls, a click expands a tool row, and `q`, Escape or Ctrl+C
+  close it. It stays open after the task ends, shows the outcome in a footer line and through
+  OSC 7501, and says when the parent Pi exited. When the Pi packages cannot be loaded or the pane
+  is not a terminal, it falls back to an append-only plain-text log that closes itself when the
+  task ends. Once a mirror is requested, the parent writes a throttled atomic snapshot
+  (`live-transcript.json` in the task's session dir, now including the parent's `ownerPid`) that
+  the viewer (`dist/rex-view.js`, with the Pi view in `dist/rex-view-tui.js`) renders; it requires
+  Pi running inside Rex.
+
+### Fixed
+
+- Background SDK and durable tasks now show their final status even if the completion notice
+  is delayed or suppressed. The Rex mirror no longer shows an unknown outcome for these runs,
+  and a cancelled SDK task stays cancelled when its notice arrives.
+
 ## [0.16.0] - 2026-11-14
 
 ### Added

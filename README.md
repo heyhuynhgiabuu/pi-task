@@ -145,10 +145,14 @@ Task control stays on user-facing commands rather than the model-facing tool:
 ```
 /agents            # switch between main and currently tracked subagent transcripts
 /task              # toggle the compact task progress monitor (default: shown)
-/task list         # browse task rows in the TUI; list known durable conversations headlessly
+/task list         # browse task rows in the TUI (↑↓ select, enter open, o rex mirror, x stop/dismiss); list known durable conversations headlessly
 /task status <task-id-or-conversation-id>
 /task cancel <task-id-or-conversation-id>
 ```
+
+In interactive Pi inside Rex, new durable tasks automatically open a transcript pane without moving focus. Pi-task splits beside the parent if its window has room, then fills its own overflow windows before opening another. Pi-task serializes its automatic placements and only splits a window it sees has one pane; task execution stays parallel. A manual split or another Pi process changing the layout at the same instant is not covered by that limit. If Rex cannot open a pane, foreground tasks fall back to the Pi transcript; background tasks remain in `/agents` without opening a popup.
+
+In `/task list` or `/agents`, `o` on a running durable task opens a view-only Rex mirror pane beside the parent Pi pane that shows the child's live transcript. In a terminal pane it renders with Pi's own message and tool components (the same rendering as `/task list` then Enter), using the Pi packages that resolve next to pi-task; if they cannot be loaded, or the pane is not a terminal, it falls back to an append-only plain-text log. Keys in the Pi view: up/down scroll a few rows, page-up/page-down scroll a page, `t` expands or collapses tool rows, and `q`, Escape or Ctrl+C close the pane; the mouse wheel scrolls and a click on a tool row expands it. The Pi view stays open after the task ends so the final report can be read, shows the outcome in its footer line (and reports it to Rex), and notes when the parent Pi has exited; it stays until `q`. The plain-text log closes itself when the task ends. It needs Pi running inside Rex (`REX_SESSION` and `REX_BLOCK` set); it cannot steer the task, and pressing `o` again reports the open pane instead of opening a second one.
 
 The monitor toggle only changes TUI presentation and is session-local; hiding it does not pause, cancel, or affect recovery of any task, and the editor no longer navigates invisible task rows. The `/agents` picker marks the currently shown snapshot; selecting `main` returns to its parent Pi session. Child snapshots use Pi's standard message renderers and preserve available thinking, tool calls, and results. They are separate transcript sessions: new prompts there do not steer or modify the task. Use `/task list` for live updates and steering. The roster is limited to live and briefly retained task records, not an archive of every completed subagent. Pi session switches and forks are blocked while agents are running or completion notices are pending; use `/task list` while they settle.
 

@@ -13,6 +13,8 @@ Delegate bounded, multistep work that benefits from independent judgment or fres
 
 A child starts with fresh context. Referenced files are evidence, not a replacement for the parent's reasoning. Put the following in `prompt`: goal, scope, non-goals, write policy, acceptance criteria, verification recipe. Name relevant files, the review base or diff, and stop conditions explicitly.
 
+A metric can be met by cheating: "fewer bugs" by deleting code, "faster" by dropping a check. Add what must not break (tests still pass, public API unchanged) next to the acceptance criteria, and a stop rule such as "stop and report after two failed attempts at the same approach". When delegating after an earlier failure, list the approaches already tried and why they failed, so the child does not repeat them.
+
 Use `parent_context` for facts, decisions, and constraints the parent learned outside those files. Use `proposed_changes` for one item per intended change: its semantics and what acceptance requires. Do not ask the child to reconstruct an earlier conversation from file paths.
 
 Reviewer tasks require explicit `parent_context` and non-empty `proposed_changes`. If there are no design changes, say so in an item rather than omitting the field.
@@ -54,7 +56,7 @@ Keep the returned `task_id` and pass it for follow-up work with the same child:
 }
 ```
 
-Follow-up prompts still need a complete handoff of new facts and decisions. `conversation_id` starts or resumes a named, reusable specialist conversation on a supporting terminal backend; it is not an interchangeable spelling of `task_id`. The SDK and SQLite durable backends do not support this parameter.
+Follow-up prompts still need a complete handoff of new facts and decisions, including approaches the child or you already ruled out. `conversation_id` starts or resumes a named, reusable specialist conversation on a supporting terminal backend; it is not an interchangeable spelling of `task_id`. The SDK and SQLite durable backends do not support this parameter.
 
 ## Workspace and optional controls
 

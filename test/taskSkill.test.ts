@@ -42,6 +42,8 @@ test("parent extension exposes its bundled delegation skill", () => {
   assert.match(skill, /name: task/);
   assert.match(skill, /goal, scope, non-goals, write policy, acceptance criteria, verification recipe/i);
   assert.match(skill, /no design changes/i);
+  assert.match(skill, /what must not break/i);
+  assert.match(skill, /approaches already tried/i);
   assert.match(skill, /does not create, merge, or remove worktrees/i);
   assert.match(skill, /PI_TASK_TOOL_NAME/);
   assert.match(skill, /starts or resumes a named, reusable specialist conversation/i);

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { createModels } from "@earendil-works/pi-ai/models";
-import { fauxAssistantMessage, fauxProvider } from "@earendil-works/pi-ai/providers/faux";
+import { fauxAssistantMessage, fauxProvider, fauxToolCall } from "@earendil-works/pi-ai/providers/faux";
 import {
   executeDurableChildBuiltinCommand,
   openDurableHarness,
@@ -605,6 +605,103 @@ test("durable compact admits a manual compaction for the active child and refuse
   } finally {
     releaseResult();
     if (run) await run.catch(() => {});
+    rmSync(piDir, { recursive: true, force: true });
+  }
+});
+
+test("durable model and thinking changes reach the child's next request, not the one already prepared", async () => {
+  const piDir = mkdtempSync(join(tmpdir(), "pi-task-durable-hot-reload-"));
+  const models = createModels();
+  const faux = fauxProvider({
+    models: [{ id: "faux-1", reasoning: true }, { id: "faux-2", reasoning: true }],
+  });
+  faux.setResponses([
+    fauxAssistantMessage([fauxToolCall("bash", { command: "true" })], { stopReason: "toolUse" }),
+    fauxAssistantMessage("Task complete."),
+  ]);
+  models.setProvider(faux.provider);
+  const requests: Array<{ model: string | undefined; reasoning: string | undefined }> = [];
+  let reachedResult!: () => void;
+  let releaseResult!: () => void;
+  const resultReached = new Promise<void>((resolve) => { reachedResult = resolve; });
+  const resultGate = new Promise<void>((resolve) => { releaseResult = resolve; });
+  const originalStreamSimple = models.streamSimple.bind(models);
+  let gated = false;
+  models.streamSimple = (model, context, options) => {
+    requests.push({
+      model: model.id,
+      reasoning: (options as { reasoning?: string } | undefined)?.reasoning,
+    });
+    const stream = originalStreamSimple(model, context, options);
+    if (gated) return stream;
+    gated = true;
+    const originalResult = stream.result.bind(stream);
+    stream.result = async () => {
+      reachedResult();
+      await resultGate;
+      return originalResult();
+    };
+    return stream;
+  };
+  const modelFactory = () => models;
+  let conversationId: string | undefined;
+  let run: ReturnType<typeof runDurableTask> | undefined;
+  let handle: Awaited<ReturnType<typeof openDurableHarness>> | undefined;
+  try {
+    run = runDurableTask({
+      piDir,
+      taskId: "hot-reload-task",
+      task: "Finish this test task.",
+      models: modelFactory,
+      onSubmitted: (id) => { conversationId = id; },
+    });
+    await Promise.race([
+      resultReached,
+      run.then(() => assert.fail("the task ended before reaching its first request")),
+    ]);
+    assert.deepEqual(requests, [{ model: "faux-1", reasoning: undefined }],
+      "the request prepared before the commands ran used the previous model and default thinking");
+
+    const modelChange = await executeDurableChildBuiltinCommand(
+      piDir,
+      "hot-reload-task",
+      command("model", `${faux.provider.id}/faux-2`),
+      { models: modelFactory },
+    );
+    assert.equal(modelChange.level, "info", modelChange.message);
+    assert.match(modelChange.message, /saved/i, "the notice says the change is saved");
+    assert.match(modelChange.message, /next request/i, "the notice says when the change is used");
+    assert.match(modelChange.message, /already prepared/i, "the notice excludes the in-flight request");
+    assert.match(modelChange.message, /faux-2/);
+
+    const thinkingChange = await executeDurableChildBuiltinCommand(
+      piDir,
+      "hot-reload-task",
+      command("thinking", "low"),
+      { models: modelFactory },
+    );
+    assert.equal(thinkingChange.level, "info", thinkingChange.message);
+    assert.match(thinkingChange.message, /saved/i, "the notice says the change is saved");
+    assert.match(thinkingChange.message, /next request/i, "the notice says when the change is used");
+    assert.match(thinkingChange.message, /already prepared/i, "the notice excludes the in-flight request");
+
+    releaseResult();
+    await run;
+    assert.deepEqual(requests, [
+      { model: "faux-1", reasoning: undefined },
+      { model: "faux-2", reasoning: "low" },
+    ], "the in-flight request kept its prepared options; the same task's next prepared request used the changed model and thinking");
+
+    handle = await openDurableHarness(piDir, { models: modelFactory });
+    const conversation = await handle.harness.conversation(conversationId as never, handle.context);
+    assert.ok(conversation);
+    const agent = await conversation.agent(handle.context);
+    assert.deepEqual(agent.model, { provider: faux.provider.id, modelId: "faux-2" });
+    assert.equal(agent.thinkingLevel, "low");
+  } finally {
+    releaseResult();
+    if (run) await run.catch(() => {});
+    if (handle) await handle.harness.close(handle.context);
     rmSync(piDir, { recursive: true, force: true });
   }
 });

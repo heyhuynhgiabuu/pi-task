@@ -28,12 +28,15 @@ import {
 import {
   ARROW_SCROLL,
   PAGE_SCROLL,
+  RexViewComponent,
   isProcessAlive,
   mapViewerKey,
   routeViewerMouse,
   viewerFooter,
+  type RexViewHost,
 } from "../src/rex-view-tui.js";
 import type { TaskTranscriptPane } from "../src/panel/task-pane.js";
+import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { TuiMouseEvent } from "@earendil-works/pi-tui";
 import {
   launchRexMirror,
@@ -934,6 +937,56 @@ test("rex-view-tui owner liveness: signal 0 decides, EPERM still means alive", (
   assert.equal(isProcessAlive(10, killWith("ESRCH")), false);
   assert.equal(isProcessAlive(10, killWith("EPERM")), true);
   assert.equal(isProcessAlive(undefined, killWith("ESRCH")), true, "no recorded owner is never reported dead");
+});
+
+/** A viewer host that counts closes; the parent counts as alive unless overridden. */
+function createViewerHost(over: Partial<RexViewHost> = {}) {
+  const calls = { close: 0, statuses: [] as string[] };
+  const host: RexViewHost = {
+    tui: {
+      requestRender: () => {},
+      terminal: {
+        rows: 40,
+        setProgramStatus: (status) => calls.statuses.push(status.message ?? status.state),
+      },
+    },
+    theme: { fg: (_token: string, text: string) => text } as unknown as Theme,
+    onClose: () => {
+      calls.close += 1;
+    },
+    ...over,
+  };
+  return { host, calls };
+}
+
+test("rex-view-tui auto close: a terminal first snapshot closes through the host at once, every outcome alike", () => {
+  for (const status of ["done", "finished", "failed", "timeout", "cancelled", "aborted"]) {
+    const { host, calls } = createViewerHost();
+    const view = new RexViewComponent(host, makeSnap([assistantItem("final report")], { status }));
+    assert.equal(calls.close, 1, `${status}: the first read closes without q`);
+    assert.ok(calls.statuses.at(-1)?.startsWith(status), `${status}: the outcome is reported before the close`);
+    view.dispose();
+  }
+});
+
+test("rex-view-tui auto close: a running mirror stays open, parent death alone does not close it, a terminal update closes once", () => {
+  const running = createViewerHost();
+  const view = new RexViewComponent(running.host, makeSnap([userItem("go")]));
+  view.update(makeSnap([userItem("go"), assistantItem("working", true)], { revision: 2 }));
+  assert.equal(running.calls.close, 0, "a running mirror stays open");
+  view.handleInput("q");
+  assert.equal(running.calls.close, 1, "q still closes it");
+
+  const orphaned = createViewerHost({ isOwnerAlive: () => false });
+  const orphan = new RexViewComponent(orphaned.host, makeSnap([userItem("go")]));
+  orphan.refreshOwner();
+  assert.match(orphaned.calls.statuses.at(-1) ?? "", /parent Pi exited/);
+  assert.equal(orphaned.calls.close, 0, "a dead parent alone keeps the pane open");
+
+  orphan.update(makeSnap([userItem("go"), assistantItem("final")], { revision: 2, status: "failed" }));
+  assert.equal(orphaned.calls.close, 1, "the terminal update closes through the same host close");
+  assert.match(orphaned.calls.statuses.at(-1) ?? "", /failed/, "the outcome is reported before the pane goes");
+  orphan.dispose();
 });
 
 function mouseEvent(over: Partial<TuiMouseEvent>): TuiMouseEvent {

@@ -116,8 +116,10 @@ function renderForegroundTask(
   const description = task.description ? ` — ${task.description}` : "";
   const lines: string[] = [];
 
+  // Both rows start flush in column 0: the spinner and the tree connector are the
+  // first visible cell, with the leading blank (if any) never inside the color escape.
   const header =
-    color(theme, "accent", ` ${spinner}`) +
+    color(theme, "accent", spinner) +
     " " +
     color(theme, "toolTitle", agentName) +
     color(theme, "dim", description) +
@@ -136,10 +138,7 @@ function renderForegroundTask(
     const detail = latest.detail ? `  ${latest.detail}` : "";
     const suffix = hiddenCount > 0 ? ` (+${hiddenCount} more)` : "";
     const line =
-      " " +
       color(theme, "dim", TREE_LAST) +
-
-
       " " +
       toolStatusMark(theme, latest.status, spinner) +
       (latest.status === "in_progress" ? " " : "  ") +
@@ -164,6 +163,7 @@ function renderBackgroundTask(
     fit(
       color(theme, "dim", "- ") +
         color(theme, "toolTitle", task.agentType) +
+        color(theme, "dim", task.description ? ` — ${task.description}` : "") +
         color(theme, "dim", " · ") +
         color(theme, "accent", id) +
         color(theme, "dim", " · ") +

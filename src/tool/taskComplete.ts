@@ -1,4 +1,4 @@
-import { Box, Container, Text } from "@earendil-works/pi-tui";
+import { Box, MouseRegion, Text } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
   renderTaskResultBody,
@@ -9,6 +9,7 @@ import { renderTaskTitleText } from "./taskTitle.js";
 /**
  * Renderer for background task completion notifications.
  * Same structured sections as foreground task renderResult (Ctrl+O).
+ * A left click on the title row toggles this card only, like a native tool card.
  */
 export function createTaskCompleteRenderer() {
   return (
@@ -26,22 +27,36 @@ export function createTaskCompleteRenderer() {
       return undefined;
     }
 
-    const root = new Container();
     const agentType = d.agent_type || "task";
     const desc = d.description || "";
     const title = renderTaskTitleText(agentType, desc, theme);
-    root.addChild(new Text(" " + title, 0, 0));
-
     const summaryText = (d.summary || "").trim();
-    const body = renderTaskResultBody(d, summaryText, { expanded, indentHint: true }, theme);
-    root.addChild(body);
 
-    if (root.children.length === 0) return undefined;
-
+    // Per-card state seeded from the Ctrl+O flag. The host re-runs this renderer
+    // on Ctrl+O and theme changes, which resets any local toggle.
+    let cardExpanded = expanded === true;
     const box = new Box(0, 1, (text) => theme.bg("toolSuccessBg", text));
-    for (const child of root.children) {
-      box.addChild(child);
-    }
+    const rebuild = () => {
+      box.clear();
+      box.addChild(
+        new MouseRegion(new Text(" " + title, 0, 0), (event) => {
+          // Native click semantics: left click only, handled (repaints), no focus.
+          if (event.type !== "click" || event.button !== "left") return undefined;
+          cardExpanded = !cardExpanded;
+          rebuild();
+          return { handled: true };
+        }),
+      );
+      box.addChild(
+        renderTaskResultBody(
+          d,
+          summaryText,
+          { expanded: cardExpanded, indentHint: true },
+          theme,
+        ),
+      );
+    };
+    rebuild();
     return box;
   };
 }

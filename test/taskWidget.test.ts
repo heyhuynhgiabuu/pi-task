@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { renderTaskPanel, renderTaskWidget, type WidgetTask } from "../src/task-widget.js";
+import { renderTaskPanel, renderTaskWidget, type ThemeLike, type WidgetTask } from "../src/task-widget.js";
 
-test("task widget prefixes in-progress spinner with a leading space", () => {
+test("task widget rows sit flush: the spinner and the tree connector start in column 0", () => {
   const lines = renderTaskWidget({
     foregroundTasks: [
       [
@@ -35,9 +35,9 @@ test("task widget prefixes in-progress spinner with a leading space", () => {
     now: 0,
   });
 
-  assert.match(lines[0] ?? "", /^ ⠋ /, "foreground header has leading space before spinner");
-  assert.match(lines[2] ?? "", /· 0 tools$/, "background header shows metadata only");
-  assert.match(lines[3] ?? "", /  └─  ⠋ waiting$/, "background tool detail uses a tree connector with spinner");
+  assert.equal(lines[0], "⠋ General — foreground run  • 0ms", "foreground header: spinner in column 0, no leading blank");
+  assert.equal(lines[2], "- reviewer — background run · task-2 · 0ms · 0 tools", "background header names the task like the foreground and keeps its indicators");
+  assert.equal(lines[3], "  └─  ⠋ waiting", "background tool detail uses a tree connector with spinner");
 });
 
 test("background widget uses tree connector and collapses older tool calls", () => {
@@ -148,8 +148,8 @@ test("task widget shows the running phase next to an advancing spinner frame", (
 
   const first = render(0)[0] ?? "";
   assert.match(first, /Running websearch\u2026/, "the row names the phase it is in");
-  assert.match(first, /^ \u280B /, "frame 0 of the spinner");
-  assert.match(render(80)[0] ?? "", /^ \u2819 /, "the next frame follows one interval later");
+  assert.match(first, /^\u280B /, "frame 0 of the spinner, flush left");
+  assert.match(render(80)[0] ?? "", /^\u2819 /, "the next frame follows one interval later");
 
   const background = renderTaskWidget({
     foregroundTasks: [],
@@ -597,4 +597,105 @@ test("the ellipsis a row asks for survives the line-break collapse", () => {
 
   assert.ok(lines.some((line) => line.includes("…")), "a truncated panel row carries the panel ellipsis");
   assert.ok(!lines.some((line) => line.includes("...")), "and not pi-tui's default three dots");
+});
+
+// ── below-editor rows sit flush and every row names its task ─────────────────
+
+const ANSI = { accent: "36", toolTitle: "33", dim: "2", warning: "33", success: "32", text: "0" } as const;
+const ansiTheme: ThemeLike = {
+  fg: (token, text) => `\x1b[${ANSI[token as keyof typeof ANSI] ?? "0"}m${text}\x1b[0m`,
+};
+const stripAnsi = (line: string) => line.replace(/\x1b\[[0-9;]*m/g, "");
+
+test("both foreground lines shift one column left: spinner and tree connector start at column 0, with or without ANSI colors", () => {
+  const task: WidgetTask = {
+    agentType: "general",
+    description: "foreground run",
+    startedAt: 0,
+    toolUses: 1,
+    activity: { phase: "tool", label: "Running…" },
+    recentCalls: [{ id: "c1", name: "read", detail: "a.ts", status: "in_progress" }],
+  };
+  const render = (theme?: ThemeLike, width = 120) =>
+    renderTaskWidget({
+      foregroundTasks: [["task-1", task]],
+      backgroundTasks: [],
+      foregroundCount: 1,
+      backgroundCount: 0,
+      width,
+      now: 0,
+      theme,
+    });
+
+  const plain = render();
+  assert.equal(plain[0], "⠋ General — foreground run  • Running… • 0ms • 1 tool", "header starts with the spinner");
+  assert.equal(plain[1], "└─  ⠋ read  a.ts", "tool line starts with the tree connector");
+
+  const colored = render(ansiTheme);
+  assert.match(colored[0] ?? "", /^\x1b\[36m⠋\x1b\[0m /, "accent escape then spinner: no blank inside or outside the escape");
+  assert.match(colored[1] ?? "", /^\x1b\[2m└─\x1b\[0m /, "dim escape then connector: no blank inside or outside the escape");
+  assert.deepEqual(colored.map(stripAnsi), plain, "colors never move a visible cell");
+
+  for (const width of [40, 12]) {
+    const narrow = render(ansiTheme, width);
+    assert.ok(stripAnsi(narrow[0] ?? "").startsWith("⠋ "), `width ${width}: header still starts with the spinner`);
+    assert.ok(stripAnsi(narrow[1] ?? "").startsWith("└─ "), `width ${width}: tool line still starts with the connector`);
+  }
+});
+
+test("background rows name each task on their header line and keep their indicators", () => {
+  const lines = renderTaskWidget({
+    foregroundTasks: [],
+    backgroundTasks: [
+      [
+        "task-1",
+        {
+          agentType: "general",
+          description: "search the repo",
+          startedAt: 0,
+          toolUses: 2,
+          activity: { phase: "tool", label: "Running…" },
+          recentCalls: [{ id: "c1", name: "grep", detail: "pattern", status: "in_progress" }],
+        },
+      ],
+      ["task-2", { agentType: "reviewer", startedAt: 0, toolUses: 0, recentCalls: [] }],
+    ],
+    foregroundCount: 0,
+    backgroundCount: 2,
+    width: 120,
+    now: 0,
+  });
+
+  assert.equal(
+    lines[0],
+    "- general — search the repo · task-1 · Running… • 0ms · 2 tools",
+    "the description follows the agent kind exactly like the foreground header",
+  );
+  assert.equal(lines[1], "  └─  ⠋ grep  pattern", "the latest tool call keeps its row");
+  assert.equal(lines[2], "- reviewer · task-2 · 0ms · 0 tools", "a task without a description keeps its indicators and no dangling dash");
+  assert.equal(lines[3], "  └─  ⠋ waiting", "the waiting placeholder keeps its row");
+  assert.equal(lines.length, 5, "no additional background rows: one header and one detail row per task, then the trailing blank");
+});
+
+test("a long background description is truncated to the width like every other row", () => {
+  const width = 40;
+  const lines = renderTaskWidget({
+    foregroundTasks: [],
+    backgroundTasks: [
+      [
+        "abcd-1234",
+        { agentType: "general", description: "x".repeat(200), startedAt: 0, toolUses: 0, recentCalls: [] },
+      ],
+    ],
+    foregroundCount: 0,
+    backgroundCount: 1,
+    width,
+    now: 0,
+    theme: ansiTheme,
+  });
+
+  assert.ok(stripAnsi(lines[0] ?? "").startsWith("- general — xxxx"), "the description starts on the header row");
+  for (const line of lines) {
+    assert.ok(visibleWidth(line) <= width, `row too wide: ${visibleWidth(line)} > ${width}`);
+  }
 });

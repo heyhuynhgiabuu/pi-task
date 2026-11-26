@@ -136,7 +136,7 @@ export interface RexViewHost {
   isOwnerAlive?(pid: number | undefined): boolean;
 }
 
-/** Header, transcript pane, footer; fed by `update` with each new snapshot. */
+/** Header, transcript pane, footer; fed by `update` with each new snapshot. Closes itself through the host once the snapshot is terminal. */
 export class RexViewComponent implements Component {
   /** Page and arrow keys belong to this component, not to the alt-screen's own scrolling. */
   readonly capturesViewportInput = true;
@@ -159,11 +159,13 @@ export class RexViewComponent implements Component {
       outputPad: 1,
     });
     this.refreshOwner();
+    this.closeIfSettled();
   }
 
   update(snapshot: LiveTranscriptSnapshot): void {
     this.snapshot = snapshot;
     this.refreshOwner();
+    this.closeIfSettled();
   }
 
   /** Re-checks whether the parent Pi is alive and reports the resulting state. */
@@ -172,6 +174,16 @@ export class RexViewComponent implements Component {
     this.parentAlive = isAlive(this.snapshot.ownerPid);
     this.reportStatus();
     this.host.tui.requestRender();
+  }
+
+  /**
+   * A terminal outcome ends the mirror through the host's close, the same path
+   * as `q`, so the Rex pane goes without a key press. Only the snapshot's status
+   * decides: a parent that exited while the task still reads `running` keeps the
+   * pane open with its warning, since the transcript may still be updating.
+   */
+  private closeIfSettled(): void {
+    if (isTerminalStatus(this.snapshot.status)) this.host.onClose();
   }
 
   private reportStatus(): void {
@@ -256,8 +268,10 @@ async function loadTheme(): Promise<Theme> {
 /**
  * Takes over the terminal and keeps following the snapshot. Resolves once the
  * screen is up; everything that can fail happens before that, so the caller can
- * still fall back to the text log. The pane stays open after the task ends
- * until the user closes it.
+ * still fall back to the text log. The pane closes by itself when the snapshot
+ * reaches a terminal outcome, at the first read or on a later update; `q`
+ * closes it earlier. The process then exits, which closes the Rex pane (the
+ * launcher never asks Rex to keep it open).
  */
 export async function runTuiViewer(snapshotPath: string): Promise<void> {
   const theme = await loadTheme();
@@ -288,20 +302,33 @@ export async function runTuiViewer(snapshotPath: string): Promise<void> {
   // caller can fall back to the text log on a usable terminal.
   try {
     tui.start();
-    follower = followSnapshotFile(snapshotPath, (snapshot) => {
+    follower = followSnapshotFile(snapshotPath, (snapshot, stop) => {
       if (view) {
         view.update(snapshot);
-        return;
+      } else {
+        view = new RexViewComponent({ tui, theme, onClose: close }, snapshot);
+        // A first snapshot that is already terminal closes inside the constructor,
+        // while this view is not yet assigned for `close` to dispose and not yet
+        // attached: it is released here and nothing is added to the stopped TUI.
+        if (closed) {
+          view.dispose();
+        } else {
+          tui.addChild(view);
+          tui.setFocus(view);
+        }
       }
-      view = new RexViewComponent({ tui, theme, onClose: close }, snapshot);
-      tui.addChild(view);
-      tui.setFocus(view);
+      // The first read runs before `followSnapshotFile` returns, so `close`
+      // cannot reach the follower through its variable there; its own `stop`
+      // ends it at once, before any watcher or poll timer exists.
+      if (closed) stop();
     });
   } catch (error) {
     follower?.stop();
     tui.stop();
     throw error;
   }
+  // Closed by the first read: nothing is left to check or signal.
+  if (closed) return;
   ownerTimer = setInterval(() => view?.refreshOwner(), OWNER_CHECK_MS);
   process.on("SIGTERM", close);
   process.on("SIGHUP", close);

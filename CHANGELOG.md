@@ -6,6 +6,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-11-26
+
+### Changed
+
+- Rex transcript panes close automatically when the durable task ends; `q` still closes early.
+- The task widget starts foreground rows one column farther left and includes background task
+  descriptions alongside the agent names.
+- Durable child `/model` and `/thinking` notices clarify that already-prepared requests keep
+  their previous settings.
+
+### Fixed
+
+- Clicking a background task result's title in Pi fullscreen expands or collapses that result.
+
 ## [0.17.0] - 2026-11-25
 
 ### Added

@@ -2453,7 +2453,12 @@ export async function executeDurableChildBuiltinCommand(
       if (!configured) {
         return failure(`Durable task ${taskId} settled before the child model change; its transcript is read-only.`);
       }
-      return info(`Child model set to ${modelRef.provider}/${modelRef.modelId}.`);
+      // The mutation lands in the stored agent config; pi-durable reads
+      // model/thinkingLevel at each request's prepare phase, so a request
+      // already past prepare keeps the options it was prepared with.
+      return info(
+        `Child model saved: ${modelRef.provider}/${modelRef.modelId}. It is used for the child's next request, not the one already prepared.`,
+      );
     }
 
     if (command.name === "thinking") {
@@ -2488,7 +2493,9 @@ export async function executeDurableChildBuiltinCommand(
       if (!configured) {
         return failure(`Durable task ${taskId} settled before the thinking-level change; its transcript is read-only.`);
       }
-      return info(`Child thinking level set to ${level}.`);
+      return info(
+        `Child thinking level saved: ${level}. It is used for the child's next request, not the one already prepared.`,
+      );
     }
 
     if (command.name === "session") {

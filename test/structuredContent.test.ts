@@ -168,7 +168,25 @@ test("the wrapper forwards every execute argument", async () => {
 
 test("the declared schema accepts the shapes execute builds", () => {
   const validator = compile(taskResultOutputSchema());
-  for (const shape of [receipt, report, failure, comparison, durableDone]) {
+  const durableLockFailure = {
+    details: { phase: "failed", execution_phase: "failed", status: "unknown", error: "store_locked" },
+  };
+  const foregroundTimeout = {
+    details: { phase: "timeout", execution_phase: "timeout", status: "timeout" },
+  };
+  const foregroundCancelled = {
+    details: { phase: "cancelled", execution_phase: "cancelled", status: "cancelled" },
+  };
+  for (const shape of [
+    receipt,
+    report,
+    failure,
+    comparison,
+    durableDone,
+    durableLockFailure,
+    foregroundTimeout,
+    foregroundCancelled,
+  ]) {
     assert.equal(
       validator.check(shape.details),
       true,

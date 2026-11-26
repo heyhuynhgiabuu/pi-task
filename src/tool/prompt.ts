@@ -14,8 +14,6 @@ export interface TaskHandoffOptions {
 
 export interface BuildTaskPromptOptions extends TaskHandoffOptions {
   description: string;
-  agentName: string;
-  agentSource: string;
   cwd: string;
 }
 
@@ -40,55 +38,40 @@ This task-specific message is the complete handoff from the parent agent. The pa
 - Honor read-only or no-side-effect constraints in the instructions; verification must not violate them.`;
 
 function renderParentHandoff(options: TaskHandoffOptions): string[] {
-  const parentContext = options.parentContext?.trim() || "(none supplied)";
+  const sections: string[] = [];
+  const parentContext = options.parentContext?.trim();
+  if (parentContext) {
+    sections.push(`## Parent context\n${parentContext}`);
+  }
   const proposedChanges = (options.proposedChanges ?? [])
     .map((change) => change.trim())
     .filter(Boolean);
-
-  return [
-    "## Parent context",
-    parentContext,
-    "",
-    "## Proposed changes",
-    proposedChanges.length > 0
-      ? proposedChanges.map((change) => `- ${change}`).join("\n")
-      : "(none supplied)",
-  ];
-}
-
-function renderResults(results: string | undefined): string[] {
-  const section = results?.trim();
-  return section ? [section, ""] : [];
+  if (proposedChanges.length > 0) {
+    sections.push(`## Proposed changes\n${proposedChanges.map((change) => `- ${change}`).join("\n")}`);
+  }
+  return sections;
 }
 
 export function buildTaskFollowUpPrompt(options: TaskHandoffOptions): string {
   return [
     options.prompt,
-    "",
     ...renderParentHandoff(options),
-    "",
-    ...renderResults(options.results),
-    TASK_HANDOFF_INTEGRITY,
-  ].join("\n");
+    options.results?.trim(),
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }
 
 export function buildTaskPrompt(options: BuildTaskPromptOptions): string {
   return [
     `# Task: ${options.description}`,
-    "",
-    "## Agent",
-    `${options.agentName} (${options.agentSource})`,
-    "",
-    "## Instructions",
-    options.prompt,
-    "",
+    `## Instructions\n${options.prompt}`,
     ...renderParentHandoff(options),
-    "",
     TASK_WORKSPACE_SCOPE(options.cwd),
-    "",
     TASK_HANDOFF_INTEGRITY,
-    "",
-    ...renderResults(options.results),
+    options.results?.trim(),
     TASK_PROMPT_INSTRUCTIONS,
-  ].join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }

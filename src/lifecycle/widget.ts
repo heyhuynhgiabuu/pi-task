@@ -202,7 +202,7 @@ export interface TaskWidgetControllerDeps {
   /**
    * Test seam for "this Pi runs inside an interactive Rex", which decides
    * whether a foreground durable run waits for its mirror or shows the Pi view
-   * at once. Defaults to the Rex session and block the launcher requires.
+   * at once. Defaults to checking whether `REX_BLOCK` is set.
    */
   isInteractiveRex?: () => boolean;
   /** Clock for linger/ordering logic (test seam; defaults to Date.now). */
@@ -294,7 +294,7 @@ interface FinishedTask {
 }
 
 function interactiveRexAvailable(): boolean {
-  return !!((process.env.REX_SESSION ?? "").trim() && (process.env.REX_BLOCK ?? "").trim());
+  return Boolean((process.env.REX_BLOCK ?? "").trim());
 }
 
 export function createTaskWidgetController(

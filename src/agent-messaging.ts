@@ -105,15 +105,11 @@ export const agentsToolDescription = [
 ].join(" ");
 
 export function agentsParametersSchema() {
-  // `open` keeps the additional-properties-permitting object the TypeBox schema
-  // this replaced emitted.
   return obj({
-    action: oneOf(["list", "send", "read"], {
-      description: "list | send | read",
-    }),
+    action: oneOf(["list", "send", "read"]),
     agent: opt(str({ description: "Target: `main` or a subagent task id (send/read)." })),
     message: opt(str({ description: "Text to deliver (send)." })),
-  }, { open: true });
+  });
 }
 
 /** What a durable subagent can do: offered tool names and working directory. */

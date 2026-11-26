@@ -22,8 +22,6 @@ process.on("exit", () => {
   const t = "buildTaskPrompt workspace scope";
   const prompt = buildTaskPrompt({
     description: "smoke",
-    agentName: "explore",
-    agentSource: "project",
     prompt: "Find foo",
     cwd: "/tmp/parent-cwd",
   });
@@ -32,15 +30,15 @@ process.on("exit", () => {
   assert.ok(prompt.includes("Default workspace: /tmp/parent-cwd."), t + " default workspace");
   assert.ok(!prompt.includes("parent Pi session cwd"), t + " does not mislabel task cwd");
   assert.ok(prompt.includes("Do not search sibling repositories"), t + " boundary");
-  assert.ok(prompt.includes("explore"), t + " explore rule");
+  assert.ok(!prompt.includes("## Agent"), t + " omits internal agent metadata");
+  assert.ok(!prompt.includes("## Parent context"), t + " omits empty parent context");
+  assert.ok(!prompt.includes("## Proposed changes"), t + " omits empty proposed changes");
 }
 
 {
   const t = "task prompt makes context handoff explicit";
   const prompt = buildTaskPrompt({
     description: "audit",
-    agentName: "reviewer",
-    agentSource: "bundled",
     prompt: "Goal: audit the manifest.",
     parentContext: "The parent found naming drift in manifest and session records.",
     proposedChanges: [
@@ -69,6 +67,10 @@ process.on("exit", () => {
   });
   assert.match(followUp, /retry identity requirement/);
   assert.match(followUp, /abort closure id: preserve the id/);
+  assert.doesNotMatch(followUp, /## Handoff integrity/);
+
+  const minimalFollowUp = buildTaskFollowUpPrompt({ prompt: "Check line 42." });
+  assert.equal(minimalFollowUp, "Check line 42.");
 }
 
 {

@@ -1040,7 +1040,7 @@ export function buildTaskToolDescription(agents: AgentConfig[]): string {
     proactive.length > 0
       ? [
           "",
-          "PROACTIVE — delegate via task without user @mention when an agent's description matches (see parent APPEND_SYSTEM.md):",
+          "PROACTIVE — delegate via task without user @mention when an agent's description matches:",
           ...proactive.map((a) => `- ${a.name}`),
         ].join("\n")
       : "";
@@ -1067,9 +1067,9 @@ export function formatAgentList(agents: AgentConfig[]): string {
 }
 
 /** The PROACTIVE block header already marks proactive agents; drop the
- * per-description "PROACTIVE — " prefix when rendering the agents list. */
+ * per-description "PROACTIVE — " / "PROACTIVE - " prefix when rendering the agents list. */
 function stripProactivePrefix(description: string): string {
-  return description.replace(/^PROACTIVE —\s*/, "");
+  return description.replace(/^PROACTIVE\s*[-—]\s*/, "");
 }
 
 // ─── Sub-agent CLI args ─────────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-import { arr, bool, num, obj, opt, str, type Static } from "@earendil-works/pi-schema";
+import { arr, bool, num, obj, oneOf, opt, str, type Static } from "@earendil-works/pi-schema";
 import { PI_THINKING_LEVELS } from "../thinking.js";
 
 /**
@@ -7,8 +7,9 @@ import { PI_THINKING_LEVELS } from "../thinking.js";
  * The handoff contract lives here rather than in the tool description: Pi
  * validates tool arguments against `parameters` before `execute` and reports
  * the missing property by name, so `required` is enforced rather than stated.
- * `parseTaskStartRequest` covers what the schema cannot express — a stale
- * `operation`, blank strings, thinking values, the reviewer cross-field requirement.
+ * `parseTaskStartRequest` covers what the schema cannot express — blank
+ * strings and the reviewer cross-field requirement (plus direct non-schema
+ * callers).
  *
  * Deliberately absent: `operation` (start and resume are told apart by
  * `task_id`; status and cancel belong to `/task`) and `fast` (a session or
@@ -21,7 +22,6 @@ import { PI_THINKING_LEVELS } from "../thinking.js";
 export function taskParametersSchema() {
   // Keep a single object at the schema root. Pi's Anthropic adapter reads
   // root-level properties/required and does not preserve a root anyOf union.
-  // `open` keeps the open-object behaviour of the TypeBox schema this replaced.
   return obj({
     agent_type: str({
       description: "Specialist agent type for this task",
@@ -33,8 +33,8 @@ export function taskParametersSchema() {
       description:
         "Handoff: goal, scope, non-goals, write policy, acceptance, checks. Parent-only reasoning: parent_context/proposed_changes.",
     }),
-    thinking: opt(str({
-      description: `Thinking; frontmatter wins: ${PI_THINKING_LEVELS.join("|")}`,
+    thinking: opt(oneOf(PI_THINKING_LEVELS, {
+      description: "Thinking level; agent frontmatter wins",
     })),
     task_id: opt(
       str({
@@ -68,8 +68,9 @@ export function taskParametersSchema() {
       }),
     ),
     timeout_minutes: opt(num({
+      exclusiveMinimum: 0,
       description:
-        "Per-task wall-clock ceiling in minutes; overrides the agent's timeout_minutes and the global PI_TASK_HARD_TIMEOUT_MINUTES ceiling (applies to durable tasks and background terminal tasks; terminal-foreground and SDK runs keep the global ceiling)",
+        "Per-task wall-clock ceiling in minutes (overrides agent/global ceiling for durable and background terminal tasks)",
     })),
     cwd: opt(str({
       description: "Absolute existing directory; default caller, resume uses stored cwd. No worktree creation.",
@@ -85,7 +86,7 @@ export function taskParametersSchema() {
         default: true,
       }),
     ),
-  }, { open: true });
+  });
 }
 
 export type TaskToolParameters = Static<ReturnType<typeof taskParametersSchema>>;

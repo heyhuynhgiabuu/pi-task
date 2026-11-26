@@ -208,19 +208,21 @@ export class TaskPanelEditor extends CustomEditor {
   }
 
   override render(width: number): string[] {
-    const lines = super.render(width);
+    const base = super.render(width);
     const viewedId = this.host.panelState().viewTaskId;
-    if (viewedId && lines.length > 0) {
+    if (viewedId && base.length > 0) {
       // Label the input border with the viewed task so it is clear where
       // typed messages go (pi-subtask's @subtask-name marker). The border is
       // ANSI-colored, so truncation must be visible-width aware (raw slice
       // would split escape sequences and can over-width pi's renderer).
       const label = ` @${viewedId} `;
       const labelWidth = visibleWidth(label);
-      if (visibleWidth(lines[0]!) >= labelWidth + 4) {
+      if (visibleWidth(base[0]!) >= labelWidth + 4) {
+        const lines = [...base];
         lines[0] = truncateToWidth(lines[0]!, width - labelWidth - 2, "") + label + "──";
+        return lines;
       }
     }
-    return lines;
+    return [...base];
   }
 }

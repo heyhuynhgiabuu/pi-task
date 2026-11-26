@@ -109,8 +109,6 @@ test("injected results sit at the end of the prompt, before the closing instruct
   ]);
   const prompt = buildTaskPrompt({
     description: "fan-in",
-    agentName: "general",
-    agentSource: "bundled",
     prompt: "Implement the change from these findings.",
     cwd: "/repo",
     results: injection,
@@ -139,8 +137,6 @@ test("injected results sit at the end of the prompt, before the closing instruct
 test("a prompt without results_from carries no results section", () => {
   const prompt = buildTaskPrompt({
     description: "plain",
-    agentName: "general",
-    agentSource: "bundled",
     prompt: "Do the work.",
     cwd: "/repo",
   });

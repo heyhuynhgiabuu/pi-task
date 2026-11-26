@@ -117,8 +117,6 @@ export async function prepareTaskExecution({
   const isBackground = taskParams.background ?? TASK_BACKGROUND_DEFAULT;
   const promptContent = buildTaskPrompt({
     description: descText,
-    agentName: agent.name,
-    agentSource: agent.source,
     prompt: taskParams.prompt,
     parentContext: taskParams.parent_context,
     proposedChanges: taskParams.proposed_changes,

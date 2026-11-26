@@ -134,7 +134,7 @@ export class TaskOverlay implements Component {
   }
 
   render(width: number): string[] {
-    return this.box.render(width);
+    return [...this.box.render(width)];
   }
 
   /** Component contract: the body rebuilds from live rows each render. */

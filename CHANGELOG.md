@@ -6,6 +6,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.18.0] - 2026-11-26
+
+### Changed
+
+- **Tighter tool schemas:** `task` and `agents` input schemas are now closed objects (`additionalProperties: false`), `task.thinking` is enforced as a JSON Schema `enum` (narrowing `TaskToolParameters["thinking"]` to `PiThinkingLevel | undefined`), `task.timeout_minutes` enforces `exclusiveMinimum: 0`, and `taskResultOutputSchema` uses enums for `phase` and `execution_phase`.
+- **Automatic Rex mirrors always open a new window:** `launchAutoRexMirror` now opens each durable task transcript in a new unfocused Rex window (`rex run --focus=false`) instead of splitting the parent Pi window or managing overflow splits. Manual `o` (`launchRexMirror`) still splits beside Pi.
+- **Leaner child prompt templates:** Removed the internal `## Agent` (`agentName (agentSource)`) block from `buildTaskPrompt`, omitted empty `## Parent context` and `## Proposed changes` sections, and stopped repeating `## Handoff integrity` on follow-up turns.
+
+### Fixed
+
+- **Rex detection on current Rex versions:** Interactive Rex detection and mirror launching now require `REX_BLOCK` rather than both `REX_SESSION` and `REX_BLOCK`, resolving `session_id` via `rex whoami --json` when `REX_SESSION` is unset.
+- **Duplicate `PROACTIVE` prefix in tool roster:** `stripProactivePrefix` now strips both em-dash (`PROACTIVE — `) and hyphen (`PROACTIVE - `) prefixes, and removed the stale `(see parent APPEND_SYSTEM.md)` reference from the roster header.
+- **Pi 1.6.x render safety:** `TaskEditor`, `TaskOverlay`, and `TaskTranscriptOverlay` now copy render arrays instead of mutating `super.render()` output in place, keeping compatibility with Pi 1.6.x's `readonly string[]` cached `Container` renders while preserving Pi 1.5.x compatibility.
+
 ## [0.17.1] - 2026-11-26
 
 ### Changed

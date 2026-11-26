@@ -190,9 +190,9 @@ function flattenToSurface(line: string, bgStart: string, allowedBgs: readonly st
 }
 
 /** Crop oversized editor output around its hardware-cursor marker. */
-function fitEditorViewport(lines: string[], maxRows: number): string[] {
+function fitEditorViewport(lines: readonly string[], maxRows: number): string[] {
   if (maxRows <= 0) return [];
-  if (lines.length <= maxRows) return lines;
+  if (lines.length <= maxRows) return [...lines];
 
   const cursorRow = lines.findIndex((line) => line.includes(CURSOR_MARKER));
   const maxStart = lines.length - maxRows;
@@ -204,7 +204,7 @@ function fitEditorViewport(lines: string[], maxRows: number): string[] {
 }
 
 /** Fill the complete overlay viewport while keeping the editor's cursor row visible. */
-function fillEditorViewport(lines: string[], maxRows: number): string[] {
+function fillEditorViewport(lines: readonly string[], maxRows: number): string[] {
   const visible = fitEditorViewport(lines, maxRows);
   return visible.length >= maxRows
     ? visible
@@ -818,7 +818,7 @@ export class TaskTranscriptOverlay implements Component, Focusable {
     if (this.ui && getCapabilities().images === "kitty" && typeof this.ui.terminal?.write === "function") {
       this.ui.terminal.write(deleteAllKittyImages());
     }
-    return this.box.render(width);
+    return [...this.box.render(width)];
   }
 
   private resolveOverlayBackground(): string {

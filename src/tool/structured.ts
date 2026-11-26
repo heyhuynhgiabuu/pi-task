@@ -1,4 +1,4 @@
-import { arr, bool, map, num, obj, opt, str, union } from "@earendil-works/pi-schema";
+import { arr, bool, map, num, obj, oneOf, opt, str, union } from "@earendil-works/pi-schema";
 
 /** One `pi.usage` bucket of a durable child conversation, as `details.usage` reports it. */
 const durableUsageTotals = obj({
@@ -24,10 +24,12 @@ export function taskResultOutputSchema() {
   return obj({
     // Lifecycle and identity.
     phase: opt(
-      str({ description: "Lifecycle phase: running | done | failed" }),
+      oneOf(["running", "done", "cancelled", "timeout", "failed"], { description: "Lifecycle phase" }),
     ),
     execution_phase: opt(
-      str({ description: "Compare settlement: done | partial" }),
+      oneOf(["done", "partial", "cancelled", "timeout", "failed"], {
+        description: "Execution or compare settlement phase",
+      }),
     ),
     task_id: opt(
       str({
@@ -49,7 +51,7 @@ export function taskResultOutputSchema() {
     // Outcome.
     status: opt(
       str({
-        description: "Normalized status: running | done | cancelled | aborted | failed | timeout",
+        description: "Task or reported status (e.g. running, done, success, failure, blocked, partial, cancelled, aborted, failed, timeout)",
       }),
     ),
     reported_status: opt(str()),

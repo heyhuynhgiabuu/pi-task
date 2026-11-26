@@ -1253,6 +1253,7 @@ import {
   ];
   const d = buildTaskToolDescription(agents);
   assert.ok(d.includes("PROACTIVE — delegate via task"), t + " has proactive header");
+  assert.ok(!d.includes("APPEND_SYSTEM.md"), t + " no stale APPEND_SYSTEM reference");
   assert.ok(d.includes("- explore"), t + " lists the proactive agent name");
   const proactiveTail = d.slice(d.indexOf("PROACTIVE —"));
   assert.ok(
@@ -1263,6 +1264,19 @@ import {
     d.includes("explore: Read-only explorer"),
     t + " descriptions still appear once in the agents list",
   );
+
+  // Hyphenated "PROACTIVE - " prefixes (common in user agent files) are stripped too.
+  const hyphenDesc = buildTaskToolDescription([
+    {
+      name: "scout",
+      description: "PROACTIVE - External web docs",
+      body: "",
+      source: "user",
+      path: "/c",
+    },
+  ]);
+  assert.ok(hyphenDesc.includes("scout: External web docs"), t + " strips hyphen PROACTIVE prefix");
+  assert.ok(!hyphenDesc.includes("scout: PROACTIVE"), t + " does not keep hyphen PROACTIVE prefix");
 }
 
 // ─── Integration: discoverAgents with fixture ────────────────────────────────

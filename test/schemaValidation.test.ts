@@ -16,6 +16,7 @@ import test from "node:test";
 import { compile } from "@earendil-works/pi-schema";
 
 import { taskParametersSchema } from "../src/tool/schema.js";
+import { PI_THINKING_LEVELS } from "../src/thinking.js";
 
 const validator = compile(taskParametersSchema());
 
@@ -61,24 +62,25 @@ test("the handoff fields are required by the schema Pi enforces", () => {
 });
 
 test("a stale control payload cannot pass the schema as a start request", () => {
-	// `operation` is no longer a property. A control call that still carries it
-	// fails on the required fields, and one that also carries them is rejected
-	// by parseTaskStartRequest, which is the layer that still knows the field.
+	// `operation` is no longer a property, and the closed input schema rejects
+	// unknown keys alongside missing required fields.
 	const bare = validate({ operation: "status", task_id: "task-1" });
 	assert.equal(bare.accepted, false, "a control-only payload is not a start request");
-	assert.deepEqual(bare.errors.slice().sort(), ["agent_type", "description", "prompt"]);
+	assert.deepEqual(bare.errors.slice().sort(), ["agent_type", "description", "operation", "prompt"]);
 });
 
 test("the schema is the only home for the handoff contract", () => {
 	const schema = taskParametersSchema() as unknown as {
-		properties: Record<string, { description?: string }>;
+		properties: Record<string, { description?: string; enum?: readonly string[]; exclusiveMinimum?: number }>;
 		required?: string[];
+		additionalProperties?: boolean;
 		anyOf?: unknown;
 	};
 
 	// Pi's Anthropic adapter reads root-level properties/required and does not
 	// preserve a root anyOf union, so the schema has to stay flat.
 	assert.equal("anyOf" in schema, false, "the schema stays a flat object");
+	assert.equal(schema.additionalProperties, false, "input schema rejects unknown fields");
 	assert.equal("operation" in schema.properties, false, "control is not a tool operation");
 
 	// Each field description carries its own rule, so the tool description does
@@ -89,7 +91,8 @@ test("the schema is the only home for the handoff contract", () => {
 	assert.match(schema.properties.proposed_changes?.description ?? "", /required non-empty for reviewer tasks/i, "proposed_changes names its reviewer requirement");
 	assert.match(schema.properties.proposed_changes?.description ?? "", /no design changes/i, "reviewer audits without changes have a valid handoff hint");
 	assert.match(schema.properties.thinking?.description ?? "", /frontmatter wins/i, "thinking states precedence");
-	assert.match(schema.properties.thinking?.description ?? "", /off\|minimal\|low\|medium\|high\|xhigh\|max/i, "thinking lists Pi's levels");
+	assert.deepEqual(schema.properties.thinking?.enum, PI_THINKING_LEVELS, "thinking enforces Pi's levels as an enum");
+	assert.equal(schema.properties.timeout_minutes?.exclusiveMinimum, 0, "timeout_minutes must be positive");
 	assert.match(schema.properties.cwd?.description ?? "", /absolute existing directory/i, "cwd states its validation");
 	assert.match(schema.properties.cwd?.description ?? "", /no worktree creation/i, "cwd states the worktree guarantee");
 });
